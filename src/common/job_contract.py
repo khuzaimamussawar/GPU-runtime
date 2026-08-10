@@ -7,6 +7,7 @@ from typing import Any
 @dataclass
 class H3Job:
     job_id: str
+    project_id: str
     task_family: str
     mode: str
     prompt: str
@@ -23,8 +24,18 @@ class H3Job:
 
 
 def normalize_job(payload: dict[str, Any]) -> H3Job:
+    job_id = payload.get("jobId") or payload.get("job_id") or payload.get("id")
+    if not job_id:
+        raise ValueError("H3 job payload requires jobId")
+    project_id = (
+        payload.get("projectId")
+        or payload.get("project_id")
+        or payload.get("project")
+        or "unknown-project"
+    )
     return H3Job(
-        job_id=str(payload["jobId"]),
+        job_id=str(job_id),
+        project_id=str(project_id),
         task_family=str(payload["taskFamily"]),
         mode=str(payload["mode"]),
         prompt=str(payload.get("prompt", "")),

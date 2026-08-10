@@ -1,5 +1,10 @@
-from src.common.not_implemented import fail_until_comfy_runtime_is_wired
+from src.common.h3_runtime import run_h3_job
+from src.common.novita_server import serve
+
+
+def handler(payload):
+    return run_h3_job(payload, "h3_ref2va", "novita-ref2va")
 
 
 if __name__ == "__main__":
-    fail_until_comfy_runtime_is_wired("novita-ref2va")
+    serve(handler, "novita-ref2va")

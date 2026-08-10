@@ -1,5 +1,13 @@
-from src.common.not_implemented import fail_until_comfy_runtime_is_wired
+from src.common.h3_runtime import run_h3_job
+
+
+def handler(job):
+    payload = dict(job.get("input") or {})
+    payload.setdefault("jobId", job.get("id"))
+    return run_h3_job(payload, "h3_fl2va", "runpod-fl2va")
 
 
 if __name__ == "__main__":
-    fail_until_comfy_runtime_is_wired("runpod-fl2va")
+    import runpod
+
+    runpod.serverless.start({"handler": handler})

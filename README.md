@@ -59,6 +59,15 @@ fl2va-base,fl2va-workflow,fl2va-loras,runpod-fl2va,novita-fl2va
 ref2va-base,ref2va-workflow,ref2va-loras,runpod-ref2va,novita-ref2va
 ```
 
+After `qwen-all` exists, this builds the four deployable endpoint images in one server boot:
+
+```text
+target: smoke
+targets_csv: fl2va-base,fl2va-workflow,fl2va-loras,runpod-fl2va,novita-fl2va,ref2va-base,ref2va-workflow,ref2va-loras,runpod-ref2va,novita-ref2va
+server_type: ccx33
+delete_server_after_success: true
+```
+
 The remote script removes the previous checkout before cloning the current repo state, but it keeps Docker layer cache/images on the same builder during that workflow run. That is intentional: it avoids redownloading/rebuilding parent layers.
 
 `delete_server_after_success: false` keeps the Hetzner server alive after success. Use it only when you are watching the clock and will delete the server manually, because billing continues until deletion.
@@ -143,3 +152,93 @@ novita-ref2va
 ```
 
 `qwen-int8` remains available as an optional diagnostic target. The final 4-image deployment path uses `qwen-all` so each runtime can switch between NVFP4 and INT8 from the request payload.
+
+## Runtime Handler Contract
+
+RunPod uses the normal serverless job `input` object. Novita uses an HTTP JSON body with the same shape.
+
+Minimum FL2VA I2V payload:
+
+```json
+{
+  "jobId": "job_123",
+  "projectId": "proj_123",
+  "taskFamily": "h3_fl2va",
+  "mode": "i2v",
+  "prompt": "Provider-facing video prompt.",
+  "width": 1056,
+  "height": 608,
+  "durationSeconds": 4.2,
+  "fps": 24,
+  "settings": {
+    "textEncoder": "nvfp4",
+    "steps": 20,
+    "sampler": "uni_pc",
+    "scheduler": "simple",
+    "seed": 12345,
+    "spectrum": {
+      "enabled": false
+    }
+  },
+  "inputs": {
+    "firstFrame": {
+      "objectKey": "projects/proj_123/scene_images/original/scene_001.png"
+    },
+    "outputPrefix": "projects/proj_123/scene_videos"
+  }
+}
+```
+
+Minimum Ref2VA payload:
+
+```json
+{
+  "jobId": "job_456",
+  "projectId": "proj_123",
+  "taskFamily": "h3_ref2va",
+  "mode": "r2v",
+  "prompt": "Use these ordered references as visual guidance.",
+  "width": 1056,
+  "height": 608,
+  "durationSeconds": 6,
+  "fps": 24,
+  "settings": {
+    "textEncoder": "int8",
+    "referenceFit": "max",
+    "steps": 20,
+    "sageAttention": true
+  },
+  "inputs": {
+    "referenceImages": [
+      {"objectKey": "projects/proj_123/scene_images/original/scene_003.png"},
+      {"objectKey": "projects/proj_123/scene_images/original/scene_004.png"}
+    ],
+    "referenceAudio": {
+      "objectKey": "temp/video-audio/job_456.wav"
+    },
+    "outputPrefix": "projects/proj_123/scene_videos"
+  }
+}
+```
+
+Returned output fields:
+
+```json
+{
+  "ok": true,
+  "outputs": {
+    "master": {
+      "objectKey": "projects/proj_123/scene_videos/original/job_456_h265.mp4",
+      "url": "https://...",
+      "uploaded": true
+    },
+    "preview": {
+      "objectKey": "projects/proj_123/scene_videos/preview/job_456_h264_preview.mp4",
+      "url": "https://...",
+      "uploaded": true
+    }
+  }
+}
+```
+
+SceneBuilder should save object keys in D1 timeline/job rows and derive public URLs only when rendering UI previews.

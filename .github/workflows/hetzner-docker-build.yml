@@ -1,4 +1,5 @@
 name: Hetzner Docker Build
+run-name: Build ${{ inputs.targets_csv != '' && inputs.targets_csv || inputs.target }} on ${{ inputs.server_type }}
 
 on:
   workflow_dispatch:
