@@ -53,12 +53,21 @@ GH_FH_TOKEN_MM_H3_SERVERLESS
 ## Runtime Stack Target
 
 ```text
-CUDA: 13.0
+CUDA: 13.0 / cu130
+Python: 3.13 target, 3.12 fallback only if a required node fails reproducibly
 PyTorch: 2.13
 Attention: SageAttention 2.2
 ```
 
-Do not switch to CUDA 13.2 unless CUDA 13.0 fails reproducibly with the required PyTorch/SageAttention/Comfy nodes.
+Do not switch to CUDA 13.2 unless CUDA 13.0/cu130 fails reproducibly with the required PyTorch/SageAttention/Comfy nodes.
+
+The first heavy build should prove the base image before downloading H3 weights:
+
+```text
+target: base
+```
+
+If the selected NVIDIA CUDA image tag is unavailable, change only `CUDA_IMAGE` in `docker/Dockerfile.base` to another CUDA 13.0 cu130-compatible tag and rerun the base build. Do not jump to CUDA 13.2 for a tag-name issue.
 
 ## Image Repos
 

@@ -2,32 +2,43 @@ ARG CUDA_IMAGE=nvidia/cuda:13.0.0-cudnn-devel-ubuntu24.04
 FROM ${CUDA_IMAGE}
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG PYTHON_VERSION=3.12
+ARG PYTHON_VERSION=3.13
+ARG PYTHON_BIN=python3.13
 ARG PYTORCH_VERSION=2.13.0
 ARG PYTORCH_CUDA_INDEX=https://download.pytorch.org/whl/cu130
 
 LABEL org.opencontainers.image.title="minimax-h3-base"
 LABEL scene_builder.layer="base-cuda-pytorch-comfy"
-LABEL scene_builder.cuda="13.0"
+LABEL scene_builder.cuda="13.0/cu130"
+LABEL scene_builder.python="3.13"
 LABEL scene_builder.pytorch="2.13"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
     ca-certificates \
+    cmake \
     curl \
     ffmpeg \
     git \
     git-lfs \
-    python${PYTHON_VERSION} \
-    python3-pip \
-    python3-venv \
+    ninja-build \
+    software-properties-common \
     tini \
     wget \
+  && add-apt-repository -y ppa:deadsnakes/ppa \
+  && apt-get update && apt-get install -y --no-install-recommends \
+    python${PYTHON_VERSION} \
+    python${PYTHON_VERSION}-dev \
+    python${PYTHON_VERSION}-venv \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/scenebuilder-h3
 
-RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel
-RUN python3 -m pip install --no-cache-dir \
+RUN curl -sS https://bootstrap.pypa.io/get-pip.py | ${PYTHON_BIN}
+RUN ln -sf /usr/bin/${PYTHON_BIN} /usr/local/bin/python3
+
+RUN ${PYTHON_BIN} -m pip install --no-cache-dir --upgrade pip setuptools wheel
+RUN ${PYTHON_BIN} -m pip install --no-cache-dir \
     torch==${PYTORCH_VERSION} \
     torchvision \
     torchaudio \
@@ -37,10 +48,11 @@ RUN python3 -m pip install --no-cache-dir \
 RUN git clone --depth 1 https://github.com/comfyanonymous/ComfyUI.git /opt/ComfyUI
 
 WORKDIR /opt/ComfyUI
-RUN python3 -m pip install --no-cache-dir -r requirements.txt
+RUN ${PYTHON_BIN} -m pip install --no-cache-dir -r requirements.txt
 
 # Custom nodes are intentionally installed in this layer so handler/workflow changes do not rebuild them.
-# Pin commits once the local workflows are validated.
+# Pin commits once the local workflows are validated. SageAttention 2.2, EasyCache, Spectrum,
+# and required H3 helper nodes belong here after the first base smoke test is green.
 RUN mkdir -p /opt/ComfyUI/custom_nodes
 
 WORKDIR /opt/scenebuilder-h3
