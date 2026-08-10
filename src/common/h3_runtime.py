@@ -445,7 +445,8 @@ def encode_outputs(source_video: Path, job: H3Job) -> dict[str, Path]:
     output_dir = Path("/tmp/scenebuilder-h3") / safe_name(job.job_id)
     master = output_dir / f"{safe_name(job.job_id)}_h265.mp4"
     preview = output_dir / f"{safe_name(job.job_id)}_h264_preview.mp4"
-    preview_scale = "854:-2" if job.width >= job.height else "480:-2"
+    master_width, master_height = strict_export_size(job.width, job.height)
+    preview_width, preview_height = preview_export_size(job.width, job.height)
     subprocess.run(
         [
             "bash",
@@ -453,11 +454,33 @@ def encode_outputs(source_video: Path, job: H3Job) -> dict[str, Path]:
             str(source_video),
             str(master),
             str(preview),
-            preview_scale,
+            str(master_width),
+            str(master_height),
+            str(preview_width),
+            str(preview_height),
         ],
         check=True,
     )
     return {"master": master, "preview": preview}
+
+
+def strict_export_size(width: int, height: int) -> tuple[int, int]:
+    if width >= height:
+        strict_height = even_floor(width * 9 / 16)
+        return width, min(height, strict_height)
+    strict_width = even_floor(height * 9 / 16)
+    return min(width, strict_width), height
+
+
+def preview_export_size(width: int, height: int) -> tuple[int, int]:
+    if width >= height:
+        return 854, 480
+    return 480, 854
+
+
+def even_floor(value: float) -> int:
+    number = int(value)
+    return number if number % 2 == 0 else number - 1
 
 
 def upload_outputs(paths: dict[str, Path], job: H3Job) -> dict[str, Any]:

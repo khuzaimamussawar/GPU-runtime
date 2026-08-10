@@ -264,3 +264,31 @@ Normal users should see friendly labels such as `Match project frame`, `Fit full
 ```
 
 For keyframes/scene images, use `match`. For character, object, style, mood, or loose visual references, use `max` unless the user explicitly wants them framed as full video panels.
+
+## H3 Output Cropping Contract
+
+H3 can generate on model-friendly canvases such as `1280x736` or `736x1280`. These are generation canvases, not final delivery canvases.
+
+After generation:
+
+- master output is center-cropped to strict delivery aspect
+- preview output is center-cropped the same way, then scaled to exact preview size
+
+Current delivery rules:
+
+- landscape master: keep width, crop height to exact `16:9`
+- portrait master: keep height, crop width to exact `9:16`
+- landscape preview: `854x480`
+- portrait preview: `480x854`
+
+Examples:
+
+- generated `1280x736` -> master `1280x720` -> preview `854x480`
+- generated `1056x608` -> master `1056x594` -> preview `854x480`
+- generated `736x1280` -> master `720x1280` -> preview `480x854`
+
+This means:
+
+- H3 keeps its preferred generation resolution
+- exported video matches the real project display aspect exactly
+- preview thumbnails and timeline video cards stay visually consistent across SceneBuilder
