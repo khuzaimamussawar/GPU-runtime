@@ -13,5 +13,5 @@ RUN mkdir -p /opt/ComfyUI/models/clip
 RUN --mount=type=secret,id=hf_token python3 /opt/scenebuilder-h3/scripts/download_hf_file.py \
     --token-file /run/secrets/hf_token \
     --repo "${H3_HF_REPO}" \
-    --file "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors" \
+    --file "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors" \
     --out "/opt/ComfyUI/models/clip/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
