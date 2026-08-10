@@ -1,9 +1,8 @@
 # syntax=docker/dockerfile:1.7
 ARG REGISTRY_NAMESPACE
-ARG QWEN_VARIANT=nvfp4
 ARG IMAGE_TAG=latest
+FROM ${REGISTRY_NAMESPACE}/minimax-h3-qwen-all:${IMAGE_TAG}
 ARG H3_HF_REPO=Comfy-Org/MiniMax-H3
-FROM ${REGISTRY_NAMESPACE}/minimax-h3-qwen-${QWEN_VARIANT}:${IMAGE_TAG}
 
 LABEL org.opencontainers.image.title="minimax-h3-ref2va-base"
 LABEL scene_builder.layer="ref2va-model"

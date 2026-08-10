@@ -81,3 +81,33 @@ Final runtime images:
 ```
 
 Heavy layers are shared by Docker content digest where possible.
+
+## Option A Encoder Layout
+
+SceneBuilder uses 4 final endpoint images, not 8. Each final image contains both Qwen text encoders:
+
+```text
+qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors
+qwen3vl_32b_minimax_h3_int8_convrot.safetensors
+```
+
+The frontend sends the selected encoder, and the runtime handler swaps the Comfy `clip_name` field from the workflow manifest before inference.
+
+Build order:
+
+```text
+base
+qwen-all
+fl2va-base
+ref2va-base
+fl2va-workflow
+ref2va-workflow
+fl2va-loras
+ref2va-loras
+runpod-fl2va
+runpod-ref2va
+novita-fl2va
+novita-ref2va
+```
+
+`qwen-nvfp4` and `qwen-int8` remain available only as optional diagnostic targets. They are not used by the final 4-image deployment path.

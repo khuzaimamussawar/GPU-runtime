@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1.7
 ARG REGISTRY_NAMESPACE
 ARG IMAGE_TAG=latest
-ARG H3_HF_REPO=Comfy-Org/MiniMax-H3
 FROM ${REGISTRY_NAMESPACE}/minimax-h3-base:${IMAGE_TAG}
+ARG H3_HF_REPO=Comfy-Org/MiniMax-H3
 
 LABEL org.opencontainers.image.title="minimax-h3-qwen-int8"
 LABEL scene_builder.layer="qwen-int8"

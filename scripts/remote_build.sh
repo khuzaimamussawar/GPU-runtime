@@ -42,6 +42,7 @@ image_for_target() {
   case "$1" in
     smoke) echo "${REGISTRY_NAMESPACE}/minimax-h3-smoke:${IMAGE_TAG}" ;;
     base) echo "${REGISTRY_NAMESPACE}/minimax-h3-base:${IMAGE_TAG}" ;;
+    qwen-all) echo "${REGISTRY_NAMESPACE}/minimax-h3-qwen-all:${IMAGE_TAG}" ;;
     qwen-nvfp4) echo "${REGISTRY_NAMESPACE}/minimax-h3-qwen-nvfp4:${IMAGE_TAG}" ;;
     qwen-int8) echo "${REGISTRY_NAMESPACE}/minimax-h3-qwen-int8:${IMAGE_TAG}" ;;
     fl2va-base) echo "${REGISTRY_NAMESPACE}/minimax-h3-fl2va-base:${IMAGE_TAG}" ;;

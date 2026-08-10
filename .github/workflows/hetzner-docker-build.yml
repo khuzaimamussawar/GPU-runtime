@@ -11,6 +11,7 @@ on:
         options:
           - smoke
           - base
+          - qwen-all
           - qwen-nvfp4
           - qwen-int8
           - fl2va-base
