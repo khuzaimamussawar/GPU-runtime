@@ -17,7 +17,8 @@ ffmpeg -y -i "$input" \
   -map 0:v:0 -map 0:a? \
   -vf "crop=${master_width}:${master_height}:(iw-${master_width})/2:(ih-${master_height})/2" \
   -c:v libx265 -preset slow -crf "$master_crf" \
-  -pix_fmt yuv420p \
+  -profile:v main10 \
+  -pix_fmt yuv420p10le \
   -c:a aac -b:a 192k \
   -tag:v hvc1 \
   -movflags +faststart \
@@ -27,7 +28,8 @@ ffmpeg -y -i "$input" \
   -map 0:v:0 -map 0:a? \
   -vf "crop=${master_width}:${master_height}:(iw-${master_width})/2:(ih-${master_height})/2,scale=${preview_width}:${preview_height}" \
   -c:v libx264 -preset veryfast -crf "$preview_crf" \
-  -pix_fmt yuv420p \
+  -profile:v high10 \
+  -pix_fmt yuv420p10le \
   -c:a aac -b:a 128k \
   -movflags +faststart \
   "$preview_out"

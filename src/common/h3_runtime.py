@@ -45,6 +45,7 @@ def run_h3_job(payload: dict[str, Any], expected_task_family: str, runtime_name:
     ensure_comfy_running()
     prompt_id = submit_comfy_prompt(patched, job.job_id)
     source_video = wait_for_output_video(prompt_id, started_at)
+    source_video = maybe_cleanup_source_video(source_video, job)
     encoded = encode_outputs(source_video, job)
     uploaded = upload_outputs(encoded, job)
 
@@ -346,6 +347,10 @@ def reject_unsupported_settings(manifest: dict[str, Any], settings: dict[str, An
         "maxInputSize",
         "spectrum",
         "spectrumEnabled",
+        "artifactCleanup",
+        "artifactCleanupEnabled",
+        "artifactCleanupMode",
+        "rtxArtifactCleanup",
     }
     unsupported = sorted(key for key in settings if key not in supported)
     if unsupported:
@@ -462,6 +467,55 @@ def encode_outputs(source_video: Path, job: H3Job) -> dict[str, Path]:
         check=True,
     )
     return {"master": master, "preview": preview}
+
+
+def maybe_cleanup_source_video(source_video: Path, job: H3Job) -> Path:
+    if not artifact_cleanup_enabled(job.settings):
+        return source_video
+    output_dir = Path("/tmp/scenebuilder-h3") / safe_name(job.job_id)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    cleaned = output_dir / f"{safe_name(job.job_id)}_artifact_clean.mp4"
+    mode = artifact_cleanup_mode(job.settings)
+    subprocess.run(
+        [
+            "bash",
+            str(ROOT / "scripts" / "cleanup_video.sh"),
+            str(source_video),
+            str(cleaned),
+            mode,
+        ],
+        check=True,
+    )
+    return cleaned if cleaned.exists() else source_video
+
+
+def artifact_cleanup_enabled(settings: dict[str, Any]) -> bool:
+    cleanup = settings.get("artifactCleanup")
+    if isinstance(cleanup, dict) and "enabled" in cleanup:
+        return bool(cleanup.get("enabled"))
+    if "artifactCleanupEnabled" in settings:
+        return bool(settings.get("artifactCleanupEnabled"))
+    return bool(settings.get("rtxArtifactCleanup", False))
+
+
+def artifact_cleanup_mode(settings: dict[str, Any]) -> str:
+    cleanup = settings.get("artifactCleanup")
+    if isinstance(cleanup, dict):
+        raw = str(cleanup.get("mode") or "").strip().lower()
+        if raw:
+            return normalize_cleanup_mode(raw)
+    raw = str(settings.get("artifactCleanupMode") or "artifactreduction").strip().lower()
+    return normalize_cleanup_mode(raw)
+
+
+def normalize_cleanup_mode(value: str) -> str:
+    modes = {
+        "artifactreduction",
+        "highbitrate",
+        "deblur",
+        "denoise",
+    }
+    return value if value in modes else "artifactreduction"
 
 
 def strict_export_size(width: int, height: int) -> tuple[int, int]:

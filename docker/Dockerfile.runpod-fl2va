@@ -8,7 +8,12 @@ LABEL scene_builder.runtime="runpod-fl2va"
 RUN python3 -m pip install --no-cache-dir boto3 pillow runpod
 
 COPY src /opt/scenebuilder-h3/src
+COPY scripts/cleanup_video.sh /opt/scenebuilder-h3/scripts/cleanup_video.sh
 COPY scripts/encode_outputs.sh /opt/scenebuilder-h3/scripts/encode_outputs.sh
+
+ENV SCENEBUILDER_VFX_CLEANUP_ENABLED=0
+ENV SCENEBUILDER_VFX_CLEANUP_PROVIDER=maxine
+ENV SCENEBUILDER_VFX_SUPPORTED_GPUS="NVIDIA L40,NVIDIA L4,NVIDIA A10,NVIDIA A16,NVIDIA A30,NVIDIA A40,NVIDIA A100,NVIDIA H100,NVIDIA A2,NVIDIA T4,NVIDIA B40,NVIDIA B100,NVIDIA B200"
 
 WORKDIR /opt/scenebuilder-h3
 CMD ["python3", "-m", "src.runpod.fl2va_handler"]

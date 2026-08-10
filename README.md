@@ -176,6 +176,7 @@ Minimum FL2VA I2V payload:
     "sampler": "uni_pc",
     "scheduler": "simple",
     "seed": 12345,
+    "artifactCleanupEnabled": false,
     "spectrum": {
       "enabled": false
     }
@@ -206,7 +207,11 @@ Minimum Ref2VA payload:
     "textEncoder": "int8",
     "referenceFit": "max",
     "steps": 20,
-    "sageAttention": true
+    "sageAttention": true,
+    "artifactCleanup": {
+      "enabled": true,
+      "mode": "artifactreduction"
+    }
   },
   "inputs": {
     "referenceImages": [
@@ -292,3 +297,95 @@ This means:
 - H3 keeps its preferred generation resolution
 - exported video matches the real project display aspect exactly
 - preview thumbnails and timeline video cards stay visually consistent across SceneBuilder
+
+## Optional Server-Side Artifact Cleanup
+
+The Docker runtime now exposes an optional post-generation cleanup hook before final FFmpeg encoding.
+
+Important:
+
+- this is intended as a same-resolution cleanup pass, not an upscaler
+- it should be used to reduce blocky compression/banding artifacts, especially on flat-tone animation/anime outputs
+- it is conservative by default and no-ops unless explicitly enabled
+
+Runtime behavior:
+
+- frontend can send `artifactCleanupEnabled: true`
+- or:
+
+```json
+{
+  "settings": {
+    "artifactCleanup": {
+      "enabled": true,
+      "mode": "artifactreduction"
+    }
+  }
+}
+```
+
+- supported modes currently accepted by the runtime contract:
+  - `artifactreduction`
+  - `highbitrate`
+  - `deblur`
+  - `denoise`
+- cleanup happens after H3 generation and before final master/preview encodes
+- cleanup does not change output resolution
+
+Docker/runtime guardrails:
+
+- default provider label is `maxine`
+- runtime checks GPU name with `nvidia-smi`
+- if GPU is not in the conservative Linux VFX allowlist, the job skips cleanup automatically
+- if no cleanup binary is configured, the job skips cleanup automatically
+
+The current allowlist is intentionally conservative and aimed at documented server GPUs such as:
+
+- `NVIDIA L40`
+- `NVIDIA L4`
+- `NVIDIA A10`
+- `NVIDIA A16`
+- `NVIDIA A30`
+- `NVIDIA A40`
+- `NVIDIA A100`
+- `NVIDIA H100`
+- `NVIDIA A2`
+- `NVIDIA T4`
+- `NVIDIA B40`
+- `NVIDIA B100`
+- `NVIDIA B200`
+
+That means these common mixed-fleet cards should currently be treated as auto-skip unless proven/documented otherwise in the Linux VFX stack:
+
+- RTX 4090
+- RTX 5090
+- RTX 6000 Ada
+- L40S
+- MIG 48GB configurations
+
+Environment variables baked into the final runtime images:
+
+```text
+SCENEBUILDER_VFX_CLEANUP_ENABLED=0
+SCENEBUILDER_VFX_CLEANUP_PROVIDER=maxine
+SCENEBUILDER_VFX_SUPPORTED_GPUS=...
+SCENEBUILDER_VFX_CLEANUP_BIN=/path/to/real/maxine-wrapper
+```
+
+Right now the runtime hook is scaffolded safely. If `SCENEBUILDER_VFX_CLEANUP_BIN` is not provided, the pipeline logs the reason and passes the generated video through unchanged.
+
+## 10-bit Encoding Contract
+
+SceneBuilder should treat both H3 exports as 10-bit deliverables:
+
+- master: H.265 MP4, CRF 15, 10-bit
+- preview: H.264 MP4, CRF 20, 10-bit
+
+Current FFmpeg target:
+
+- master codec: `libx265`
+- master profile: `main10`
+- preview codec: `libx264`
+- preview profile: `high10`
+
+If a runtime FFmpeg/libx264 build does not support 10-bit H.264, that runtime must be corrected at the image level rather than silently downgrading preview quality in the app contract.
