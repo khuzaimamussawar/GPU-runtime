@@ -1,9 +1,22 @@
 name: Validate H3 runtime integration
 
 on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'workflows/**'
+      - 'docker/Dockerfile.runpod-*'
+      - 'docker/Dockerfile.novita-*'
+      - '.github/workflows/validate-h3-runtime-integration.yml'
   push:
     branches:
-      - h3-runtime-integration-20260811
+      - main
+    paths:
+      - 'src/**'
+      - 'workflows/**'
+      - 'docker/Dockerfile.runpod-*'
+      - 'docker/Dockerfile.novita-*'
+      - '.github/workflows/validate-h3-runtime-integration.yml'
   workflow_dispatch:
 
 permissions:
@@ -14,8 +27,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: h3-runtime-integration-20260811
       - name: Compile Python sources
         run: python3 -m compileall -q src
       - name: Validate workflow JSON and manifests
