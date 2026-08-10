@@ -1,0 +1,34 @@
+name: Validate H3 runtime integration
+
+on:
+  push:
+    branches:
+      - h3-runtime-integration-20260811
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: h3-runtime-integration-20260811
+      - name: Compile Python sources
+        run: python3 -m compileall -q src
+      - name: Validate workflow JSON and manifests
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          for path in [
+              Path('workflows/fl2va_master.json'),
+              Path('workflows/ref2va_master.json'),
+              Path('workflows/manifests/fl2va_manifest.json'),
+              Path('workflows/manifests/ref2va_manifest.json'),
+          ]:
+              json.loads(path.read_text())
+              print('ok', path)
+          PY
