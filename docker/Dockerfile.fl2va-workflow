@@ -1,0 +1,14 @@
+ARG REGISTRY_NAMESPACE
+ARG IMAGE_TAG=latest
+FROM ${REGISTRY_NAMESPACE}/minimax-h3-fl2va-base:${IMAGE_TAG}
+
+LABEL org.opencontainers.image.title="minimax-h3-fl2va-workflow"
+LABEL scene_builder.layer="fl2va-workflow"
+
+COPY workflows/fl2va_master.json /opt/scenebuilder-h3/workflows/fl2va_master.json
+COPY workflows/manifests/fl2va_manifest.json /opt/scenebuilder-h3/workflows/manifests/fl2va_manifest.json
+COPY scripts/validate_workflows.py /opt/scenebuilder-h3/scripts/validate_workflows.py
+
+RUN python3 /opt/scenebuilder-h3/scripts/validate_workflows.py \
+    --workflow /opt/scenebuilder-h3/workflows/fl2va_master.json \
+    --manifest /opt/scenebuilder-h3/workflows/manifests/fl2va_manifest.json

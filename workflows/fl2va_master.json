@@ -1,0 +1,273 @@
+{
+  "3": {
+    "inputs": {
+      "prompt": "",
+      "width": 1344,
+      "height": 768,
+      "length": 124,
+      "clip": [
+        "9",
+        0
+      ],
+      "vae": [
+        "10",
+        0
+      ],
+      "first_frame": [
+        "4",
+        0
+      ],
+      "last_frame": [
+        "5",
+        0
+      ]
+    },
+    "class_type": "MiniMaxH3ImageToVideo",
+    "_meta": {
+      "title": "MiniMax H3 Image to Video"
+    }
+  },
+  "4": {
+    "inputs": {
+      "image": "example.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image"
+    }
+  },
+  "5": {
+    "inputs": {
+      "image": "example.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image"
+    }
+  },
+  "9": {
+    "inputs": {
+      "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "type": "minimax",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Load CLIP"
+    }
+  },
+  "10": {
+    "inputs": {
+      "vae_name": "minimax_h3_video_vae_fp16.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load VAE"
+    }
+  },
+  "11": {
+    "inputs": {
+      "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load VAE"
+    }
+  },
+  "12": {
+    "inputs": {
+      "noise_seed": 0
+    },
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "RandomNoise"
+    }
+  },
+  "14": {
+    "inputs": {
+      "model": [
+        "26",
+        0
+      ],
+      "conditioning": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "BasicGuider",
+    "_meta": {
+      "title": "Basic Guider"
+    }
+  },
+  "16": {
+    "inputs": {
+      "scheduler": "simple",
+      "steps": 20,
+      "denoise": 1,
+      "model": [
+        "23",
+        0
+      ]
+    },
+    "class_type": "BasicScheduler",
+    "_meta": {
+      "title": "BasicScheduler"
+    }
+  },
+  "19": {
+    "inputs": {
+      "samples": [
+        "25",
+        0
+      ],
+      "vae": [
+        "10",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "20": {
+    "inputs": {
+      "samples": [
+        "25",
+        0
+      ],
+      "vae": [
+        "11",
+        0
+      ]
+    },
+    "class_type": "VAEDecodeAudio",
+    "_meta": {
+      "title": "VAE Decode Audio"
+    }
+  },
+  "21": {
+    "inputs": {
+      "fps": 24,
+      "bit_depth": 8,
+      "images": [
+        "19",
+        0
+      ],
+      "audio": [
+        "20",
+        0
+      ]
+    },
+    "class_type": "CreateVideo",
+    "_meta": {
+      "title": "Create Video"
+    }
+  },
+  "22": {
+    "inputs": {
+      "filename_prefix": "video/ComfyUI",
+      "format": "mp4",
+      "codec": "h264",
+      "codec.encoding": "re-encode",
+      "codec.encoding.crf": 15,
+      "video": [
+        "21",
+        0
+      ]
+    },
+    "class_type": "SaveVideo",
+    "_meta": {
+      "title": "Save Video"
+    }
+  },
+  "23": {
+    "inputs": {
+      "unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Load Diffusion Model"
+    }
+  },
+  "24": {
+    "inputs": {
+      "sampler_name": "res_multistep"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "KSamplerSelect"
+    }
+  },
+  "25": {
+    "inputs": {
+      "noise": [
+        "12",
+        0
+      ],
+      "guider": [
+        "14",
+        0
+      ],
+      "sampler": [
+        "24",
+        0
+      ],
+      "sigmas": [
+        "16",
+        0
+      ],
+      "latent_image": [
+        "3",
+        1
+      ]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "SamplerCustomAdvanced"
+    }
+  },
+  "26": {
+    "inputs": {
+      "sage_attention": "disabled",
+      "allow_compile": false,
+      "model": [
+        "27",
+        0
+      ]
+    },
+    "class_type": "PathchSageAttentionKJ",
+    "_meta": {
+      "title": "Patch Sage Attention KJ"
+    }
+  },
+  "27": {
+    "inputs": {
+      "enabled": false,
+      "blend_weight": 0.5,
+      "degree": 1,
+      "ridge_lambda": 0.1,
+      "window_size": 2,
+      "flex_window": 0.75,
+      "warmup_steps": 1,
+      "tail_actual_steps": 1,
+      "max_history": 8,
+      "debug": false,
+      "history_storage": "vram",
+      "bootstrap_first_forecast": true,
+      "anchor_residual_feedback": false,
+      "selective_rollback_correction": false,
+      "offline_smoothing_replay": true,
+      "audio_blend_weight": 0,
+      "model": [
+        "23",
+        0
+      ]
+    },
+    "class_type": "SpectrumApplyMiniMaxH3",
+    "_meta": {
+      "title": "Spectrum Apply MiniMax H3"
+    }
+  }
+}

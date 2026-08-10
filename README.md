@@ -1,0 +1,74 @@
+# MiniMax H3 Serverless
+
+Layered Docker build system for SceneBuilder MiniMax H3 FL2VA and Ref2VA runtimes.
+
+This repo owns:
+
+- Dockerfiles for CUDA/PyTorch/Comfy/H3 layers
+- RunPod and Novita handler entrypoints
+- Comfy workflow JSON and manifests
+- FFmpeg output contract scripts
+- Hetzner temporary builder orchestration
+
+SceneBuilder owns:
+
+- UI
+- D1/R2 orchestration
+- endpoint registry
+- job routing
+
+## First Safe Test
+
+Run the GitHub Actions workflow `Hetzner Docker Build` with:
+
+```text
+target: smoke
+server_type: ccx43
+debug_keep_server_on_failure: false
+```
+
+This proves:
+
+```text
+GitHub Actions -> temporary Hetzner server -> Docker buildx --push -> Docker Hub -> delete server
+```
+
+without downloading H3 model files.
+
+## Required GitHub Secrets
+
+```text
+HETZNER_TOKEN
+DOCKERHUB_USERNAME
+DOCKERHUB_TOKEN
+HF_TOKEN
+```
+
+Optional if this repo becomes private and Hetzner clones it directly:
+
+```text
+GH_FH_TOKEN_MM_H3_SERVERLESS
+```
+
+## Runtime Stack Target
+
+```text
+CUDA: 13.0
+PyTorch: 2.13
+Attention: SageAttention 2.2
+```
+
+Do not switch to CUDA 13.2 unless CUDA 13.0 fails reproducibly with the required PyTorch/SageAttention/Comfy nodes.
+
+## Image Repos
+
+Final runtime images:
+
+```text
+<dockerhub-user>/minimax-h3-runpod-fl2va:latest
+<dockerhub-user>/minimax-h3-runpod-ref2va:latest
+<dockerhub-user>/minimax-h3-novita-fl2va:latest
+<dockerhub-user>/minimax-h3-novita-ref2va:latest
+```
+
+Heavy layers are shared by Docker content digest where possible.

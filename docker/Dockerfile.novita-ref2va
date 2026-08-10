@@ -1,0 +1,12 @@
+ARG REGISTRY_NAMESPACE
+ARG IMAGE_TAG=latest
+FROM ${REGISTRY_NAMESPACE}/minimax-h3-ref2va-loras:${IMAGE_TAG}
+
+LABEL org.opencontainers.image.title="minimax-h3-novita-ref2va"
+LABEL scene_builder.runtime="novita-ref2va"
+
+COPY src /opt/scenebuilder-h3/src
+COPY scripts/encode_outputs.sh /opt/scenebuilder-h3/scripts/encode_outputs.sh
+
+WORKDIR /opt/scenebuilder-h3
+CMD ["python3", "-m", "src.novita.ref2va_handler"]

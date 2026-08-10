@@ -1,0 +1,16 @@
+# syntax=docker/dockerfile:1.7
+ARG REGISTRY_NAMESPACE
+ARG IMAGE_TAG=latest
+FROM ${REGISTRY_NAMESPACE}/minimax-h3-base:${IMAGE_TAG}
+
+LABEL org.opencontainers.image.title="minimax-h3-qwen-int8"
+LABEL scene_builder.layer="qwen-int8"
+
+COPY scripts/download_hf_file.py /opt/scenebuilder-h3/scripts/download_hf_file.py
+
+RUN mkdir -p /opt/ComfyUI/models/clip
+RUN --mount=type=secret,id=hf_token python3 /opt/scenebuilder-h3/scripts/download_hf_file.py \
+    --token-file /run/secrets/hf_token \
+    --repo "__TODO_HF_REPO__" \
+    --file "qwen3vl_32b_minimax_h3_int8_convrot.safetensors" \
+    --out "/opt/ComfyUI/models/clip/qwen3vl_32b_minimax_h3_int8_convrot.safetensors"

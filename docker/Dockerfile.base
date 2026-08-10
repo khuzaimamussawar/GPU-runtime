@@ -1,0 +1,50 @@
+ARG CUDA_IMAGE=nvidia/cuda:13.0.0-cudnn-devel-ubuntu24.04
+FROM ${CUDA_IMAGE}
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG PYTHON_VERSION=3.12
+ARG PYTORCH_VERSION=2.13.0
+ARG PYTORCH_CUDA_INDEX=https://download.pytorch.org/whl/cu130
+
+LABEL org.opencontainers.image.title="minimax-h3-base"
+LABEL scene_builder.layer="base-cuda-pytorch-comfy"
+LABEL scene_builder.cuda="13.0"
+LABEL scene_builder.pytorch="2.13"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    ffmpeg \
+    git \
+    git-lfs \
+    python${PYTHON_VERSION} \
+    python3-pip \
+    python3-venv \
+    tini \
+    wget \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/scenebuilder-h3
+
+RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel
+RUN python3 -m pip install --no-cache-dir \
+    torch==${PYTORCH_VERSION} \
+    torchvision \
+    torchaudio \
+    --index-url ${PYTORCH_CUDA_INDEX}
+
+# Keep ComfyUI and acceleration nodes in the base layer. Pin exact commits after first green build.
+RUN git clone --depth 1 https://github.com/comfyanonymous/ComfyUI.git /opt/ComfyUI
+
+WORKDIR /opt/ComfyUI
+RUN python3 -m pip install --no-cache-dir -r requirements.txt
+
+# Custom nodes are intentionally installed in this layer so handler/workflow changes do not rebuild them.
+# Pin commits once the local workflows are validated.
+RUN mkdir -p /opt/ComfyUI/custom_nodes
+
+WORKDIR /opt/scenebuilder-h3
+COPY src/common /opt/scenebuilder-h3/src/common
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["python3", "-m", "src.common.healthcheck"]

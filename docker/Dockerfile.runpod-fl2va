@@ -1,0 +1,12 @@
+ARG REGISTRY_NAMESPACE
+ARG IMAGE_TAG=latest
+FROM ${REGISTRY_NAMESPACE}/minimax-h3-fl2va-loras:${IMAGE_TAG}
+
+LABEL org.opencontainers.image.title="minimax-h3-runpod-fl2va"
+LABEL scene_builder.runtime="runpod-fl2va"
+
+COPY src /opt/scenebuilder-h3/src
+COPY scripts/encode_outputs.sh /opt/scenebuilder-h3/scripts/encode_outputs.sh
+
+WORKDIR /opt/scenebuilder-h3
+CMD ["python3", "-m", "src.runpod.fl2va_handler"]

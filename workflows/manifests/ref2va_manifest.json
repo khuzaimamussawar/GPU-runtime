@@ -1,0 +1,44 @@
+{
+  "workflowId": "ref2va_master",
+  "workflowVersion": "2026-08-10-initial",
+  "taskFamily": "h3_ref2va",
+  "modes": ["r2v"],
+  "modelFiles": {
+    "diffusion": "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+    "clipDefault": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+    "videoVae": "minimax_h3_video_vae_fp16.safetensors",
+    "audioVae": "minimax_h3_audio_vae_fp32.safetensors"
+  },
+  "requiredPaths": {
+    "prompt": "1.inputs.prompt",
+    "width": "1.inputs.width",
+    "height": "1.inputs.height",
+    "lengthFrames": "1.inputs.length",
+    "referenceFit": "1.inputs.ref_image_size",
+    "firstReferenceImage": "2.inputs.image",
+    "clipName": "12.inputs.clip_name",
+    "videoVae": "13.inputs.vae_name",
+    "diffusionModel": "17.inputs.unet_name",
+    "steps": "18.inputs.steps",
+    "scheduler": "18.inputs.scheduler",
+    "spectrumEnabled": "21.inputs.enabled",
+    "sageAttention": "22.inputs.sage_attention",
+    "seed": "23.inputs.noise_seed",
+    "sampler": "24.inputs.sampler_name",
+    "audioVae": "26.inputs.vae_name",
+    "firstReferenceAudio": "29.inputs.audio",
+    "firstReferenceVideo": "34.inputs.file"
+  },
+  "optionalPaths": {
+    "referenceImage0": "2.inputs.image",
+    "referenceImage1": "3.inputs.image",
+    "referenceImage2": "4.inputs.image",
+    "referenceImage3": "5.inputs.image",
+    "referenceImage4": "6.inputs.image",
+    "referenceImage5": "8.inputs.image",
+    "referenceImage6": "7.inputs.image",
+    "referenceImage7": "9.inputs.image",
+    "referenceImage8": "10.inputs.image",
+    "spectrum": "21.inputs"
+  }
+}

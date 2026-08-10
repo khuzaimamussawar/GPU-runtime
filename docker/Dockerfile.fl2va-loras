@@ -1,0 +1,9 @@
+ARG REGISTRY_NAMESPACE
+ARG IMAGE_TAG=latest
+FROM ${REGISTRY_NAMESPACE}/minimax-h3-fl2va-workflow:${IMAGE_TAG}
+
+LABEL org.opencontainers.image.title="minimax-h3-fl2va-loras"
+LABEL scene_builder.layer="fl2va-loras"
+
+RUN mkdir -p /opt/ComfyUI/models/loras
+# Stable LoRAs/adapters go in this layer later. Keep empty for the first smoke pipeline.

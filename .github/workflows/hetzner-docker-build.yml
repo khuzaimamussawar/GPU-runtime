@@ -1,0 +1,145 @@
+name: Hetzner Docker Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Docker layer/image target to build"
+        required: true
+        default: "smoke"
+        type: choice
+        options:
+          - smoke
+          - base
+          - qwen-nvfp4
+          - qwen-int8
+          - fl2va-base
+          - ref2va-base
+          - fl2va-workflow
+          - ref2va-workflow
+          - fl2va-loras
+          - ref2va-loras
+          - runpod-fl2va
+          - runpod-ref2va
+          - novita-fl2va
+          - novita-ref2va
+      image_tag:
+        description: "Docker tag to push"
+        required: true
+        default: "latest"
+        type: string
+      server_type:
+        description: "Hetzner builder server type"
+        required: true
+        default: "ccx43"
+        type: string
+      location:
+        description: "Hetzner location"
+        required: true
+        default: "fsn1"
+        type: string
+      hetzner_image:
+        description: "Hetzner OS image"
+        required: true
+        default: "ubuntu-24.04"
+        type: string
+      debug_keep_server_on_failure:
+        description: "Keep failed builder alive briefly for manual SSH debugging"
+        required: true
+        default: false
+        type: boolean
+      debug_keep_minutes:
+        description: "Minutes to keep failed builder when debug_keep_server_on_failure is true"
+        required: true
+        default: "15"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ inputs.target }} on temporary Hetzner builder
+    runs-on: ubuntu-latest
+    timeout-minutes: 720
+
+    env:
+      BUILDER_NAME: h3-builder-${{ github.run_id }}-${{ github.run_attempt }}
+      SERVER_TYPE: ${{ inputs.server_type }}
+      HETZNER_LOCATION: ${{ inputs.location }}
+      HETZNER_IMAGE: ${{ inputs.hetzner_image }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create temporary SSH key
+        id: sshkey
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p .tmp
+          ssh-keygen -t ed25519 -f .tmp/h3_builder_key -N "" -C "h3-builder-${GITHUB_RUN_ID}"
+          echo "key_path=${GITHUB_WORKSPACE}/.tmp/h3_builder_key" >> "$GITHUB_OUTPUT"
+          echo "public_key=$(cat .tmp/h3_builder_key.pub)" >> "$GITHUB_OUTPUT"
+
+      - name: Create Hetzner builder
+        id: create
+        shell: bash
+        env:
+          HETZNER_TOKEN: ${{ secrets.HETZNER_TOKEN }}
+          BUILDER_SSH_PUBLIC_KEY: ${{ steps.sshkey.outputs.public_key }}
+        run: |
+          set -Eeuo pipefail
+          bash scripts/hetzner_create.sh
+
+      - name: Wait for SSH
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash scripts/wait_for_ssh.sh "${{ steps.create.outputs.server_ip }}" "${{ steps.sshkey.outputs.key_path }}" 600
+
+      - name: Run remote Docker build
+        shell: bash
+        env:
+          REMOTE_IP: ${{ steps.create.outputs.server_ip }}
+          SSH_KEY_PATH: ${{ steps.sshkey.outputs.key_path }}
+          BUILD_TARGET: ${{ inputs.target }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          GH_FH_TOKEN_MM_H3_SERVERLESS: ${{ secrets.GH_FH_TOKEN_MM_H3_SERVERLESS }}
+        run: |
+          set -Eeuo pipefail
+          ssh -i "${SSH_KEY_PATH}" \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            "root@${REMOTE_IP}" \
+            "BUILD_TARGET='${BUILD_TARGET}' \
+             IMAGE_TAG='${IMAGE_TAG}' \
+             DOCKERHUB_USERNAME='${DOCKERHUB_USERNAME}' \
+             DOCKERHUB_TOKEN='${DOCKERHUB_TOKEN}' \
+             HF_TOKEN='${HF_TOKEN}' \
+             GH_FH_TOKEN_MM_H3_SERVERLESS='${GH_FH_TOKEN_MM_H3_SERVERLESS}' \
+             GITHUB_REPOSITORY='${GITHUB_REPOSITORY}' \
+             GITHUB_REF_NAME='${GITHUB_REF_NAME}' \
+             bash -s" < scripts/remote_build.sh
+
+      - name: Delete Hetzner builder
+        if: always() && steps.create.outputs.server_id != ''
+        shell: bash
+        env:
+          HETZNER_TOKEN: ${{ secrets.HETZNER_TOKEN }}
+          SERVER_ID: ${{ steps.create.outputs.server_id }}
+          KEEP_ON_FAILURE: ${{ inputs.debug_keep_server_on_failure }}
+          KEEP_MINUTES: ${{ inputs.debug_keep_minutes }}
+          BUILD_FAILED: ${{ failure() }}
+        run: |
+          set -Eeuo pipefail
+          if [ "${BUILD_FAILED}" = "true" ] && [ "${KEEP_ON_FAILURE}" = "true" ]; then
+            echo "Build failed. Keeping Hetzner builder ${SERVER_ID} alive for ${KEEP_MINUTES} minute(s)."
+            echo "SSH: ssh -i .tmp/h3_builder_key root@${{ steps.create.outputs.server_ip }}"
+            sleep "$((KEEP_MINUTES * 60))"
+          fi
+          bash scripts/hetzner_delete.sh "${SERVER_ID}"

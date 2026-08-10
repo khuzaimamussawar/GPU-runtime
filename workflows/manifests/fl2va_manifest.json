@@ -1,0 +1,32 @@
+{
+  "workflowId": "fl2va_master",
+  "workflowVersion": "2026-08-10-initial",
+  "taskFamily": "h3_fl2va",
+  "modes": ["t2v", "i2v", "fflf", "l2v"],
+  "modelFiles": {
+    "diffusion": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+    "clipDefault": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+    "videoVae": "minimax_h3_video_vae_fp16.safetensors",
+    "audioVae": "minimax_h3_audio_vae_fp32.safetensors"
+  },
+  "requiredPaths": {
+    "prompt": "3.inputs.prompt",
+    "width": "3.inputs.width",
+    "height": "3.inputs.height",
+    "lengthFrames": "3.inputs.length",
+    "firstFrameImage": "4.inputs.image",
+    "lastFrameImage": "5.inputs.image",
+    "clipName": "9.inputs.clip_name",
+    "videoVae": "10.inputs.vae_name",
+    "audioVae": "11.inputs.vae_name",
+    "steps": "16.inputs.steps",
+    "scheduler": "16.inputs.scheduler",
+    "diffusionModel": "23.inputs.unet_name",
+    "sampler": "24.inputs.sampler_name",
+    "spectrumEnabled": "27.inputs.enabled"
+  },
+  "optionalPaths": {
+    "spectrum": "27.inputs",
+    "seed": "12.inputs.noise_seed"
+  }
+}

@@ -1,0 +1,6 @@
+.git
+.github
+.tmp
+*.log
+__pycache__
+.pytest_cache

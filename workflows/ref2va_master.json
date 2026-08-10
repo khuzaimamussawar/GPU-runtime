@@ -1,0 +1,498 @@
+{
+  "1": {
+    "inputs": {
+      "prompt": "",
+      "width": 1344,
+      "height": 768,
+      "length": 124,
+      "ref_image_size": "match",
+      "clip": [
+        "12",
+        0
+      ],
+      "vae": [
+        "13",
+        0
+      ],
+      "audio_vae": [
+        "26",
+        0
+      ],
+      "ref_images.ref_image_0": [
+        "2",
+        0
+      ],
+      "ref_images.ref_image_1": [
+        "3",
+        0
+      ],
+      "ref_images.ref_image_2": [
+        "4",
+        0
+      ],
+      "ref_images.ref_image_3": [
+        "5",
+        0
+      ],
+      "ref_images.ref_image_4": [
+        "6",
+        0
+      ],
+      "ref_images.ref_image_5": [
+        "8",
+        0
+      ],
+      "ref_images.ref_image_6": [
+        "7",
+        0
+      ],
+      "ref_images.ref_image_7": [
+        "9",
+        0
+      ],
+      "ref_images.ref_image_8": [
+        "10",
+        0
+      ],
+      "ref_videos.ref_video_0": [
+        "35",
+        0
+      ],
+      "ref_videos.ref_video_1": [
+        "43",
+        0
+      ],
+      "ref_videos.ref_video_2": [
+        "40",
+        0
+      ],
+      "ref_video_audios.ref_video_audio_0": [
+        "35",
+        1
+      ],
+      "ref_video_audios.ref_video_audio_1": [
+        "43",
+        1
+      ],
+      "ref_video_audios.ref_video_audio_2": [
+        "40",
+        1
+      ],
+      "ref_audios.ref_audio_0": [
+        "29",
+        0
+      ],
+      "ref_audios.ref_audio_1": [
+        "30",
+        0
+      ],
+      "ref_audios.ref_audio_2": [
+        "31",
+        0
+      ]
+    },
+    "class_type": "MiniMaxH3ReferenceToVideo",
+    "_meta": {
+      "title": "MiniMax H3 Reference to Video"
+    }
+  },
+  "2": {
+    "inputs": {
+      "image": "example.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image"
+    }
+  },
+  "3": {
+    "inputs": {
+      "image": "example.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image"
+    }
+  },
+  "4": {
+    "inputs": {
+      "image": "example.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image"
+    }
+  },
+  "5": {
+    "inputs": {
+      "image": "example.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image"
+    }
+  },
+  "6": {
+    "inputs": {
+      "image": "example.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image"
+    }
+  },
+  "7": {
+    "inputs": {
+      "image": "example.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image"
+    }
+  },
+  "8": {
+    "inputs": {
+      "image": "example.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image"
+    }
+  },
+  "9": {
+    "inputs": {
+      "image": "example.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image"
+    }
+  },
+  "10": {
+    "inputs": {
+      "image": "example.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image"
+    }
+  },
+  "12": {
+    "inputs": {
+      "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "type": "minimax",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Load CLIP"
+    }
+  },
+  "13": {
+    "inputs": {
+      "vae_name": "minimax_h3_video_vae_fp16.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load VAE"
+    }
+  },
+  "14": {
+    "inputs": {
+      "samples": [
+        "20",
+        0
+      ],
+      "vae": [
+        "13",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "15": {
+    "inputs": {
+      "fps": 24,
+      "bit_depth": 8,
+      "images": [
+        "14",
+        0
+      ],
+      "audio": [
+        "27",
+        0
+      ]
+    },
+    "class_type": "CreateVideo",
+    "_meta": {
+      "title": "Create Video"
+    }
+  },
+  "16": {
+    "inputs": {
+      "filename_prefix": "video/ComfyUI",
+      "format": "mp4",
+      "codec": "h264",
+      "codec.encoding": "re-encode",
+      "codec.encoding.crf": 15,
+      "video": [
+        "15",
+        0
+      ]
+    },
+    "class_type": "SaveVideo",
+    "_meta": {
+      "title": "Save Video"
+    }
+  },
+  "17": {
+    "inputs": {
+      "unet_name": "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Load Diffusion Model"
+    }
+  },
+  "18": {
+    "inputs": {
+      "scheduler": "simple",
+      "steps": 20,
+      "denoise": 1,
+      "model": [
+        "17",
+        0
+      ]
+    },
+    "class_type": "BasicScheduler",
+    "_meta": {
+      "title": "BasicScheduler"
+    }
+  },
+  "19": {
+    "inputs": {
+      "model": [
+        "22",
+        0
+      ],
+      "conditioning": [
+        "1",
+        0
+      ]
+    },
+    "class_type": "BasicGuider",
+    "_meta": {
+      "title": "Basic Guider"
+    }
+  },
+  "20": {
+    "inputs": {
+      "noise": [
+        "23",
+        0
+      ],
+      "guider": [
+        "19",
+        0
+      ],
+      "sampler": [
+        "24",
+        0
+      ],
+      "sigmas": [
+        "18",
+        0
+      ],
+      "latent_image": [
+        "1",
+        1
+      ]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "SamplerCustomAdvanced"
+    }
+  },
+  "21": {
+    "inputs": {
+      "enabled": false,
+      "blend_weight": 0.5,
+      "degree": 1,
+      "ridge_lambda": 0.1,
+      "window_size": 2,
+      "flex_window": 0.75,
+      "warmup_steps": 1,
+      "tail_actual_steps": 1,
+      "max_history": 8,
+      "debug": false,
+      "history_storage": "vram",
+      "bootstrap_first_forecast": true,
+      "anchor_residual_feedback": false,
+      "selective_rollback_correction": false,
+      "offline_smoothing_replay": true,
+      "audio_blend_weight": 0,
+      "model": [
+        "17",
+        0
+      ]
+    },
+    "class_type": "SpectrumApplyMiniMaxH3",
+    "_meta": {
+      "title": "Spectrum Apply MiniMax H3"
+    }
+  },
+  "22": {
+    "inputs": {
+      "sage_attention": "disabled",
+      "allow_compile": false,
+      "model": [
+        "21",
+        0
+      ]
+    },
+    "class_type": "PathchSageAttentionKJ",
+    "_meta": {
+      "title": "Patch Sage Attention KJ"
+    }
+  },
+  "23": {
+    "inputs": {
+      "noise_seed": 0
+    },
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "RandomNoise"
+    }
+  },
+  "24": {
+    "inputs": {
+      "sampler_name": "res_multistep"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "KSamplerSelect"
+    }
+  },
+  "26": {
+    "inputs": {
+      "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load VAE"
+    }
+  },
+  "27": {
+    "inputs": {
+      "samples": [
+        "20",
+        0
+      ],
+      "vae": [
+        "26",
+        0
+      ]
+    },
+    "class_type": "VAEDecodeAudio",
+    "_meta": {
+      "title": "VAE Decode Audio"
+    }
+  },
+  "29": {
+    "inputs": {
+      "audio": "0gmmc0n0jhrmw0cxrp29bf4pp0.mp4"
+    },
+    "class_type": "LoadAudio",
+    "_meta": {
+      "title": "Load Audio"
+    }
+  },
+  "30": {
+    "inputs": {
+      "audio": "0gmmc0n0jhrmw0cxrp29bf4pp0.mp4"
+    },
+    "class_type": "LoadAudio",
+    "_meta": {
+      "title": "Load Audio"
+    }
+  },
+  "31": {
+    "inputs": {
+      "audio": "0gmmc0n0jhrmw0cxrp29bf4pp0.mp4"
+    },
+    "class_type": "LoadAudio",
+    "_meta": {
+      "title": "Load Audio"
+    }
+  },
+  "34": {
+    "inputs": {
+      "file": "0gmmc0n0jhrmw0cxrp29bf4pp0.mp4",
+      "video-preview": ""
+    },
+    "class_type": "LoadVideo",
+    "_meta": {
+      "title": "Load Video"
+    }
+  },
+  "35": {
+    "inputs": {
+      "video": [
+        "34",
+        0
+      ]
+    },
+    "class_type": "GetVideoComponents",
+    "_meta": {
+      "title": "Get Video Components"
+    }
+  },
+  "40": {
+    "inputs": {
+      "video": [
+        "41",
+        0
+      ]
+    },
+    "class_type": "GetVideoComponents",
+    "_meta": {
+      "title": "Get Video Components"
+    }
+  },
+  "41": {
+    "inputs": {
+      "file": "0gmmc0n0jhrmw0cxrp29bf4pp0.mp4",
+      "video-preview": ""
+    },
+    "class_type": "LoadVideo",
+    "_meta": {
+      "title": "Load Video"
+    }
+  },
+  "42": {
+    "inputs": {
+      "file": "0gmmc0n0jhrmw0cxrp29bf4pp0.mp4",
+      "video-preview": ""
+    },
+    "class_type": "LoadVideo",
+    "_meta": {
+      "title": "Load Video"
+    }
+  },
+  "43": {
+    "inputs": {
+      "video": [
+        "42",
+        0
+      ]
+    },
+    "class_type": "GetVideoComponents",
+    "_meta": {
+      "title": "Get Video Components"
+    }
+  }
+}

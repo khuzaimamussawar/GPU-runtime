@@ -1,0 +1,11 @@
+FROM alpine:3.20
+
+ARG BUILD_TARGET=smoke
+ARG IMAGE_TAG=latest
+
+LABEL org.opencontainers.image.title="minimax-h3-smoke"
+LABEL org.opencontainers.image.description="Tiny smoke image for testing GitHub -> Hetzner -> Docker Hub build plumbing."
+
+RUN echo "Smoke build target=${BUILD_TARGET} tag=${IMAGE_TAG}" > /smoke.txt
+
+CMD ["cat", "/smoke.txt"]
