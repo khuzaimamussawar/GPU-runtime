@@ -24,6 +24,11 @@ on:
           - runpod-ref2va
           - novita-fl2va
           - novita-ref2va
+      targets_csv:
+        description: "Optional comma-separated target batch; uses one Hetzner server for all targets"
+        required: false
+        default: ""
+        type: string
       image_tag:
         description: "Docker tag to push"
         required: true
@@ -48,6 +53,11 @@ on:
         description: "Keep failed builder alive briefly for manual SSH debugging"
         required: true
         default: false
+        type: boolean
+      delete_server_after_success:
+        description: "Delete the Hetzner builder after successful build(s)"
+        required: true
+        default: true
         type: boolean
       debug_keep_minutes:
         description: "Minutes to keep failed builder when debug_keep_server_on_failure is true"
@@ -106,6 +116,7 @@ jobs:
           REMOTE_IP: ${{ steps.create.outputs.server_ip }}
           SSH_KEY_PATH: ${{ steps.sshkey.outputs.key_path }}
           BUILD_TARGET: ${{ inputs.target }}
+          BUILD_TARGETS: ${{ inputs.targets_csv }}
           IMAGE_TAG: ${{ inputs.image_tag }}
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -118,6 +129,7 @@ jobs:
             -o UserKnownHostsFile=/dev/null \
             "root@${REMOTE_IP}" \
             "BUILD_TARGET='${BUILD_TARGET}' \
+             BUILD_TARGETS='${BUILD_TARGETS}' \
              IMAGE_TAG='${IMAGE_TAG}' \
              DOCKERHUB_USERNAME='${DOCKERHUB_USERNAME}' \
              DOCKERHUB_TOKEN='${DOCKERHUB_TOKEN}' \
@@ -135,9 +147,18 @@ jobs:
           SERVER_ID: ${{ steps.create.outputs.server_id }}
           KEEP_ON_FAILURE: ${{ inputs.debug_keep_server_on_failure }}
           KEEP_MINUTES: ${{ inputs.debug_keep_minutes }}
+          DELETE_ON_SUCCESS: ${{ inputs.delete_server_after_success }}
           BUILD_STATUS: ${{ job.status }}
         run: |
           set -Eeuo pipefail
+          if [ "${BUILD_STATUS}" = "success" ] && [ "${DELETE_ON_SUCCESS}" != "true" ]; then
+            echo "Build succeeded. Keeping Hetzner builder ${SERVER_ID} alive because delete_server_after_success=false."
+            echo "IMPORTANT: this server keeps billing until you delete it in Hetzner."
+            echo "Server ID: ${SERVER_ID}"
+            echo "Server IP: ${{ steps.create.outputs.server_ip }}"
+            echo "SSH key ID: ${{ steps.create.outputs.ssh_key_id }}"
+            exit 0
+          fi
           if [ "${BUILD_STATUS}" != "success" ] && [ "${KEEP_ON_FAILURE}" = "true" ]; then
             echo "Build failed. Keeping Hetzner builder ${SERVER_ID} alive for ${KEEP_MINUTES} minute(s)."
             echo "SSH: ssh -i .tmp/h3_builder_key root@${{ steps.create.outputs.server_ip }}"

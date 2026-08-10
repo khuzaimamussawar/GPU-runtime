@@ -63,6 +63,36 @@ dockerfile_for_target() {
   echo "${repo_dir}/docker/Dockerfile.$1"
 }
 
+build_one_target() {
+  local target="$1"
+  local dockerfile
+  local image
+
+  dockerfile="$(dockerfile_for_target "${target}")"
+  image="$(image_for_target "${target}")"
+
+  if [ ! -f "$dockerfile" ]; then
+    echo "Missing dockerfile: ${dockerfile}" >&2
+    exit 1
+  fi
+
+  log_disk "before docker build ${target}"
+
+  docker buildx build \
+    --file "$dockerfile" \
+    --tag "$image" \
+    --push \
+    --progress plain \
+    --build-arg "REGISTRY_NAMESPACE=${REGISTRY_NAMESPACE}" \
+    --build-arg "IMAGE_TAG=${IMAGE_TAG}" \
+    --build-arg "BUILD_TARGET=${target}" \
+    --secret "id=hf_token,env=HF_TOKEN" \
+    "$repo_dir"
+
+  log_disk "after docker push ${target}"
+  echo "Pushed ${image}"
+}
+
 install_docker
 log_disk "start before clone"
 clone_repo
@@ -71,26 +101,17 @@ log_disk "after clone"
 echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
 docker buildx create --name h3builder --use 2>/dev/null || docker buildx use h3builder
 
-dockerfile="$(dockerfile_for_target "${BUILD_TARGET}")"
-image="$(image_for_target "${BUILD_TARGET}")"
-
-if [ ! -f "$dockerfile" ]; then
-  echo "Missing dockerfile: ${dockerfile}" >&2
-  exit 1
+targets_csv="${BUILD_TARGETS:-}"
+if [ -z "${targets_csv// }" ]; then
+  targets_csv="${BUILD_TARGET}"
 fi
 
-log_disk "before docker build ${BUILD_TARGET}"
-
-docker buildx build \
-  --file "$dockerfile" \
-  --tag "$image" \
-  --push \
-  --progress plain \
-  --build-arg "REGISTRY_NAMESPACE=${REGISTRY_NAMESPACE}" \
-  --build-arg "IMAGE_TAG=${IMAGE_TAG}" \
-  --build-arg "BUILD_TARGET=${BUILD_TARGET}" \
-  --secret "id=hf_token,env=HF_TOKEN" \
-  "$repo_dir"
-
-log_disk "after docker push ${BUILD_TARGET}"
-echo "Pushed ${image}"
+IFS=',' read -ra targets <<< "${targets_csv}"
+for raw_target in "${targets[@]}"; do
+  target="$(echo "${raw_target}" | xargs)"
+  if [ -z "$target" ]; then
+    continue
+  fi
+  echo "===== BUILD TARGET: ${target} ====="
+  build_one_target "$target"
+done

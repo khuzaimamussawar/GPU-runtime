@@ -35,6 +35,34 @@ GitHub Actions -> temporary Hetzner server -> Docker buildx --push -> Docker Hub
 
 without downloading H3 model files.
 
+## One-Server Batch Builds
+
+Hetzner bills by the hour, so prefer batching dependent layers into one workflow run instead of booting one server per layer.
+
+Use `targets_csv` to build several targets sequentially on the same temporary server:
+
+```text
+target: smoke
+targets_csv: qwen-nvfp4,qwen-all
+server_type: ccx33
+delete_server_after_success: true
+debug_keep_server_on_failure: false
+```
+
+When `targets_csv` is set, `target` is only a harmless required dropdown value. The comma-separated batch is what actually runs.
+
+Good batches:
+
+```text
+qwen-nvfp4,qwen-all
+fl2va-base,fl2va-workflow,fl2va-loras,runpod-fl2va,novita-fl2va
+ref2va-base,ref2va-workflow,ref2va-loras,runpod-ref2va,novita-ref2va
+```
+
+The remote script removes the previous checkout before cloning the current repo state, but it keeps Docker layer cache/images on the same builder during that workflow run. That is intentional: it avoids redownloading/rebuilding parent layers.
+
+`delete_server_after_success: false` keeps the Hetzner server alive after success. Use it only when you are watching the clock and will delete the server manually, because billing continues until deletion.
+
 ## Required GitHub Secrets
 
 ```text
