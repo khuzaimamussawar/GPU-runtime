@@ -22,13 +22,41 @@ jobs:
         run: |
           python3 - <<'PY'
           import json
+          from copy import deepcopy
           from pathlib import Path
-          for path in [
+          from src.common.runtime_adapter import _prune_ref2va_placeholders
+
+          paths = [
               Path('workflows/fl2va_master.json'),
               Path('workflows/ref2va_master.json'),
               Path('workflows/manifests/fl2va_manifest.json'),
               Path('workflows/manifests/ref2va_manifest.json'),
-          ]:
-              json.loads(path.read_text())
+          ]
+          parsed = {}
+          for path in paths:
+              parsed[str(path)] = json.loads(path.read_text())
               print('ok', path)
+
+          workflow = deepcopy(parsed['workflows/ref2va_master.json'])
+          manifest = parsed['workflows/manifests/ref2va_manifest.json']
+          _prune_ref2va_placeholders(
+              workflow,
+              manifest['optionalPaths'],
+              image_count=2,
+              video_count=1,
+              audio_count=0,
+          )
+          inputs = workflow['1']['inputs']
+          assert 'ref_images.ref_image_0' in inputs
+          assert 'ref_images.ref_image_1' in inputs
+          assert 'ref_images.ref_image_2' not in inputs
+          assert 'ref_videos.ref_video_0' in inputs
+          assert 'ref_video_audios.ref_video_audio_0' in inputs
+          assert 'ref_videos.ref_video_1' not in inputs
+          assert 'ref_audios.ref_audio_0' not in inputs
+          assert '2' in workflow and '3' in workflow and '4' not in workflow
+          assert '34' in workflow and '35' in workflow
+          assert '42' not in workflow and '43' not in workflow
+          assert '29' not in workflow and '30' not in workflow and '31' not in workflow
+          print('ok ref2va placeholder pruning')
           PY
