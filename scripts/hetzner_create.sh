@@ -11,34 +11,54 @@ set -Eeuo pipefail
 work_dir="${RUNNER_TEMP:-/tmp}/h3-hetzner"
 mkdir -p "$work_dir"
 
-user_data_path="$work_dir/cloud-init.yaml"
 payload_path="$work_dir/create-server.json"
 response_path="$work_dir/create-server-response.json"
+ssh_key_payload_path="$work_dir/create-ssh-key.json"
+ssh_key_response_path="$work_dir/create-ssh-key-response.json"
 
-cat > "$user_data_path" <<EOF
-#cloud-config
-users:
-  - name: root
-    ssh_authorized_keys:
-      - ${BUILDER_SSH_PUBLIC_KEY}
-ssh_pwauth: false
-disable_root: false
-package_update: false
-package_upgrade: false
-EOF
-
-python3 - "$payload_path" "$user_data_path" <<'PY'
+python3 - "$ssh_key_payload_path" <<'PY'
 import json
 import os
 import sys
-payload_path, user_data_path = sys.argv[1], sys.argv[2]
+payload_path = sys.argv[1]
+payload = {
+    "name": f"{os.environ['BUILDER_NAME']}-key",
+    "public_key": os.environ["BUILDER_SSH_PUBLIC_KEY"],
+}
+with open(payload_path, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle)
+PY
+
+echo "Creating Hetzner SSH key ${BUILDER_NAME}-key"
+ssh_key_status="$(curl -sS \
+  -w "%{http_code}" \
+  -o "$ssh_key_response_path" \
+  -H "Authorization: Bearer ${HETZNER_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "@${ssh_key_payload_path}" \
+  https://api.hetzner.cloud/v1/ssh_keys)"
+
+if [ "${ssh_key_status}" -lt 200 ] || [ "${ssh_key_status}" -ge 300 ]; then
+  echo "Hetzner create SSH key failed with HTTP ${ssh_key_status}" >&2
+  echo "Response body:" >&2
+  python3 -m json.tool "$ssh_key_response_path" >&2 || cat "$ssh_key_response_path" >&2
+  exit 1
+fi
+
+ssh_key_id="$(python3 -c "import json; print(json.load(open('$ssh_key_response_path'))['ssh_key']['id'])")"
+
+python3 - "$payload_path" "$ssh_key_id" <<'PY'
+import json
+import os
+import sys
+payload_path, ssh_key_id = sys.argv[1], int(sys.argv[2])
 payload = {
     "name": os.environ["BUILDER_NAME"],
     "server_type": os.environ["SERVER_TYPE"],
     "image": os.environ["HETZNER_IMAGE"],
     "location": os.environ["HETZNER_LOCATION"],
     "start_after_create": True,
-    "user_data": open(user_data_path, "r", encoding="utf-8").read(),
+    "ssh_keys": [ssh_key_id],
     "public_net": {
         "enable_ipv4": True,
         "enable_ipv6": False
@@ -69,10 +89,12 @@ server_ip="$(python3 -c "import json; print(json.load(open('$response_path'))['s
 
 echo "server_id=${server_id}"
 echo "server_ip=${server_ip}"
+echo "ssh_key_id=${ssh_key_id}"
 
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
   {
     echo "server_id=${server_id}"
     echo "server_ip=${server_ip}"
+    echo "ssh_key_id=${ssh_key_id}"
   } >> "$GITHUB_OUTPUT"
 fi

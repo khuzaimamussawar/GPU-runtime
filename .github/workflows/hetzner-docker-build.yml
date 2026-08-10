@@ -97,7 +97,7 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          bash scripts/wait_for_ssh.sh "${{ steps.create.outputs.server_ip }}" "${{ steps.sshkey.outputs.key_path }}" 600
+          bash scripts/wait_for_ssh.sh "${{ steps.create.outputs.server_ip }}" "${{ steps.sshkey.outputs.key_path }}" 900
 
       - name: Run remote Docker build
         shell: bash
@@ -142,4 +142,4 @@ jobs:
             echo "SSH: ssh -i .tmp/h3_builder_key root@${{ steps.create.outputs.server_ip }}"
             sleep "$((KEEP_MINUTES * 60))"
           fi
-          bash scripts/hetzner_delete.sh "${SERVER_ID}"
+          bash scripts/hetzner_delete.sh "${SERVER_ID}" "${{ steps.create.outputs.ssh_key_id }}"
