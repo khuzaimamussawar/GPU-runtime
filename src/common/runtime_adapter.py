@@ -28,6 +28,26 @@ def _remove_path(obj: dict[str, Any], dotted: str | None) -> None:
         return
 
 
+def _node_id_from_input_path(path: str | None) -> str | None:
+    if not path:
+        return None
+    return str(path).split(".", 1)[0] or None
+
+
+def _drop_node(workflow: dict[str, Any], node_id: str | None) -> None:
+    if node_id:
+        workflow.pop(str(node_id), None)
+
+
+def _drop_literal_input(workflow: dict[str, Any], node_id: str, input_name: str) -> None:
+    node = workflow.get(str(node_id))
+    if not isinstance(node, dict):
+        return
+    inputs = node.get("inputs")
+    if isinstance(inputs, dict):
+        inputs.pop(input_name, None)
+
+
 def _round_h3_frames(job: H3Job) -> int:
     """Round up to MiniMax H3's native 17*k+5 frame lattice."""
     requested = max(1, round(job.duration_seconds * job.fps))
@@ -71,6 +91,34 @@ def _as_list(value: Any) -> list[Any]:
     return [value]
 
 
+def _prune_ref2va_placeholders(
+    workflow: dict[str, Any],
+    optional: dict[str, str],
+    *,
+    image_count: int,
+    video_count: int,
+    audio_count: int,
+) -> None:
+    # Comfy API serializes dynamic MiniMax H3 reference inputs as literal keys
+    # containing dots (for example `ref_images.ref_image_0`). They are not nested
+    # JSON objects, so generic dotted-path helpers cannot remove them safely.
+    reference_node = str(optional.get("referenceNode") or "1")
+
+    for index in range(image_count, 9):
+        _drop_literal_input(workflow, reference_node, f"ref_images.ref_image_{index}")
+        _drop_node(workflow, _node_id_from_input_path(optional.get(f"referenceImage{index}")))
+
+    for index in range(video_count, 3):
+        _drop_literal_input(workflow, reference_node, f"ref_videos.ref_video_{index}")
+        _drop_literal_input(workflow, reference_node, f"ref_video_audios.ref_video_audio_{index}")
+        _drop_node(workflow, _node_id_from_input_path(optional.get(f"referenceVideo{index}")))
+        _drop_node(workflow, optional.get(f"referenceVideoComponent{index}"))
+
+    for index in range(audio_count, 3):
+        _drop_literal_input(workflow, reference_node, f"ref_audios.ref_audio_{index}")
+        _drop_node(workflow, _node_id_from_input_path(optional.get(f"referenceAudio{index}")))
+
+
 def _materialize_inputs(
     workflow: dict[str, Any],
     required: dict[str, str],
@@ -100,6 +148,7 @@ def _materialize_inputs(
             )
         else:
             _remove_path(workflow, optional.get("firstFrameBinding"))
+            _drop_node(workflow, _node_id_from_input_path(required.get("firstFrameImage")))
 
         if last_frame:
             runtime.set_path(
@@ -109,6 +158,7 @@ def _materialize_inputs(
             )
         else:
             _remove_path(workflow, optional.get("lastFrameBinding"))
+            _drop_node(workflow, _node_id_from_input_path(required.get("lastFrameImage")))
         return
 
     if job.task_family != "h3_ref2va":
@@ -121,6 +171,12 @@ def _materialize_inputs(
     video_refs = _as_list(inputs.get("referenceVideos") or inputs.get("referenceVideo") or inputs.get("video"))
     audio_refs = _as_list(inputs.get("referenceAudios") or inputs.get("referenceAudio") or inputs.get("audio"))
 
+    if len(refs) > 9:
+        raise runtime.H3RuntimeError("h3_ref2va supports at most 9 image references per job")
+    if len(video_refs) > 3:
+        raise runtime.H3RuntimeError("h3_ref2va supports at most 3 reference videos per job")
+    if len(audio_refs) > 3:
+        raise runtime.H3RuntimeError("h3_ref2va supports at most 3 standalone audio references per job")
     if not refs and not video_refs and not audio_refs:
         raise runtime.H3RuntimeError(
             "h3_ref2va requires at least one image, video, or audio reference"
@@ -128,48 +184,43 @@ def _materialize_inputs(
 
     reference_fit = runtime.normalize_reference_fit(job.settings)
 
-    # The baked master intentionally contains placeholder loaders so the graph is
-    # easy to edit in ComfyUI. Remove every unused binding before submission so
-    # example.png/test media can never leak into a production generation.
-    for index in range(9):
+    for index, ref in enumerate(refs):
         loader_path = optional.get(f"referenceImage{index}")
-        binding_path = optional.get(f"referenceImageBinding{index}")
-        if index < len(refs) and loader_path:
-            runtime.set_path(
-                workflow,
-                loader_path,
-                runtime.materialize_image(
-                    runtime.media_ref(refs[index]), media_dir, job, reference_fit
-                ),
-            )
-        else:
-            _remove_path(workflow, binding_path)
+        if not loader_path:
+            raise runtime.H3RuntimeError(f"Missing workflow path for reference image {index}")
+        runtime.set_path(
+            workflow,
+            loader_path,
+            runtime.materialize_image(runtime.media_ref(ref), media_dir, job, reference_fit),
+        )
 
-    for index in range(3):
+    for index, ref in enumerate(video_refs):
         loader_path = optional.get(f"referenceVideo{index}")
-        video_binding = optional.get(f"referenceVideoBinding{index}")
-        audio_binding = optional.get(f"referenceVideoAudioBinding{index}")
-        if index < len(video_refs) and loader_path:
-            runtime.set_path(
-                workflow,
-                loader_path,
-                runtime.download_media(runtime.media_ref(video_refs[index]), media_dir),
-            )
-        else:
-            _remove_path(workflow, video_binding)
-            _remove_path(workflow, audio_binding)
+        if not loader_path:
+            raise runtime.H3RuntimeError(f"Missing workflow path for reference video {index}")
+        runtime.set_path(
+            workflow,
+            loader_path,
+            runtime.download_media(runtime.media_ref(ref), media_dir),
+        )
 
-    for index in range(3):
+    for index, ref in enumerate(audio_refs):
         loader_path = optional.get(f"referenceAudio{index}")
-        binding_path = optional.get(f"referenceAudioBinding{index}")
-        if index < len(audio_refs) and loader_path:
-            runtime.set_path(
-                workflow,
-                loader_path,
-                runtime.download_media(runtime.media_ref(audio_refs[index]), media_dir),
-            )
-        else:
-            _remove_path(workflow, binding_path)
+        if not loader_path:
+            raise runtime.H3RuntimeError(f"Missing workflow path for reference audio {index}")
+        runtime.set_path(
+            workflow,
+            loader_path,
+            runtime.download_media(runtime.media_ref(ref), media_dir),
+        )
+
+    _prune_ref2va_placeholders(
+        workflow,
+        optional,
+        image_count=len(refs),
+        video_count=len(video_refs),
+        audio_count=len(audio_refs),
+    )
 
 
 def _cleanup_job_files(job_id: str, remove_outputs: bool) -> None:
@@ -185,9 +236,8 @@ def _all_outputs_uploaded(result: dict[str, Any] | None) -> bool:
     if not result:
         return False
     outputs = result.get("outputs") or {}
-    if not outputs:
-        return False
-    return all(bool(item.get("uploaded")) for item in outputs.values() if isinstance(item, dict))
+    items = [item for item in outputs.values() if isinstance(item, dict)]
+    return bool(items) and all(bool(item.get("uploaded")) for item in items)
 
 
 def run_h3_job(
