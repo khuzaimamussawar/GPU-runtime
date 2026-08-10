@@ -223,6 +223,18 @@ def _materialize_inputs(
     )
 
 
+def _upload_outputs(paths: dict[str, Path], job: H3Job) -> dict[str, Any]:
+    """Upload the two final files using the SceneBuilder plan's canonical keys."""
+    project = runtime.safe_name(job.project_id)
+    job_name = runtime.safe_name(job.job_id)
+    master_key = f"projects/{project}/video/generated/{job_name}-h265.mp4"
+    preview_key = f"projects/{project}/video/previews/{job_name}-h264-preview.mp4"
+    return {
+        "master": runtime.upload_file(paths["master"], master_key, "video/mp4"),
+        "preview": runtime.upload_file(paths["preview"], preview_key, "video/mp4"),
+    }
+
+
 def _cleanup_job_files(job_id: str, remove_outputs: bool) -> None:
     safe = runtime.safe_name(job_id)
     shutil.rmtree(runtime.COMFY_INPUT / "scenebuilder" / safe, ignore_errors=True)
@@ -248,12 +260,20 @@ def run_h3_job(
     runtime.normalize_frame_count = _round_h3_frames
     runtime.materialize_inputs = _materialize_inputs
     runtime.prepare_workflow = _prepare_workflow
+    runtime.upload_outputs = _upload_outputs
 
     normalized = runtime.unwrap_payload(payload)
+    normalized.setdefault("taskFamily", expected_task_family)
     job_id = str(normalized.get("jobId") or normalized.get("job_id") or normalized.get("id") or "unknown")
     result: dict[str, Any] | None = None
     try:
         result = runtime.run_h3_job(payload, expected_task_family, runtime_name)
+        # The base runtime reports raw requested frames; return the actual H3 frame
+        # count used by the patched workflow so D1/debug metadata stays truthful.
+        try:
+            result["frames"] = _round_h3_frames(runtime.normalize_job(normalized))
+        except Exception:
+            pass
         return result
     finally:
         # Always remove downloaded inputs. Encoded/source outputs are removed only
