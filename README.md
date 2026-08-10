@@ -242,3 +242,25 @@ Returned output fields:
 ```
 
 SceneBuilder should save object keys in D1 timeline/job rows and derive public URLs only when rendering UI previews.
+
+## H3 Image Preparation Contract
+
+SceneBuilder should send exact `width` and `height` values resolved from the project aspect ratio and MP preset. The H3 runtime preprocesses image inputs before passing them to ComfyUI:
+
+- FL2VA first/last-frame images always use `match`.
+- `match` means: largest possible center crop to the target aspect ratio, then Lanczos resize to the exact requested H3 `width x height`.
+- `max` means: preserve the whole image, resize down only if the longest side exceeds `referenceMaxSize` / `maxInputSize` / `1024`, and do not upscale.
+- `contain` means: preserve the whole image and pad to the exact requested H3 frame size.
+
+Normal users should see friendly labels such as `Match project frame`, `Fit full image`, or `Auto`. Do not expose raw Comfy node names. Advanced/admin UI can still send:
+
+```json
+{
+  "settings": {
+    "referenceFit": "max",
+    "referenceMaxSize": 1024
+  }
+}
+```
+
+For keyframes/scene images, use `match`. For character, object, style, mood, or loose visual references, use `max` unless the user explicitly wants them framed as full video panels.

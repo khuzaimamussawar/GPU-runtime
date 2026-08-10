@@ -5,7 +5,7 @@ FROM ${REGISTRY_NAMESPACE}/minimax-h3-fl2va-loras:${IMAGE_TAG}
 LABEL org.opencontainers.image.title="minimax-h3-novita-fl2va"
 LABEL scene_builder.runtime="novita-fl2va"
 
-RUN python3 -m pip install --no-cache-dir boto3
+RUN python3 -m pip install --no-cache-dir boto3 pillow
 
 COPY src /opt/scenebuilder-h3/src
 COPY scripts/encode_outputs.sh /opt/scenebuilder-h3/scripts/encode_outputs.sh

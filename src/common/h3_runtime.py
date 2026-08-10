@@ -180,22 +180,23 @@ def materialize_inputs(
         raise H3RuntimeError("fflf requires lastFrame/endFrame input")
 
     if first_frame and "firstFrameImage" in required:
-        set_path(workflow, required["firstFrameImage"], download_media(first_frame, media_dir))
+        set_path(workflow, required["firstFrameImage"], materialize_image(first_frame, media_dir, job, "match"))
     if last_frame and "lastFrameImage" in required:
-        set_path(workflow, required["lastFrameImage"], download_media(last_frame, media_dir))
+        set_path(workflow, required["lastFrameImage"], materialize_image(last_frame, media_dir, job, "match"))
 
     refs = inputs.get("referenceImages") or inputs.get("references") or []
     if isinstance(refs, dict):
         refs = list(refs.values())
     if job.task_family == "h3_ref2va" and not refs and not first_frame:
         raise H3RuntimeError("h3_ref2va requires at least one referenceImages entry or firstFrame")
+    reference_fit = normalize_reference_fit(job.settings)
     for index, ref in enumerate(refs[:9]):
         path = optional.get(f"referenceImage{index}")
         if path:
-            set_path(workflow, path, download_media(media_ref(ref), media_dir))
+            set_path(workflow, path, materialize_image(media_ref(ref), media_dir, job, reference_fit))
 
     if "firstReferenceImage" in required and not refs and first_frame:
-        set_path(workflow, required["firstReferenceImage"], download_media(first_frame, media_dir))
+        set_path(workflow, required["firstReferenceImage"], materialize_image(first_frame, media_dir, job, reference_fit))
 
     audio_ref = media_ref(inputs.get("referenceAudio") or inputs.get("audio"))
     if audio_ref and "firstReferenceAudio" in required:
@@ -242,6 +243,93 @@ def download_media(ref: dict[str, Any] | None, target_dir: Path) -> str:
     return str(output.relative_to(COMFY_INPUT)).replace("\\", "/")
 
 
+def materialize_image(ref: dict[str, Any] | None, target_dir: Path, job: H3Job, fit: str) -> str:
+    relative = download_media(ref, target_dir)
+    source = COMFY_INPUT / relative
+    if source.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+        return relative
+    prepared = preprocess_image_for_h3(source, job, fit)
+    return str(prepared.relative_to(COMFY_INPUT)).replace("\\", "/")
+
+
+def normalize_reference_fit(settings: dict[str, Any]) -> str:
+    value = str(
+        settings.get("inputImageFit")
+        or settings.get("sceneRefFit")
+        or settings.get("referenceFit")
+        or "max"
+    ).lower()
+    if value in {"match", "crop", "fill", "frame"}:
+        return "match"
+    if value in {"contain", "pad", "fit"}:
+        return "contain"
+    return "max"
+
+
+def preprocess_image_for_h3(source: Path, job: H3Job, fit: str) -> Path:
+    try:
+        from PIL import Image, ImageOps
+    except Exception as exc:
+        raise H3RuntimeError("H3 image preprocessing requires Pillow in the runtime image") from exc
+
+    target_w, target_h = job.width, job.height
+    output = source.with_name(f"{source.stem}_h3_{fit}_{target_w}x{target_h}.png")
+    if output.exists():
+        return output
+
+    with Image.open(source) as opened:
+        image = ImageOps.exif_transpose(opened).convert("RGB")
+
+    if fit == "match":
+        processed = resize_to_exact_aspect(image, target_w, target_h)
+    elif fit == "contain":
+        processed = contain_to_exact_aspect(image, target_w, target_h)
+    else:
+        processed = resize_inside_max(image, job.settings)
+
+    processed.save(output, "PNG", optimize=True)
+    return output
+
+
+def resize_to_exact_aspect(image: Any, target_w: int, target_h: int) -> Any:
+    target_ratio = target_w / target_h
+    source_w, source_h = image.size
+    source_ratio = source_w / source_h
+    if source_ratio > target_ratio:
+        crop_w = round(source_h * target_ratio)
+        left = max(0, (source_w - crop_w) // 2)
+        box = (left, 0, left + crop_w, source_h)
+    else:
+        crop_h = round(source_w / target_ratio)
+        top = max(0, (source_h - crop_h) // 2)
+        box = (0, top, source_w, top + crop_h)
+    return image.crop(box).resize((target_w, target_h), resample_lanczos())
+
+
+def contain_to_exact_aspect(image: Any, target_w: int, target_h: int) -> Any:
+    from PIL import ImageOps
+
+    return ImageOps.pad(image, (target_w, target_h), method=resample_lanczos(), color=(0, 0, 0), centering=(0.5, 0.5))
+
+
+def resize_inside_max(image: Any, settings: dict[str, Any]) -> Any:
+    source_w, source_h = image.size
+    max_size = int(settings.get("referenceMaxSize") or settings.get("maxInputSize") or 1024)
+    max_size = max(256, min(2048, max_size))
+    longest = max(source_w, source_h)
+    if longest <= max_size:
+        return image
+    scale = max_size / longest
+    target = (max(32, round(source_w * scale)), max(32, round(source_h * scale)))
+    return image.resize(target, resample_lanczos())
+
+
+def resample_lanczos() -> Any:
+    from PIL import Image
+
+    return getattr(getattr(Image, "Resampling", Image), "LANCZOS")
+
+
 def reject_unsupported_settings(manifest: dict[str, Any], settings: dict[str, Any]) -> None:
     supported = {
         "textEncoder",
@@ -252,6 +340,10 @@ def reject_unsupported_settings(manifest: dict[str, Any], settings: dict[str, An
         "seed",
         "sageAttention",
         "referenceFit",
+        "inputImageFit",
+        "sceneRefFit",
+        "referenceMaxSize",
+        "maxInputSize",
         "spectrum",
         "spectrumEnabled",
     }

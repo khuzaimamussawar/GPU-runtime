@@ -5,7 +5,7 @@ FROM ${REGISTRY_NAMESPACE}/minimax-h3-ref2va-loras:${IMAGE_TAG}
 LABEL org.opencontainers.image.title="minimax-h3-runpod-ref2va"
 LABEL scene_builder.runtime="runpod-ref2va"
 
-RUN python3 -m pip install --no-cache-dir boto3 runpod
+RUN python3 -m pip install --no-cache-dir boto3 pillow runpod
 
 COPY src /opt/scenebuilder-h3/src
 COPY scripts/encode_outputs.sh /opt/scenebuilder-h3/scripts/encode_outputs.sh
