@@ -84,12 +84,15 @@ Heavy layers are shared by Docker content digest where possible.
 
 ## Option A Encoder Layout
 
-SceneBuilder uses 4 final endpoint images, not 8. Each final image contains both Qwen text encoders:
+SceneBuilder uses 4 final endpoint images, not 8. Each final image contains both Qwen text encoders, while the encoder layers remain separate:
 
 ```text
-qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors
-qwen3vl_32b_minimax_h3_int8_convrot.safetensors
+base
+qwen-nvfp4
+qwen-all     adds qwen-int8 on top of qwen-nvfp4
 ```
+
+`qwen-nvfp4` stays reusable as its own Docker image/layer. `qwen-all` does not redownload NVFP4; it inherits the already-built NVFP4 layer and adds `qwen3vl_32b_minimax_h3_int8_convrot.safetensors`.
 
 The frontend sends the selected encoder, and the runtime handler swaps the Comfy `clip_name` field from the workflow manifest before inference.
 
@@ -97,6 +100,7 @@ Build order:
 
 ```text
 base
+qwen-nvfp4
 qwen-all
 fl2va-base
 ref2va-base
@@ -110,4 +114,4 @@ novita-fl2va
 novita-ref2va
 ```
 
-`qwen-nvfp4` and `qwen-int8` remain available only as optional diagnostic targets. They are not used by the final 4-image deployment path.
+`qwen-int8` remains available as an optional diagnostic target. The final 4-image deployment path uses `qwen-all` so each runtime can switch between NVFP4 and INT8 from the request payload.
