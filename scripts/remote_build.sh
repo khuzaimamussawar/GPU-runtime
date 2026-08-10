@@ -10,6 +10,7 @@ set -Eeuo pipefail
 
 export REGISTRY_NAMESPACE="${REGISTRY_NAMESPACE:-${DOCKERHUB_USERNAME}}"
 repo_dir="/opt/minimax-h3-serverless"
+docker_build_attempts="${DOCKER_BUILD_ATTEMPTS:-2}"
 
 log_disk() {
   if [ -x "${repo_dir}/scripts/log_disk.sh" ]; then
@@ -67,6 +68,8 @@ build_one_target() {
   local target="$1"
   local dockerfile
   local image
+  local attempt
+  local status
 
   dockerfile="$(dockerfile_for_target "${target}")"
   image="$(image_for_target "${target}")"
@@ -78,16 +81,32 @@ build_one_target() {
 
   log_disk "before docker build ${target}"
 
-  docker buildx build \
-    --file "$dockerfile" \
-    --tag "$image" \
-    --push \
-    --progress plain \
-    --build-arg "REGISTRY_NAMESPACE=${REGISTRY_NAMESPACE}" \
-    --build-arg "IMAGE_TAG=${IMAGE_TAG}" \
-    --build-arg "BUILD_TARGET=${target}" \
-    --secret "id=hf_token,env=HF_TOKEN" \
-    "$repo_dir"
+  attempt=1
+  while true; do
+    echo "Docker build attempt ${attempt}/${docker_build_attempts} for ${target}"
+    if docker buildx build \
+      --file "$dockerfile" \
+      --tag "$image" \
+      --push \
+      --progress plain \
+      --build-arg "REGISTRY_NAMESPACE=${REGISTRY_NAMESPACE}" \
+      --build-arg "IMAGE_TAG=${IMAGE_TAG}" \
+      --build-arg "BUILD_TARGET=${target}" \
+      --secret "id=hf_token,env=HF_TOKEN" \
+      "$repo_dir"; then
+      break
+    fi
+
+    status=$?
+    log_disk "failed docker build ${target} attempt ${attempt}"
+    if [ "$attempt" -ge "$docker_build_attempts" ]; then
+      echo "Docker build failed after ${attempt} attempt(s): ${target}" >&2
+      exit "$status"
+    fi
+    attempt=$((attempt + 1))
+    echo "Retrying ${target} in 15 seconds. Existing BuildKit layers should be reused when possible."
+    sleep 15
+  done
 
   log_disk "after docker push ${target}"
   echo "Pushed ${image}"
