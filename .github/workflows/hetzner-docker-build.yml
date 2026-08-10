@@ -134,10 +134,10 @@ jobs:
           SERVER_ID: ${{ steps.create.outputs.server_id }}
           KEEP_ON_FAILURE: ${{ inputs.debug_keep_server_on_failure }}
           KEEP_MINUTES: ${{ inputs.debug_keep_minutes }}
-          BUILD_FAILED: ${{ failure() }}
+          BUILD_STATUS: ${{ job.status }}
         run: |
           set -Eeuo pipefail
-          if [ "${BUILD_FAILED}" = "true" ] && [ "${KEEP_ON_FAILURE}" = "true" ]; then
+          if [ "${BUILD_STATUS}" != "success" ] && [ "${KEEP_ON_FAILURE}" = "true" ]; then
             echo "Build failed. Keeping Hetzner builder ${SERVER_ID} alive for ${KEEP_MINUTES} minute(s)."
             echo "SSH: ssh -i .tmp/h3_builder_key root@${{ steps.create.outputs.server_ip }}"
             sleep "$((KEEP_MINUTES * 60))"
