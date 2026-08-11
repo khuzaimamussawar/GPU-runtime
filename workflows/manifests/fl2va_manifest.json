@@ -1,6 +1,6 @@
 {
   "workflowId": "fl2va_master",
-  "workflowVersion": "2026-08-10-initial",
+  "workflowVersion": "2026-08-11-runtime-v2",
   "taskFamily": "h3_fl2va",
   "modes": ["t2v", "i2v", "fflf", "l2v"],
   "modelFiles": {
@@ -31,6 +31,10 @@
   },
   "optionalPaths": {
     "spectrum": "27.inputs",
-    "seed": "12.inputs.noise_seed"
+    "seed": "12.inputs.noise_seed",
+    "sageAttention": "26.inputs.sage_attention",
+    "firstFrameBinding": "3.inputs.first_frame",
+    "lastFrameBinding": "3.inputs.last_frame",
+    "outputPrefix": "22.inputs.filename_prefix"
   }
 }

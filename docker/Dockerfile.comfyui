@@ -1,0 +1,28 @@
+# syntax=docker/dockerfile:1.7
+ARG REGISTRY_NAMESPACE
+ARG IMAGE_TAG=latest
+FROM ${REGISTRY_NAMESPACE}/minimax-h3-base:${IMAGE_TAG}
+
+# Exact ComfyUI revision used by the locally validated H3 workflows:
+# v0.31.0-9-g2a68ce33
+ARG COMFYUI_COMMIT=2a68ce33b4c9ea6ee4283e618a74560cefb32694
+
+LABEL org.opencontainers.image.title="minimax-h3-comfyui"
+LABEL scene_builder.layer="shared-comfyui-artifact"
+LABEL scene_builder.comfyui.commit="${COMFYUI_COMMIT}"
+
+# Build one immutable source overlay. git archive contains only tracked ComfyUI
+# source files, so it never includes or overwrites baked models, custom_nodes,
+# user data, inputs, outputs, or temporary generation files.
+RUN set -eux; \
+    git -C /opt/ComfyUI remote set-url origin https://github.com/Comfy-Org/ComfyUI.git; \
+    git -C /opt/ComfyUI fetch --depth 1 origin "${COMFYUI_COMMIT}"; \
+    mkdir -p /artifacts; \
+    git -C /opt/ComfyUI archive \
+      --format=tar.gz \
+      --output=/artifacts/comfyui-overlay.tar.gz \
+      "${COMFYUI_COMMIT}"; \
+    printf '%s\n' "${COMFYUI_COMMIT}" > /artifacts/COMFYUI_COMMIT
+
+RUN test -s /artifacts/comfyui-overlay.tar.gz \
+ && test "$(cat /artifacts/COMFYUI_COMMIT)" = "${COMFYUI_COMMIT}"

@@ -1,6 +1,6 @@
 {
   "workflowId": "ref2va_master",
-  "workflowVersion": "2026-08-10-initial",
+  "workflowVersion": "2026-08-11-runtime-v3",
   "taskFamily": "h3_ref2va",
   "modes": ["r2v"],
   "modelFiles": {
@@ -29,11 +29,10 @@
     "sageAttention": "22.inputs.sage_attention",
     "seed": "23.inputs.noise_seed",
     "sampler": "24.inputs.sampler_name",
-    "audioVae": "26.inputs.vae_name",
-    "firstReferenceAudio": "29.inputs.audio",
-    "firstReferenceVideo": "34.inputs.file"
+    "audioVae": "26.inputs.vae_name"
   },
   "optionalPaths": {
+    "referenceNode": "1",
     "referenceImage0": "2.inputs.image",
     "referenceImage1": "3.inputs.image",
     "referenceImage2": "4.inputs.image",
@@ -43,6 +42,16 @@
     "referenceImage6": "7.inputs.image",
     "referenceImage7": "9.inputs.image",
     "referenceImage8": "10.inputs.image",
-    "spectrum": "21.inputs"
+    "referenceVideo0": "34.inputs.file",
+    "referenceVideo1": "42.inputs.file",
+    "referenceVideo2": "41.inputs.file",
+    "referenceVideoComponent0": "35",
+    "referenceVideoComponent1": "43",
+    "referenceVideoComponent2": "40",
+    "referenceAudio0": "29.inputs.audio",
+    "referenceAudio1": "30.inputs.audio",
+    "referenceAudio2": "31.inputs.audio",
+    "spectrum": "21.inputs",
+    "outputPrefix": "16.inputs.filename_prefix"
   }
 }

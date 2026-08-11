@@ -1,0 +1,121 @@
+name: Validate H3 runtime integration
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'workflows/**'
+      - 'docker/**'
+      - 'scripts/remote_build.sh'
+      - '.github/workflows/hetzner-docker-build.yml'
+      - '.github/workflows/validate-h3-runtime-integration.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/**'
+      - 'workflows/**'
+      - 'docker/**'
+      - 'scripts/remote_build.sh'
+      - '.github/workflows/hetzner-docker-build.yml'
+      - '.github/workflows/validate-h3-runtime-integration.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile Python sources
+        run: python3 -m compileall -q src
+      - name: Check remote build script syntax
+        run: bash -n scripts/remote_build.sh
+      - name: Validate pinned shared dependency targets
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          expected = {
+              'docker/Dockerfile.comfyui': [
+                  '2a68ce33b4c9ea6ee4283e618a74560cefb32694',
+                  'minimax-h3-comfyui',
+              ],
+              'docker/Dockerfile.sageattention': [
+                  'eb615cf6cf4d221338033340ee2de1c37fbdba4a',
+                  '2.2.0',
+                  'TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0;12.0"',
+                  'minimax-h3-sageattention',
+              ],
+              'docker/Dockerfile.custom-nodes': [
+                  '073efb07419f56cc714e099a82e49fbc23ad9263',
+                  '1427dfe96029985be9cbc0033abb44bf2e7adc4f',
+                  'Spectrum MiniMax H3 v0.2.1',
+                  'minimax-h3-custom-nodes',
+              ],
+          }
+          for filename, needles in expected.items():
+              text = Path(filename).read_text()
+              for needle in needles:
+                  assert needle in text, (filename, needle)
+              print('ok pins', filename)
+
+          for filename in ('docker/Dockerfile.fl2va-workflow', 'docker/Dockerfile.ref2va-workflow'):
+              text = Path(filename).read_text()
+              for image in ('minimax-h3-comfyui', 'minimax-h3-sageattention', 'minimax-h3-custom-nodes'):
+                  assert image in text, (filename, image)
+              assert 'sageattention-2.2.0-*.whl' in text
+              assert 'Spectrum-MiniMax-H3' in text
+              print('ok shared artifacts', filename)
+
+          build_ui = Path('.github/workflows/hetzner-docker-build.yml').read_text()
+          remote_build = Path('scripts/remote_build.sh').read_text()
+          for target in ('comfyui', 'sageattention', 'custom-nodes'):
+              assert f'- {target}' in build_ui, target
+              assert f'{target})' in remote_build, target
+          print('ok shared build targets')
+          PY
+      - name: Validate workflow JSON and manifests
+        run: |
+          python3 - <<'PY'
+          import json
+          from copy import deepcopy
+          from pathlib import Path
+          from src.common.runtime_adapter import _prune_ref2va_placeholders
+
+          paths = [
+              Path('workflows/fl2va_master.json'),
+              Path('workflows/ref2va_master.json'),
+              Path('workflows/manifests/fl2va_manifest.json'),
+              Path('workflows/manifests/ref2va_manifest.json'),
+          ]
+          parsed = {}
+          for path in paths:
+              parsed[str(path)] = json.loads(path.read_text())
+              print('ok', path)
+
+          workflow = deepcopy(parsed['workflows/ref2va_master.json'])
+          manifest = parsed['workflows/manifests/ref2va_manifest.json']
+          _prune_ref2va_placeholders(
+              workflow,
+              manifest['optionalPaths'],
+              image_count=2,
+              video_count=1,
+              audio_count=0,
+          )
+          inputs = workflow['1']['inputs']
+          assert 'ref_images.ref_image_0' in inputs
+          assert 'ref_images.ref_image_1' in inputs
+          assert 'ref_images.ref_image_2' not in inputs
+          assert 'ref_videos.ref_video_0' in inputs
+          assert 'ref_video_audios.ref_video_audio_0' in inputs
+          assert 'ref_videos.ref_video_1' not in inputs
+          assert 'ref_audios.ref_audio_0' not in inputs
+          assert '2' in workflow and '3' in workflow and '4' not in workflow
+          assert '34' in workflow and '35' in workflow
+          assert '42' not in workflow and '43' not in workflow
+          assert '29' not in workflow and '30' not in workflow and '31' not in workflow
+          print('ok ref2va placeholder pruning')
+          PY

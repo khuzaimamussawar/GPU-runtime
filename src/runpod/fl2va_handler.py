@@ -1,4 +1,4 @@
-from src.common.h3_runtime import run_h3_job
+from src.common.runtime_adapter import run_h3_job
 
 
 def handler(job):

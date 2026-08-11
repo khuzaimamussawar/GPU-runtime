@@ -44,15 +44,14 @@ RUN ${PYTHON_BIN} -m pip install --no-cache-dir \
     torchaudio \
     --index-url ${PYTORCH_CUDA_INDEX}
 
-# Keep ComfyUI and acceleration nodes in the base layer. Pin exact commits after first green build.
+# This is the already-built foundation image. Keep it stable; tested ComfyUI,
+# SageAttention and workflow custom nodes are now built as separate shared
+# artifact targets so refreshing them never invalidates the giant model chain.
 RUN git clone --depth 1 https://github.com/comfyanonymous/ComfyUI.git /opt/ComfyUI
 
 WORKDIR /opt/ComfyUI
 RUN ${PYTHON_BIN} -m pip install --no-cache-dir -r requirements.txt
 
-# Custom nodes are intentionally installed in this layer so handler/workflow changes do not rebuild them.
-# Pin commits once the local workflows are validated. SageAttention 2.2, EasyCache, Spectrum,
-# and required H3 helper nodes belong here after the first base smoke test is green.
 RUN mkdir -p /opt/ComfyUI/custom_nodes
 
 WORKDIR /opt/scenebuilder-h3
