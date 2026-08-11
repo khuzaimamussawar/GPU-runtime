@@ -1,6 +1,6 @@
 {
   "workflowId": "fl2va_master",
-  "workflowVersion": "2026-08-11-runtime-v2",
+  "workflowVersion": "2026-08-11-runtime-v3",
   "taskFamily": "h3_fl2va",
   "modes": ["t2v", "i2v", "fflf", "l2v"],
   "modelFiles": {
