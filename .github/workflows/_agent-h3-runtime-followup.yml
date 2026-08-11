@@ -1,0 +1,42 @@
+name: Apply H3 runtime follow-up
+
+on:
+  push:
+    branches:
+      - agent/h3-director-audio-denoise-progress
+    paths:
+      - scripts/_agent_h3_runtime_followup.py
+      - .github/workflows/_agent-h3-runtime-followup.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Apply focused runtime patch
+        run: python scripts/_agent_h3_runtime_followup.py
+
+      - name: Compile Python sources
+        run: python -m py_compile src/common/h3_runtime.py src/common/runtime_adapter.py src/common/job_contract.py src/runpod/fl2va_handler.py src/runpod/ref2va_handler.py src/novita/fl2va_handler.py src/novita/ref2va_handler.py
+
+      - name: Validate workflow manifests
+        run: python scripts/validate_workflows.py
+
+      - name: Commit validated implementation and remove helper
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm scripts/_agent_h3_runtime_followup.py .github/workflows/_agent-h3-runtime-followup.yml
+          git add src/common/h3_runtime.py src/common/runtime_adapter.py workflows/manifests/fl2va_manifest.json workflows/manifests/ref2va_manifest.json
+          git commit -m "Add exact Director audio denoise and Comfy progress"
+          git push origin HEAD:agent/h3-director-audio-denoise-progress
