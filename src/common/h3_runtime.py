@@ -221,28 +221,73 @@ def media_ref(value: Any) -> dict[str, Any] | None:
     raise H3RuntimeError(f"Unsupported media reference: {type(value).__name__}")
 
 
+def _r2_client():
+    bucket = os.environ.get("R2_BUCKET_NAME")
+    endpoint = os.environ.get("R2_ENDPOINT")
+    access_key = os.environ.get("R2_ACCESS_KEY")
+    secret_key = os.environ.get("R2_SECRET_KEY")
+    if not all([bucket, endpoint, access_key, secret_key]):
+        return None, None
+
+    import boto3
+
+    client = boto3.client(
+        "s3",
+        endpoint_url=endpoint,
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+        region_name=os.environ.get("R2_REGION", "auto"),
+    )
+    return client, bucket
+
+
 def download_media(ref: dict[str, Any] | None, target_dir: Path) -> str:
     if not ref:
         raise H3RuntimeError("Missing required media reference")
     url = ref.get("url")
-    object_key = ref.get("objectKey") or ref.get("key")
-    if not url and object_key:
-        public_url = os.environ.get("R2_PUBLIC_URL", "").rstrip("/")
-        if not public_url:
-            raise H3RuntimeError("objectKey media requires R2_PUBLIC_URL in the runtime")
-        url = f"{public_url}/{str(object_key).lstrip('/')}"
-    if not url:
+    object_key = str(ref.get("objectKey") or ref.get("key") or "").lstrip("/") or None
+    if not url and not object_key:
         raise H3RuntimeError("Media reference must include url or objectKey")
 
-    parsed = urllib.parse.urlparse(url)
-    suffix = Path(parsed.path).suffix or ".bin"
-    base = safe_name(Path(parsed.path).name or str(uuid.uuid4()))
+    source_path = object_key or urllib.parse.urlparse(str(url)).path
+    suffix = Path(source_path).suffix or ".bin"
+    base = safe_name(Path(source_path).name or str(uuid.uuid4()))
     filename = base if base.endswith(suffix) else f"{base}{suffix}"
     output = target_dir / filename
-    if not output.exists():
-        with urllib.request.urlopen(url, timeout=120) as response:
-            output.write_bytes(response.read())
-    return str(output.relative_to(COMFY_INPUT)).replace("\\", "/")
+    if output.exists():
+        return str(output.relative_to(COMFY_INPUT)).replace("\\", "/")
+
+    object_error = None
+    if object_key:
+        client, bucket = _r2_client()
+        if client is not None and bucket:
+            try:
+                client.download_file(bucket, object_key, str(output))
+                return str(output.relative_to(COMFY_INPUT)).replace("\\", "/")
+            except Exception as exc:
+                object_error = exc
+                if output.exists():
+                    output.unlink(missing_ok=True)
+        elif not url:
+            raise H3RuntimeError(
+                "objectKey media requires R2_BUCKET_NAME, R2_ENDPOINT, R2_ACCESS_KEY, and R2_SECRET_KEY"
+            )
+
+    if url:
+        try:
+            request = urllib.request.Request(str(url), headers={"User-Agent": "SceneBuilder-H3/1.0"})
+            with urllib.request.urlopen(request, timeout=120) as response:
+                output.write_bytes(response.read())
+            return str(output.relative_to(COMFY_INPUT)).replace("\\", "/")
+        except Exception as url_error:
+            if object_error is not None:
+                raise H3RuntimeError(
+                    f"Unable to fetch media from private R2 objectKey={object_key!r} or fallback URL: "
+                    f"R2 error={object_error}; URL error={url_error}"
+                ) from url_error
+            raise
+
+    raise H3RuntimeError(f"Unable to download private R2 objectKey={object_key!r}: {object_error}")
 
 
 def materialize_image(ref: dict[str, Any] | None, target_dir: Path, job: H3Job, fit: str) -> str:
