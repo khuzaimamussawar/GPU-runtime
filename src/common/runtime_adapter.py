@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import math
 import shutil
+import subprocess
+from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import src.common.h3_runtime as runtime
 from src.common.job_contract import H3Job
@@ -13,11 +15,28 @@ from src.common.job_contract import H3Job
 # workflow behavior here. The four provider handlers import run_h3_job from this
 # adapter, so both RunPod and Novita execute the same H3 contract.
 _ORIGINAL_PREPARE_WORKFLOW = runtime.prepare_workflow
+_ORIGINAL_ENSURE_COMFY_RUNNING = runtime.ensure_comfy_running
+_ORIGINAL_WAIT_FOR_OUTPUT_VIDEO = runtime.wait_for_output_video
+_ORIGINAL_ENCODE_OUTPUTS = runtime.encode_outputs
 
 # The shared SageAttention 2.2.0 artifact is intentionally compiled only for the
 # production Ada + Blackwell architectures. Do not let a UI toggle force Sage on
 # for an unsupported worker (for example an unknown Hopper-backed MIG slice).
 _SAGE_COMPILED_CAPABILITIES = {(8, 9), (12, 0)}
+
+ProgressCallback = Callable[[str, int | None], None]
+_ACTIVE_PROGRESS_CALLBACK: ProgressCallback | None = None
+
+
+def _emit_progress(phase: str, progress: int | None = None) -> None:
+    callback = _ACTIVE_PROGRESS_CALLBACK
+    if callback is None:
+        return
+    try:
+        callback(str(phase), None if progress is None else int(progress))
+    except Exception as exc:
+        # Progress reporting must never fail a generation job.
+        print(f"[SceneBuilder H3] progress callback failed: {exc}")
 
 
 def _remove_path(obj: dict[str, Any], dotted: str | None) -> None:
@@ -114,12 +133,98 @@ def _guard_sage_for_runtime_gpu(
     )
 
 
+def _normalize_preprocess_reference_fit(settings: dict[str, Any]) -> str:
+    raw = str(
+        settings.get("inputImageFit")
+        or settings.get("sceneRefFit")
+        or settings.get("referenceFit")
+        or "auto"
+    ).strip().lower().replace("_", " ")
+
+    if raw in {
+        "match", "crop", "fill", "frame", "match project frame",
+        "match first image", "fill / crop", "fill/crop",
+    }:
+        return "match"
+    if raw in {"contain", "pad", "fit", "fit full image", "fit full"}:
+        return "contain"
+    # Auto / max / unknown uses the less destructive max-size path for references.
+    return "max"
+
+
+def _normalize_native_reference_size(settings: dict[str, Any]) -> str:
+    raw = str(settings.get("referenceFit") or settings.get("refImageSize") or "match")
+    raw = raw.strip().lower().replace("_", " ")
+    if raw in {"max", "fit full image", "fit full", "contain", "pad", "fit"}:
+        return "max"
+    return "match"
+
+
+def _normalize_max_input_size(settings: dict[str, Any], job: H3Job) -> dict[str, Any]:
+    normalized = dict(settings)
+    key = "referenceMaxSize" if "referenceMaxSize" in normalized else "maxInputSize"
+    if key not in normalized:
+        return normalized
+
+    raw = normalized.get(key)
+    if isinstance(raw, (int, float)):
+        normalized[key] = max(256, min(8192, int(raw)))
+        return normalized
+
+    label = str(raw or "auto").strip().lower().replace("_", " ")
+    if label in {"original", "original / no downscale", "no downscale", "none"}:
+        normalized[key] = "original"
+    elif label in {"same as output", "output", "same"}:
+        normalized[key] = max(job.width, job.height)
+    elif label in {"720p", "720"}:
+        normalized[key] = 1280
+    elif label in {"1k", "1024", "1 k"}:
+        normalized[key] = 1024
+    elif label in {"1080p", "1080"}:
+        normalized[key] = 1920
+    else:
+        normalized[key] = 1024
+    return normalized
+
+
+def _job_for_prepare(job: H3Job) -> H3Job:
+    settings = _normalize_max_input_size(job.settings, job)
+    # Keep preprocessing semantics and the native H3 combo separate:
+    # inputImageFit drives our Pillow preprocessing while referenceFit is always
+    # one of the native MiniMax H3 values (`match` or `max`).
+    settings["inputImageFit"] = _normalize_preprocess_reference_fit(job.settings)
+    settings["referenceFit"] = _normalize_native_reference_size(job.settings)
+    return replace(job, settings=settings)
+
+
+def _resize_inside_max(image: Any, settings: dict[str, Any]) -> Any:
+    raw = settings.get("referenceMaxSize")
+    if raw is None:
+        raw = settings.get("maxInputSize")
+    if isinstance(raw, str) and raw.strip().lower() == "original":
+        return image
+    try:
+        max_size = int(raw or 1024)
+    except (TypeError, ValueError):
+        max_size = 1024
+    max_size = max(256, min(8192, max_size))
+
+    source_w, source_h = image.size
+    longest = max(source_w, source_h)
+    if longest <= max_size:
+        return image
+    scale = max_size / longest
+    target = (max(32, round(source_w * scale)), max(32, round(source_h * scale)))
+    return image.resize(target, runtime.resample_lanczos())
+
+
 def _prepare_workflow(
     workflow: dict[str, Any],
     manifest: dict[str, Any],
     job: H3Job,
 ) -> dict[str, Any]:
-    prepared = _ORIGINAL_PREPARE_WORKFLOW(workflow, manifest, job)
+    prepare_job = _job_for_prepare(job)
+    prepared = _ORIGINAL_PREPARE_WORKFLOW(workflow, manifest, prepare_job)
     _guard_sage_for_runtime_gpu(prepared, manifest, job)
     output_path = (manifest.get("optionalPaths") or {}).get("outputPrefix")
     if output_path:
@@ -173,6 +278,158 @@ def _prune_ref2va_placeholders(
     for index in range(audio_count, 3):
         _drop_literal_input(workflow, reference_node, f"ref_audios.ref_audio_{index}")
         _drop_node(workflow, _node_id_from_input_path(optional.get(f"referenceAudio{index}")))
+
+
+def _parse_ms(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        parsed = int(round(float(value)))
+    except (TypeError, ValueError):
+        return None
+    return max(0, parsed)
+
+
+def _media_ranges(ref: dict[str, Any]) -> list[tuple[int, int | None]]:
+    start = _parse_ms(
+        ref.get("sourceStartMs")
+        if "sourceStartMs" in ref
+        else ref.get("startMs", ref.get("trimStartMs"))
+    )
+    end = _parse_ms(
+        ref.get("sourceEndMs")
+        if "sourceEndMs" in ref
+        else ref.get("endMs", ref.get("trimEndMs"))
+    )
+    if start is not None or end is not None:
+        start = start or 0
+        if end is None or end > start:
+            return [(start, end)]
+
+    ranges: list[tuple[int, int | None]] = []
+    keep_ranges = ref.get("keepRanges") or ref.get("ranges") or []
+    if isinstance(keep_ranges, dict):
+        keep_ranges = list(keep_ranges.values())
+    if not isinstance(keep_ranges, (list, tuple)):
+        return ranges
+    for item in keep_ranges:
+        if isinstance(item, dict):
+            item_start = _parse_ms(
+                item.get("sourceStartMs", item.get("startMs", item.get("start")))
+            )
+            item_end = _parse_ms(
+                item.get("sourceEndMs", item.get("endMs", item.get("end")))
+            )
+        elif isinstance(item, (list, tuple)) and item:
+            item_start = _parse_ms(item[0])
+            item_end = _parse_ms(item[1]) if len(item) > 1 else None
+        else:
+            continue
+        item_start = item_start or 0
+        if item_end is None or item_end > item_start:
+            ranges.append((item_start, item_end))
+    return ranges
+
+
+def _absolute_input_path(relative: str) -> Path:
+    return runtime.COMFY_INPUT / relative
+
+
+def _relative_input_path(path: Path) -> str:
+    return str(path.relative_to(runtime.COMFY_INPUT)).replace("\\", "/")
+
+
+def _materialize_reference_video(
+    ref: dict[str, Any] | None, target_dir: Path, index: int
+) -> str:
+    relative = runtime.download_media(ref, target_dir)
+    source = _absolute_input_path(relative)
+    output = target_dir / f"{source.stem}_h3_ref{index}_24fps.mp4"
+    if output.exists():
+        return _relative_input_path(output)
+
+    cmd = ["ffmpeg", "-y"]
+    ranges = _media_ranges(ref or {})
+    if ranges:
+        start_ms, end_ms = ranges[0]
+        cmd += ["-ss", f"{start_ms / 1000:.6f}"]
+        if end_ms is not None:
+            cmd += ["-to", f"{end_ms / 1000:.6f}"]
+    cmd += [
+        "-i", str(source),
+        "-map", "0:v:0",
+        "-map", "0:a?",
+        "-vf", "fps=24",
+        "-fps_mode", "cfr",
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "18",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-movflags", "+faststart",
+        str(output),
+    ]
+    subprocess.run(cmd, check=True)
+    return _relative_input_path(output)
+
+
+def _materialize_reference_audio(
+    ref: dict[str, Any] | None, target_dir: Path, index: int
+) -> str:
+    relative = runtime.download_media(ref, target_dir)
+    source = _absolute_input_path(relative)
+    ranges = _media_ranges(ref or {})
+    if not ranges:
+        return relative
+
+    output = target_dir / f"{source.stem}_h3_ref{index}_range.wav"
+    if output.exists():
+        return _relative_input_path(output)
+
+    if len(ranges) == 1:
+        start_ms, end_ms = ranges[0]
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", f"{start_ms / 1000:.6f}",
+        ]
+        if end_ms is not None:
+            cmd += ["-to", f"{end_ms / 1000:.6f}"]
+        cmd += [
+            "-i", str(source),
+            "-vn",
+            "-ac", "2",
+            "-ar", "48000",
+            "-c:a", "pcm_s16le",
+            str(output),
+        ]
+    else:
+        filter_parts: list[str] = []
+        concat_inputs: list[str] = []
+        for range_index, (start_ms, end_ms) in enumerate(ranges):
+            end_expr = "" if end_ms is None else f":end={end_ms / 1000:.6f}"
+            label = f"a{range_index}"
+            filter_parts.append(
+                f"[0:a]atrim=start={start_ms / 1000:.6f}{end_expr},"
+                f"asetpts=PTS-STARTPTS[{label}]"
+            )
+            concat_inputs.append(f"[{label}]")
+        filter_parts.append(
+            "".join(concat_inputs) + f"concat=n={len(ranges)}:v=0:a=1[outa]"
+        )
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(source),
+            "-filter_complex", ";".join(filter_parts),
+            "-map", "[outa]",
+            "-ac", "2",
+            "-ar", "48000",
+            "-c:a", "pcm_s16le",
+            str(output),
+        ]
+
+    subprocess.run(cmd, check=True)
+    return _relative_input_path(output)
 
 
 def _materialize_inputs(
@@ -257,7 +514,7 @@ def _materialize_inputs(
         runtime.set_path(
             workflow,
             loader_path,
-            runtime.download_media(runtime.media_ref(ref), media_dir),
+            _materialize_reference_video(runtime.media_ref(ref), media_dir, index),
         )
 
     for index, ref in enumerate(audio_refs):
@@ -267,7 +524,7 @@ def _materialize_inputs(
         runtime.set_path(
             workflow,
             loader_path,
-            runtime.download_media(runtime.media_ref(ref), media_dir),
+            _materialize_reference_audio(runtime.media_ref(ref), media_dir, index),
         )
 
     _prune_ref2va_placeholders(
@@ -279,8 +536,24 @@ def _materialize_inputs(
     )
 
 
+def _ensure_comfy_running() -> None:
+    _emit_progress("preparing_model")
+    _ORIGINAL_ENSURE_COMFY_RUNNING()
+
+
+def _wait_for_output_video(prompt_id: str, started_at: float) -> Path:
+    _emit_progress("generating")
+    return _ORIGINAL_WAIT_FOR_OUTPUT_VIDEO(prompt_id, started_at)
+
+
+def _encode_outputs(source_video: Path, job: H3Job) -> dict[str, Path]:
+    _emit_progress("encoding")
+    return _ORIGINAL_ENCODE_OUTPUTS(source_video, job)
+
+
 def _upload_outputs(paths: dict[str, Path], job: H3Job) -> dict[str, Any]:
     """Upload the two final files using the SceneBuilder plan's canonical keys."""
+    _emit_progress("uploading")
     project = runtime.safe_name(job.project_id)
     job_name = runtime.safe_name(job.job_id)
     master_key = f"projects/{project}/video/generated/{job_name}-h265.mp4"
@@ -309,19 +582,30 @@ def _all_outputs_uploaded(result: dict[str, Any] | None) -> bool:
 
 
 def run_h3_job(
-    payload: dict[str, Any], expected_task_family: str, runtime_name: str
+    payload: dict[str, Any],
+    expected_task_family: str,
+    runtime_name: str,
+    progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
-    # Install deterministic process-wide patches once. They are identical for all
-    # jobs in a worker, so concurrent imports do not change behavior per request.
+    global _ACTIVE_PROGRESS_CALLBACK
+
+    # Install deterministic process-wide patches once. One H3 job runs per worker,
+    # so the active progress callback is never shared by simultaneous GPU jobs.
     runtime.normalize_frame_count = _round_h3_frames
     runtime.materialize_inputs = _materialize_inputs
     runtime.prepare_workflow = _prepare_workflow
+    runtime.resize_inside_max = _resize_inside_max
+    runtime.ensure_comfy_running = _ensure_comfy_running
+    runtime.wait_for_output_video = _wait_for_output_video
+    runtime.encode_outputs = _encode_outputs
     runtime.upload_outputs = _upload_outputs
 
     normalized = runtime.unwrap_payload(payload)
     normalized.setdefault("taskFamily", expected_task_family)
     job_id = str(normalized.get("jobId") or normalized.get("job_id") or normalized.get("id") or "unknown")
     result: dict[str, Any] | None = None
+    previous_callback = _ACTIVE_PROGRESS_CALLBACK
+    _ACTIVE_PROGRESS_CALLBACK = progress_callback
     try:
         result = runtime.run_h3_job(payload, expected_task_family, runtime_name)
         # The base runtime reports raw requested frames; return the actual H3 frame
@@ -330,8 +614,10 @@ def run_h3_job(
             result["frames"] = _round_h3_frames(runtime.normalize_job(normalized))
         except Exception:
             pass
+        _emit_progress("completed", 100)
         return result
     finally:
+        _ACTIVE_PROGRESS_CALLBACK = previous_callback
         # Always remove downloaded inputs. Encoded/source outputs are removed only
         # after R2 upload succeeded, so a misconfigured storage endpoint still
         # leaves local files available for debugging instead of deleting results.
