@@ -11,6 +11,7 @@ set -Eeuo pipefail
 export REGISTRY_NAMESPACE="${REGISTRY_NAMESPACE:-${DOCKERHUB_USERNAME}}"
 repo_dir="/opt/minimax-h3-serverless"
 docker_build_attempts="${DOCKER_BUILD_ATTEMPTS:-2}"
+min_free_disk_gb="${MIN_FREE_DISK_GB:-45}"
 
 log_disk() {
   if [ -x "${repo_dir}/scripts/log_disk.sh" ]; then
@@ -19,6 +20,25 @@ log_disk() {
     echo "===== DISK USAGE: $1 ====="
     df -h || true
   fi
+}
+
+prune_build_cache_if_low() {
+  local label="$1"
+  local avail_kb
+  local threshold_kb
+
+  avail_kb="$(df -Pk / | awk 'NR==2 {print $4}')"
+  threshold_kb="$((min_free_disk_gb * 1024 * 1024))"
+  if [ "${avail_kb:-0}" -ge "$threshold_kb" ]; then
+    return 0
+  fi
+
+  echo "===== LOW DISK: ${label} ====="
+  echo "Free root disk is below ${min_free_disk_gb} GiB; pruning pushed BuildKit cache."
+  echo "All successful targets are already stored in Docker Hub, so this does not delete published images."
+  docker buildx prune --all --force || true
+  sync || true
+  log_disk "after BuildKit prune ${label}"
 }
 
 install_docker() {
@@ -82,6 +102,7 @@ build_one_target() {
     exit 1
   fi
 
+  prune_build_cache_if_low "before docker build ${target}"
   log_disk "before docker build ${target}"
 
   attempt=1
@@ -102,17 +123,19 @@ build_one_target() {
 
     status=$?
     log_disk "failed docker build ${target} attempt ${attempt}"
+    prune_build_cache_if_low "failed build ${target} attempt ${attempt}"
     if [ "$attempt" -ge "$docker_build_attempts" ]; then
       echo "Docker build failed after ${attempt} attempt(s): ${target}" >&2
       exit "$status"
     fi
     attempt=$((attempt + 1))
-    echo "Retrying ${target} in 15 seconds. Existing BuildKit layers should be reused when possible."
+    echo "Retrying ${target} in 15 seconds. Published parents will be pulled again if low-disk pruning removed local BuildKit cache."
     sleep 15
   done
 
   log_disk "after docker push ${target}"
   echo "Pushed ${image}"
+  prune_build_cache_if_low "after docker push ${target}"
 }
 
 install_docker
