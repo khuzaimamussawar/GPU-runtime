@@ -138,6 +138,7 @@ def apply_basic_settings(
 ) -> None:
     simple_paths = {
         "steps": required.get("steps"),
+        "denoise": required.get("denoise") or optional.get("denoise"),
         "scheduler": required.get("scheduler"),
         "sampler": required.get("sampler"),
         "seed": required.get("seed") or optional.get("seed"),
@@ -145,8 +146,17 @@ def apply_basic_settings(
         "referenceFit": required.get("referenceFit") or optional.get("referenceFit"),
     }
     for key, path in simple_paths.items():
-        if path and key in settings:
-            set_path(workflow, path, settings[key])
+        if not path or key not in settings:
+            continue
+        value = settings[key]
+        if key == "denoise":
+            try:
+                value = float(value)
+            except (TypeError, ValueError) as exc:
+                raise H3RuntimeError("H3 denoise must be a number between 0 and 1") from exc
+            if value < 0 or value > 1:
+                raise H3RuntimeError("H3 denoise must be between 0 and 1")
+        set_path(workflow, path, value)
 
     if "spectrumEnabled" in required:
         spectrum = settings.get("spectrum") or {}
@@ -336,6 +346,7 @@ def reject_unsupported_settings(manifest: dict[str, Any], settings: dict[str, An
         "textEncoder",
         "qwenEncoder",
         "steps",
+        "denoise",
         "scheduler",
         "sampler",
         "seed",
