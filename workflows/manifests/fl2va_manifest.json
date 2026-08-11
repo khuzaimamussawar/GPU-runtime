@@ -1,6 +1,6 @@
 {
   "workflowId": "fl2va_master",
-  "workflowVersion": "2026-08-11-runtime-v3",
+  "workflowVersion": "2026-08-11-runtime-v4",
   "taskFamily": "h3_fl2va",
   "modes": ["t2v", "i2v", "fflf", "l2v"],
   "modelFiles": {
@@ -24,6 +24,7 @@
     "videoVae": "10.inputs.vae_name",
     "audioVae": "11.inputs.vae_name",
     "steps": "16.inputs.steps",
+    "denoise": "16.inputs.denoise",
     "scheduler": "16.inputs.scheduler",
     "diffusionModel": "23.inputs.unet_name",
     "sampler": "24.inputs.sampler_name",
