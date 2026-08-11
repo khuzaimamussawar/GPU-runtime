@@ -194,38 +194,14 @@ def _normalize_max_input_size(settings: dict[str, Any], job: H3Job) -> dict[str,
 
 def _job_for_prepare(job: H3Job) -> H3Job:
     settings = _normalize_max_input_size(job.settings, job)
-    # Ref2VA has one native ref_image_size for the whole job. Mixed semantic
-    # fitting is achieved by preprocessing each reference by role, then running
-    # the native reference node in max. Matched scene refs stay at matched size
-    # because native max is down-only; raw character refs keep identity detail.
-    requested_reference_fit = _normalize_preprocess_reference_fit(job.settings)
-    settings["inputImageFit"] = requested_reference_fit
-    settings["requestedReferenceFit"] = requested_reference_fit
-    settings["referenceFit"] = "max" if job.task_family == "h3_ref2va" else _normalize_native_reference_size(job.settings)
+    # Keep preprocessing semantics and the native H3 combo separate:
+    # inputImageFit drives our Pillow preprocessing while referenceFit is always
+    # one of the native MiniMax H3 values (`match` or `max`). Ref2VA exposes one
+    # ref_image_size for the whole job, so the user's selected value applies to
+    # every image reference in that request.
+    settings["inputImageFit"] = _normalize_preprocess_reference_fit(job.settings)
+    settings["referenceFit"] = _normalize_native_reference_size(job.settings)
     return replace(job, settings=settings)
-
-
-def _reference_materialization_mode(ref: dict[str, Any] | None, job: H3Job) -> str:
-    media = ref or {}
-    role = str(media.get("role") or "").strip().lower()
-    requested = str(media.get("fit") or media.get("referenceFit") or job.settings.get("requestedReferenceFit") or job.settings.get("inputImageFit") or "max")
-    requested = requested.strip().lower().replace("_", " ")
-    if role in {"scene", "scene_ref", "storyboard", "keyframe"}:
-        return "match"
-    if role in {"character", "character_ref", "subject"}:
-        return "native_max"
-    if requested in {"match", "crop", "fill", "frame", "match project frame", "match first image", "fill / crop", "fill/crop"}:
-        return "match"
-    if requested in {"contain", "pad", "fit", "fit full image", "fit full"}:
-        return "contain"
-    return "max"
-
-
-def _materialize_semantic_reference_image(ref: dict[str, Any] | None, target_dir: Path, job: H3Job) -> str:
-    mode = _reference_materialization_mode(ref, job)
-    if mode == "native_max":
-        return runtime.download_media(ref, target_dir)
-    return runtime.materialize_image(ref, target_dir, job, mode)
 
 
 def _resize_inside_max(image: Any, settings: dict[str, Any]) -> Any:
@@ -565,15 +541,16 @@ def _materialize_inputs(
             "h3_ref2va requires at least one image, video, or audio reference"
         )
 
+    reference_fit = runtime.normalize_reference_fit(job.settings)
+
     for index, ref in enumerate(refs):
         loader_path = optional.get(f"referenceImage{index}")
         if not loader_path:
             raise runtime.H3RuntimeError(f"Missing workflow path for reference image {index}")
-        media = runtime.media_ref(ref)
         runtime.set_path(
             workflow,
             loader_path,
-            _materialize_semantic_reference_image(media, media_dir, job),
+            runtime.materialize_image(runtime.media_ref(ref), media_dir, job, reference_fit),
         )
 
     for index, ref in enumerate(video_refs):
