@@ -17,6 +17,9 @@ on:
           - qwen-int8
           - fl2va-base
           - ref2va-base
+          - comfyui
+          - sageattention
+          - custom-nodes
           - fl2va-workflow
           - ref2va-workflow
           - fl2va-loras
