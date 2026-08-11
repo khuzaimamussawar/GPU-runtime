@@ -42,8 +42,8 @@ jobs:
       - name: Validate runtime
         run: |
           python -m py_compile src/common/runtime_adapter.py src/common/h3_runtime.py src/common/job_contract.py
-          python scripts/validate_workflows.py --workflow workflows/fl2va_master.json --manifest manifests/fl2va_manifest.json
-          python scripts/validate_workflows.py --workflow workflows/ref2va_master.json --manifest manifests/ref2va_manifest.json
+          python scripts/validate_workflows.py --workflow workflows/fl2va_master.json --manifest workflows/manifests/fl2va_manifest.json
+          python scripts/validate_workflows.py --workflow workflows/ref2va_master.json --manifest workflows/manifests/ref2va_manifest.json
       - name: Commit correction
         run: |
           git config user.name github-actions[bot]
