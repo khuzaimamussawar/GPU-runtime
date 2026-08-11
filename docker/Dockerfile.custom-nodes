@@ -1,0 +1,30 @@
+# syntax=docker/dockerfile:1.7
+ARG REGISTRY_NAMESPACE
+ARG IMAGE_TAG=latest
+FROM ${REGISTRY_NAMESPACE}/minimax-h3-base:${IMAGE_TAG}
+
+# Exact custom-node revisions used by the validated master workflows.
+ARG KJNODES_COMMIT=073efb07419f56cc714e099a82e49fbc23ad9263
+# Spectrum MiniMax H3 v0.2.1 — intentionally NOT upgraded.
+ARG SPECTRUM_COMMIT=1427dfe96029985be9cbc0033abb44bf2e7adc4f
+
+LABEL org.opencontainers.image.title="minimax-h3-custom-nodes"
+LABEL scene_builder.layer="shared-custom-nodes-artifact"
+LABEL scene_builder.kjnodes.commit="${KJNODES_COMMIT}"
+LABEL scene_builder.spectrum.version="0.2.1"
+LABEL scene_builder.spectrum.commit="${SPECTRUM_COMMIT}"
+
+RUN set -eux; \
+    mkdir -p /artifacts/custom_nodes; \
+    git clone https://github.com/kijai/ComfyUI-KJNodes.git \
+      /artifacts/custom_nodes/ComfyUI-KJNodes; \
+    git -C /artifacts/custom_nodes/ComfyUI-KJNodes checkout --detach "${KJNODES_COMMIT}"; \
+    rm -rf /artifacts/custom_nodes/ComfyUI-KJNodes/.git; \
+    git clone https://github.com/xmarre/ComfyUI-Spectrum-MiniMax-H3.git \
+      /artifacts/custom_nodes/ComfyUI-Spectrum-MiniMax-H3; \
+    git -C /artifacts/custom_nodes/ComfyUI-Spectrum-MiniMax-H3 checkout --detach "${SPECTRUM_COMMIT}"; \
+    rm -rf /artifacts/custom_nodes/ComfyUI-Spectrum-MiniMax-H3/.git
+
+RUN test -f /artifacts/custom_nodes/ComfyUI-KJNodes/requirements.txt \
+ && test -f /artifacts/custom_nodes/ComfyUI-Spectrum-MiniMax-H3/nodes.py \
+ && grep -q 'version = "0.2.1"' /artifacts/custom_nodes/ComfyUI-Spectrum-MiniMax-H3/pyproject.toml
