@@ -1,6 +1,6 @@
 {
   "workflowId": "ref2va_master",
-  "workflowVersion": "2026-08-11-runtime-v3",
+  "workflowVersion": "2026-08-11-runtime-v4",
   "taskFamily": "h3_ref2va",
   "modes": ["r2v"],
   "modelFiles": {
