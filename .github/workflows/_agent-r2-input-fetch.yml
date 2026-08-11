@@ -1,0 +1,48 @@
+name: Apply private R2 input fetch
+on:
+  push:
+    branches: [agent/h3-private-r2-inputs]
+    paths: [.github/workflows/_agent-r2-input-fetch.yml]
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/h3-private-r2-inputs
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Patch runtime downloader
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path('src/common/h3_runtime.py')
+          s = p.read_text()
+          old = '''def download_media(ref: dict[str, Any] | None, target_dir: Path) -> str:\n    if not ref:\n        raise H3RuntimeError("Missing required media reference")\n    url = ref.get("url")\n    object_key = ref.get("objectKey") or ref.get("key")\n    if not url and object_key:\n        public_url = os.environ.get("R2_PUBLIC_URL", "").rstrip("/")\n        if not public_url:\n            raise H3RuntimeError("objectKey media requires R2_PUBLIC_URL in the runtime")\n        url = f"{public_url}/{str(object_key).lstrip('/')}"\n    if not url:\n        raise H3RuntimeError("Media reference must include url or objectKey")\n\n    parsed = urllib.parse.urlparse(url)\n    suffix = Path(parsed.path).suffix or ".bin"\n    base = safe_name(Path(parsed.path).name or str(uuid.uuid4()))\n    filename = base if base.endswith(suffix) else f"{base}{suffix}"\n    output = target_dir / filename\n    if not output.exists():\n        with urllib.request.urlopen(url, timeout=120) as response:\n            output.write_bytes(response.read())\n    return str(output.relative_to(COMFY_INPUT)).replace("\\\\", "/")\n'''
+          new = '''def _r2_client():\n    bucket = os.environ.get("R2_BUCKET_NAME")\n    endpoint = os.environ.get("R2_ENDPOINT")\n    access_key = os.environ.get("R2_ACCESS_KEY")\n    secret_key = os.environ.get("R2_SECRET_KEY")\n    if not all([bucket, endpoint, access_key, secret_key]):\n        return None, None\n\n    import boto3\n\n    client = boto3.client(\n        "s3",\n        endpoint_url=endpoint,\n        aws_access_key_id=access_key,\n        aws_secret_access_key=secret_key,\n        region_name=os.environ.get("R2_REGION", "auto"),\n    )\n    return client, bucket\n\n\ndef download_media(ref: dict[str, Any] | None, target_dir: Path) -> str:\n    if not ref:\n        raise H3RuntimeError("Missing required media reference")\n    url = ref.get("url")\n    object_key = str(ref.get("objectKey") or ref.get("key") or "").lstrip("/") or None\n    if not url and not object_key:\n        raise H3RuntimeError("Media reference must include url or objectKey")\n\n    source_path = object_key or urllib.parse.urlparse(str(url)).path\n    suffix = Path(source_path).suffix or ".bin"\n    base = safe_name(Path(source_path).name or str(uuid.uuid4()))\n    filename = base if base.endswith(suffix) else f"{base}{suffix}"\n    output = target_dir / filename\n    if output.exists():\n        return str(output.relative_to(COMFY_INPUT)).replace("\\\\", "/")\n\n    object_error = None\n    if object_key:\n        client, bucket = _r2_client()\n        if client is not None and bucket:\n            try:\n                client.download_file(bucket, object_key, str(output))\n                return str(output.relative_to(COMFY_INPUT)).replace("\\\\", "/")\n            except Exception as exc:\n                object_error = exc\n                if output.exists():\n                    output.unlink(missing_ok=True)\n        elif not url:\n            raise H3RuntimeError(\n                "objectKey media requires R2_BUCKET_NAME, R2_ENDPOINT, R2_ACCESS_KEY, and R2_SECRET_KEY"\n            )\n\n    if url:\n        try:\n            request = urllib.request.Request(str(url), headers={"User-Agent": "SceneBuilder-H3/1.0"})\n            with urllib.request.urlopen(request, timeout=120) as response:\n                output.write_bytes(response.read())\n            return str(output.relative_to(COMFY_INPUT)).replace("\\\\", "/")\n        except Exception as url_error:\n            if object_error is not None:\n                raise H3RuntimeError(\n                    f"Unable to fetch media from private R2 objectKey={object_key!r} or fallback URL: "\n                    f"R2 error={object_error}; URL error={url_error}"\n                ) from url_error\n            raise\n\n    raise H3RuntimeError(f"Unable to download private R2 objectKey={object_key!r}: {object_error}")\n'''
+          if old not in s:
+              raise SystemExit('download_media block not found')
+          p.write_text(s.replace(old, new))
+      - name: Validate Python and workflow contracts
+        run: |
+          python -m py_compile src/common/h3_runtime.py src/common/runtime_adapter.py src/runpod/fl2va_handler.py src/runpod/ref2va_handler.py
+          python scripts/validate_workflows.py --workflow workflows/fl2va_master.json --manifest workflows/manifests/fl2va_manifest.json
+          python scripts/validate_workflows.py --workflow workflows/ref2va_master.json --manifest workflows/manifests/ref2va_manifest.json
+      - name: Assert private R2 preference
+        shell: python
+        run: |
+          from pathlib import Path
+          s = Path('src/common/h3_runtime.py').read_text()
+          assert 'client.download_file(bucket, object_key, str(output))' in s
+          assert 'R2_ACCESS_KEY' in s and 'R2_SECRET_KEY' in s
+          assert s.index('client.download_file(bucket, object_key, str(output))') < s.index('urllib.request.urlopen(request, timeout=120)')
+      - name: Commit patch
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/common/h3_runtime.py
+          git commit -m 'Prefer private R2 object keys for H3 inputs [skip ci]'
+          git push origin HEAD:agent/h3-private-r2-inputs
