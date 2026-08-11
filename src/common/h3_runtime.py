@@ -213,12 +213,42 @@ def media_ref(value: Any) -> dict[str, Any] | None:
     if not value:
         return None
     if isinstance(value, str):
+        object_key = object_key_from_media_url(value)
+        if object_key:
+            return {"objectKey": object_key}
         if value.startswith("http://") or value.startswith("https://"):
             return {"url": value}
         return {"objectKey": value}
     if isinstance(value, dict):
         return value
     raise H3RuntimeError(f"Unsupported media reference: {type(value).__name__}")
+
+
+R2_OBJECT_PREFIXES = (
+    "projects/",
+    "audio/",
+    "render/",
+    "temp/",
+    "style/",
+    "styles/",
+    "voice/",
+    "voices/",
+)
+
+
+def object_key_from_media_url(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    direct = text.lstrip("/")
+    if direct.startswith(R2_OBJECT_PREFIXES):
+        return direct
+    try:
+        parsed = urllib.parse.urlparse(text)
+    except Exception:
+        return None
+    key = urllib.parse.unquote(parsed.path or "").lstrip("/")
+    return key if key.startswith(R2_OBJECT_PREFIXES) else None
 
 
 def _r2_client():
@@ -245,7 +275,11 @@ def download_media(ref: dict[str, Any] | None, target_dir: Path) -> str:
     if not ref:
         raise H3RuntimeError("Missing required media reference")
     url = ref.get("url")
-    object_key = str(ref.get("objectKey") or ref.get("key") or "").lstrip("/") or None
+    object_key = (
+        str(ref.get("objectKey") or ref.get("key") or "").lstrip("/")
+        or object_key_from_media_url(url)
+        or None
+    )
     if not url and not object_key:
         raise H3RuntimeError("Media reference must include url or objectKey")
 
