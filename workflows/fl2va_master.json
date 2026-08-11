@@ -254,7 +254,7 @@
       "tail_actual_steps": 1,
       "max_history": 8,
       "debug": false,
-      "history_storage": "vram",
+      "history_storage": "system_ram",
       "bootstrap_first_forecast": true,
       "anchor_residual_feedback": false,
       "selective_rollback_correction": false,
