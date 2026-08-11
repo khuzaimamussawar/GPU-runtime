@@ -1,9 +1,71 @@
+# syntax=docker/dockerfile:1.7
 ARG REGISTRY_NAMESPACE
 ARG IMAGE_TAG=latest
+
+# These three dependency artifacts are built exactly once and reused by both
+# FL2VA and Ref2VA workflow branches.
+FROM ${REGISTRY_NAMESPACE}/minimax-h3-comfyui:${IMAGE_TAG} AS comfyui_artifact
+FROM ${REGISTRY_NAMESPACE}/minimax-h3-sageattention:${IMAGE_TAG} AS sageattention_artifact
+FROM ${REGISTRY_NAMESPACE}/minimax-h3-custom-nodes:${IMAGE_TAG} AS custom_nodes_artifact
+
 FROM ${REGISTRY_NAMESPACE}/minimax-h3-fl2va-base:${IMAGE_TAG}
+
+ARG COMFYUI_COMMIT=2a68ce33b4c9ea6ee4283e618a74560cefb32694
+ARG KJNODES_COMMIT=073efb07419f56cc714e099a82e49fbc23ad9263
+ARG SPECTRUM_COMMIT=1427dfe96029985be9cbc0033abb44bf2e7adc4f
+ARG SAGEATTENTION_VERSION=2.2.0
 
 LABEL org.opencontainers.image.title="minimax-h3-fl2va-workflow"
 LABEL scene_builder.layer="fl2va-workflow"
+LABEL scene_builder.comfyui.commit="${COMFYUI_COMMIT}"
+LABEL scene_builder.kjnodes.commit="${KJNODES_COMMIT}"
+LABEL scene_builder.spectrum.version="0.2.1"
+LABEL scene_builder.spectrum.commit="${SPECTRUM_COMMIT}"
+LABEL scene_builder.sageattention.version="${SAGEATTENTION_VERSION}"
+
+# Apply the exact locally-tested ComfyUI source without touching the baked
+# models directory. The parent already contains CUDA, PyTorch, Qwen, H3 and VAEs.
+COPY --from=comfyui_artifact /artifacts/comfyui-overlay.tar.gz /tmp/comfyui-overlay.tar.gz
+COPY --from=comfyui_artifact /artifacts/COMFYUI_COMMIT /tmp/COMFYUI_COMMIT
+COPY --from=sageattention_artifact /artifacts/wheels/ /tmp/sage-wheels/
+
+RUN set -eux; \
+    test "$(cat /tmp/COMFYUI_COMMIT)" = "${COMFYUI_COMMIT}"; \
+    find /opt/ComfyUI -mindepth 1 -maxdepth 1 \
+      ! -name models \
+      ! -name custom_nodes \
+      ! -name input \
+      ! -name output \
+      ! -name temp \
+      ! -name user \
+      -exec rm -rf {} +; \
+    tar -xzf /tmp/comfyui-overlay.tar.gz -C /opt/ComfyUI; \
+    python3 -m pip install --no-cache-dir -r /opt/ComfyUI/requirements.txt; \
+    rm -f /tmp/comfyui-overlay.tar.gz /tmp/COMFYUI_COMMIT
+
+# Install the same KJNodes + Spectrum v0.2.1 source artifact into both task
+# families. Spectrum v0.2.1 intentionally has no extra Python dependency step.
+RUN rm -rf \
+    /opt/ComfyUI/custom_nodes/ComfyUI-KJNodes \
+    /opt/ComfyUI/custom_nodes/ComfyUI-Spectrum-MiniMax-H3
+COPY --from=custom_nodes_artifact /artifacts/custom_nodes/ComfyUI-KJNodes/ /opt/ComfyUI/custom_nodes/ComfyUI-KJNodes/
+COPY --from=custom_nodes_artifact /artifacts/custom_nodes/ComfyUI-Spectrum-MiniMax-H3/ /opt/ComfyUI/custom_nodes/ComfyUI-Spectrum-MiniMax-H3/
+
+# SageAttention 2.2.0 was compiled once in minimax-h3-sageattention for sm89
+# (RTX 4090/L40S) + sm120 (RTX 5090). Both workflow branches install that wheel.
+RUN set -eux; \
+    python3 -m pip install --no-cache-dir -r /opt/ComfyUI/custom_nodes/ComfyUI-KJNodes/requirements.txt; \
+    python3 -m pip install --no-cache-dir /tmp/sage-wheels/sageattention-2.2.0-*.whl; \
+    python3 - <<'PY'
+import importlib.metadata
+from pathlib import Path
+
+assert importlib.metadata.version('sageattention') == '2.2.0'
+assert Path('/opt/ComfyUI/custom_nodes/ComfyUI-KJNodes').is_dir()
+assert Path('/opt/ComfyUI/custom_nodes/ComfyUI-Spectrum-MiniMax-H3/nodes.py').is_file()
+print('FL2VA shared H3 dependencies installed')
+PY
+RUN rm -rf /tmp/sage-wheels
 
 COPY workflows/fl2va_master.json /opt/scenebuilder-h3/workflows/fl2va_master.json
 COPY workflows/manifests/fl2va_manifest.json /opt/scenebuilder-h3/workflows/manifests/fl2va_manifest.json
