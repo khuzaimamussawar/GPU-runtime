@@ -24,12 +24,14 @@ ffmpeg -y -i "$input" \
   -movflags +faststart \
   "$master_out"
 
+# Browser/app preview: compatibility-first H.264 8-bit. Keep the archival master
+# as HEVC Main10 above, but avoid High10/yuv420p10le for routine web playback.
 ffmpeg -y -i "$input" \
   -map 0:v:0 -map 0:a? \
   -vf "crop=${master_width}:${master_height}:(iw-${master_width})/2:(ih-${master_height})/2,scale=${preview_width}:${preview_height}" \
   -c:v libx264 -preset veryfast -crf "$preview_crf" \
-  -profile:v high10 \
-  -pix_fmt yuv420p10le \
+  -profile:v high \
+  -pix_fmt yuv420p \
   -c:a aac -b:a 128k \
   -movflags +faststart \
   "$preview_out"
