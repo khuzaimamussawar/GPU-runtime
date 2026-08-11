@@ -20,7 +20,8 @@ def serve(handler: HandlerFn, runtime_name: str) -> None:
             try:
                 length = int(self.headers.get("Content-Length", "0"))
                 payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
-                self.respond(200, handler(payload))
+                job_payload = payload.get("input") if isinstance(payload.get("input"), dict) else payload
+                self.respond(200, handler(job_payload))
             except Exception as exc:
                 self.respond(500, {"ok": False, "runtime": runtime_name, "error": str(exc)})
 
@@ -38,4 +39,3 @@ def serve(handler: HandlerFn, runtime_name: str) -> None:
     server = ThreadingHTTPServer(("0.0.0.0", port), RequestHandler)
     print(f"{runtime_name} listening on 0.0.0.0:{port}")
     server.serve_forever()
-
