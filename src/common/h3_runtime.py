@@ -139,6 +139,7 @@ def apply_basic_settings(
     simple_paths = {
         "steps": required.get("steps"),
         "scheduler": required.get("scheduler"),
+        "denoise": required.get("denoise") or optional.get("denoise"),
         "sampler": required.get("sampler"),
         "seed": required.get("seed") or optional.get("seed"),
         "sageAttention": required.get("sageAttention") or optional.get("sageAttention"),
@@ -337,6 +338,7 @@ def reject_unsupported_settings(manifest: dict[str, Any], settings: dict[str, An
         "qwenEncoder",
         "steps",
         "scheduler",
+        "denoise",
         "sampler",
         "seed",
         "sageAttention",

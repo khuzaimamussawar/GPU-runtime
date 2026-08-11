@@ -25,6 +25,7 @@
     "audioVae": "11.inputs.vae_name",
     "steps": "16.inputs.steps",
     "scheduler": "16.inputs.scheduler",
+    "denoise": "16.inputs.denoise",
     "diffusionModel": "23.inputs.unet_name",
     "sampler": "24.inputs.sampler_name",
     "spectrumEnabled": "27.inputs.enabled"
