@@ -118,10 +118,15 @@ build_one_target() {
       --build-arg "BUILD_TARGET=${target}" \
       --secret "id=hf_token,env=HF_TOKEN" \
       "$repo_dir"; then
+      status=0
+    else
+      status=$?
+    fi
+
+    if [ "$status" -eq 0 ]; then
       break
     fi
 
-    status=$?
     log_disk "failed docker build ${target} attempt ${attempt}"
     prune_build_cache_if_low "failed build ${target} attempt ${attempt}"
     if [ "$attempt" -ge "$docker_build_attempts" ]; then
