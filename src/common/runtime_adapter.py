@@ -5,8 +5,6 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-import torch
-
 import src.common.h3_runtime as runtime
 from src.common.job_contract import H3Job
 
@@ -70,38 +68,49 @@ def _sage_was_requested(settings: dict[str, Any]) -> bool:
     value = settings.get("sageAttention")
     if value is None:
         return False
-    return str(value).strip().lower() not in {"", "0", "false", "off", "none", "disabled"}
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in {"", "0", "false", "off", "none", "disabled", "no"}
 
 
 def _guard_sage_for_runtime_gpu(
     prepared: dict[str, Any], manifest: dict[str, Any], job: H3Job
 ) -> None:
-    if not _sage_was_requested(job.settings):
-        return
-
     required = manifest.get("requiredPaths") or {}
     optional = manifest.get("optionalPaths") or {}
     sage_path = required.get("sageAttention") or optional.get("sageAttention")
     if not sage_path:
         return
 
+    # Checkbox OFF always means the actual KJ node value `disabled`.
+    if not _sage_was_requested(job.settings):
+        runtime.set_path(prepared, sage_path, "disabled")
+        return
+
     capability: tuple[int, int] | None = None
     try:
-        if torch.cuda.is_available():
+        # Import lazily so source-only CI/validation does not need a Torch install.
+        import torch
+
+        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
             major, minor = torch.cuda.get_device_capability(0)
             capability = (int(major), int(minor))
     except Exception:
         capability = None
 
     if capability in _SAGE_COMPILED_CAPABILITIES:
+        # Checkbox ON on a supported worker maps to KJ's automatic Sage choice.
+        runtime.set_path(prepared, sage_path, "auto")
         return
 
+    # Unsupported/unknown worker: disable Sage only. Never auto-enable Spectrum;
+    # Spectrum remains exactly as requested in the independent spectrum settings.
     runtime.set_path(prepared, sage_path, "disabled")
     detected = "none" if capability is None else f"{capability[0]}.{capability[1]}"
     print(
         "[SceneBuilder H3] SageAttention requested but automatically disabled: "
         f"worker CUDA capability={detected}, compiled capabilities="
-        f"{sorted(_SAGE_COMPILED_CAPABILITIES)}"
+        f"{sorted(_SAGE_COMPILED_CAPABILITIES)}. Spectrum setting unchanged."
     )
 
 
