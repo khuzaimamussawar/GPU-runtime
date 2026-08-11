@@ -25,6 +25,7 @@
     "diffusionModel": "17.inputs.unet_name",
     "steps": "18.inputs.steps",
     "scheduler": "18.inputs.scheduler",
+    "denoise": "18.inputs.denoise",
     "spectrumEnabled": "21.inputs.enabled",
     "sageAttention": "22.inputs.sage_attention",
     "seed": "23.inputs.noise_seed",
