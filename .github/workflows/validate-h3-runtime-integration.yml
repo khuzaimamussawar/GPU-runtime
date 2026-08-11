@@ -5,8 +5,9 @@ on:
     paths:
       - 'src/**'
       - 'workflows/**'
-      - 'docker/Dockerfile.runpod-*'
-      - 'docker/Dockerfile.novita-*'
+      - 'docker/**'
+      - 'scripts/remote_build.sh'
+      - '.github/workflows/hetzner-docker-build.yml'
       - '.github/workflows/validate-h3-runtime-integration.yml'
   push:
     branches:
@@ -14,8 +15,9 @@ on:
     paths:
       - 'src/**'
       - 'workflows/**'
-      - 'docker/Dockerfile.runpod-*'
-      - 'docker/Dockerfile.novita-*'
+      - 'docker/**'
+      - 'scripts/remote_build.sh'
+      - '.github/workflows/hetzner-docker-build.yml'
       - '.github/workflows/validate-h3-runtime-integration.yml'
   workflow_dispatch:
 
@@ -29,6 +31,52 @@ jobs:
       - uses: actions/checkout@v4
       - name: Compile Python sources
         run: python3 -m compileall -q src
+      - name: Check remote build script syntax
+        run: bash -n scripts/remote_build.sh
+      - name: Validate pinned shared dependency targets
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          expected = {
+              'docker/Dockerfile.comfyui': [
+                  '2a68ce33b4c9ea6ee4283e618a74560cefb32694',
+                  'minimax-h3-comfyui',
+              ],
+              'docker/Dockerfile.sageattention': [
+                  'eb615cf6cf4d221338033340ee2de1c37fbdba4a',
+                  '2.2.0',
+                  'TORCH_CUDA_ARCH_LIST="8.9;12.0"',
+                  'minimax-h3-sageattention',
+              ],
+              'docker/Dockerfile.custom-nodes': [
+                  '073efb07419f56cc714e099a82e49fbc23ad9263',
+                  '1427dfe96029985be9cbc0033abb44bf2e7adc4f',
+                  'Spectrum MiniMax H3 v0.2.1',
+                  'minimax-h3-custom-nodes',
+              ],
+          }
+          for filename, needles in expected.items():
+              text = Path(filename).read_text()
+              for needle in needles:
+                  assert needle in text, (filename, needle)
+              print('ok pins', filename)
+
+          for filename in ('docker/Dockerfile.fl2va-workflow', 'docker/Dockerfile.ref2va-workflow'):
+              text = Path(filename).read_text()
+              for image in ('minimax-h3-comfyui', 'minimax-h3-sageattention', 'minimax-h3-custom-nodes'):
+                  assert image in text, (filename, image)
+              assert 'sageattention-2.2.0-*.whl' in text
+              assert 'Spectrum-MiniMax-H3' in text
+              print('ok shared artifacts', filename)
+
+          build_ui = Path('.github/workflows/hetzner-docker-build.yml').read_text()
+          remote_build = Path('scripts/remote_build.sh').read_text()
+          for target in ('comfyui', 'sageattention', 'custom-nodes'):
+              assert f'- {target}' in build_ui, target
+              assert f'{target})' in remote_build, target
+          print('ok shared build targets')
+          PY
       - name: Validate workflow JSON and manifests
         run: |
           python3 - <<'PY'
