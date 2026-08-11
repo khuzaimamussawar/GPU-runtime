@@ -11,15 +11,25 @@ LABEL scene_builder.layer="shared-sageattention-wheel"
 LABEL scene_builder.sageattention.version="2.2.0"
 LABEL scene_builder.sageattention.commit="${SAGEATTENTION_COMMIT}"
 
-# Compile once on the CPU-only Hetzner builder for the GPU architectures used by
-# the RunPod/Novita H3 pools: sm80 (A100-class), sm86 (A40/A6000), sm89
-# (RTX 4090/L40/L40S/RTX 6000 Ada), sm90 (H100/Hopper MIG), and sm120
-# (RTX 5090/RTX PRO Blackwell). CUDA 13.0 in minimax-h3-base satisfies
-# SageAttention's sm120 CUDA >= 12.8 check.
+# Build one shared SageAttention 2.2 wheel for the production Ada + Blackwell
+# H3 fleet. SageAttention 2.2's setup.py applies one global NVCC gencode list to
+# every extension. Mixing sm80/sm86/sm90 with the sm90/sm89-specific sources in
+# one wheel makes ptxas compile architecture-specific kernels for incompatible
+# targets. The first Hetzner build reproduced exactly that failure.
+#
+# sm89: RTX 4090, L40, L40S, RTX 6000 Ada
+# sm120: RTX 5090 and RTX PRO Blackwell class GPUs
+#
+# Other GPU families can still run H3/Spectrum with Sage disabled. Add a
+# separately validated Sage wheel/runtime path later rather than making this
+# production wheel unsafe.
 ENV CUDA_HOME=/usr/local/cuda
-ENV TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0;12.0"
-ENV MAX_JOBS=4
-ENV EXT_PARALLEL=2
+ENV TORCH_CUDA_ARCH_LIST="8.9;12.0"
+
+# CUDA extension compilation is memory-heavy. Compile serially on the temporary
+# CPU-only Hetzner builder; build time is cheaper than another OOM/retry cycle.
+ENV MAX_JOBS=1
+ENV EXT_PARALLEL=1
 
 # SageAttention's 2.2.0 source expects these build-tool ranges. Keep them local
 # to this artifact image; the final H3 images only receive the compiled wheel.
