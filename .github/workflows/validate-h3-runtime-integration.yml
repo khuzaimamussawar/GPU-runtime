@@ -85,6 +85,7 @@ jobs:
           import json
           from copy import deepcopy
           from pathlib import Path
+          from src.common.h3_runtime import H3RuntimeError, apply_basic_settings
           from src.common.runtime_adapter import _prune_ref2va_placeholders
 
           paths = [
@@ -97,6 +98,32 @@ jobs:
           for path in paths:
               parsed[str(path)] = json.loads(path.read_text())
               print('ok', path)
+
+          for workflow_name, manifest_name, node_id in (
+              ('workflows/fl2va_master.json', 'workflows/manifests/fl2va_manifest.json', '16'),
+              ('workflows/ref2va_master.json', 'workflows/manifests/ref2va_manifest.json', '18'),
+          ):
+              workflow = deepcopy(parsed[workflow_name])
+              manifest = parsed[manifest_name]
+              assert manifest['requiredPaths']['denoise'] == f'{node_id}.inputs.denoise'
+              apply_basic_settings(
+                  workflow,
+                  manifest['requiredPaths'],
+                  manifest['optionalPaths'],
+                  {'denoise': 0.42},
+              )
+              assert workflow[node_id]['inputs']['denoise'] == 0.42
+              try:
+                  apply_basic_settings(
+                      workflow,
+                      manifest['requiredPaths'],
+                      manifest['optionalPaths'],
+                      {'denoise': 1.01},
+                  )
+                  raise AssertionError('denoise > 1 should be rejected')
+              except H3RuntimeError:
+                  pass
+              print('ok denoise wiring', workflow_name)
 
           workflow = deepcopy(parsed['workflows/ref2va_master.json'])
           manifest = parsed['workflows/manifests/ref2va_manifest.json']
