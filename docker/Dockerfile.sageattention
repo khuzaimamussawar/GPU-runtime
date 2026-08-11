@@ -11,11 +11,13 @@ LABEL scene_builder.layer="shared-sageattention-wheel"
 LABEL scene_builder.sageattention.version="2.2.0"
 LABEL scene_builder.sageattention.commit="${SAGEATTENTION_COMMIT}"
 
-# Compile once on the CPU-only Hetzner builder for every GPU family used by H3:
-# sm89 = RTX 4090 + L40S; sm120 = RTX 5090.
-# CUDA 13.0 in minimax-h3-base satisfies SageAttention's sm120 CUDA >= 12.8 check.
+# Compile once on the CPU-only Hetzner builder for the GPU architectures used by
+# the RunPod/Novita H3 pools: sm80 (A100-class), sm86 (A40/A6000), sm89
+# (RTX 4090/L40/L40S/RTX 6000 Ada), sm90 (H100/Hopper MIG), and sm120
+# (RTX 5090/RTX PRO Blackwell). CUDA 13.0 in minimax-h3-base satisfies
+# SageAttention's sm120 CUDA >= 12.8 check.
 ENV CUDA_HOME=/usr/local/cuda
-ENV TORCH_CUDA_ARCH_LIST="8.9;12.0"
+ENV TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0;12.0"
 ENV MAX_JOBS=4
 ENV EXT_PARALLEL=2
 
