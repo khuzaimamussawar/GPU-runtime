@@ -5,6 +5,8 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+import torch
+
 import src.common.h3_runtime as runtime
 from src.common.job_contract import H3Job
 
@@ -13,6 +15,11 @@ from src.common.job_contract import H3Job
 # workflow behavior here. The four provider handlers import run_h3_job from this
 # adapter, so both RunPod and Novita execute the same H3 contract.
 _ORIGINAL_PREPARE_WORKFLOW = runtime.prepare_workflow
+
+# The shared SageAttention 2.2.0 artifact is intentionally compiled only for the
+# production Ada + Blackwell architectures. Do not let a UI toggle force Sage on
+# for an unsupported worker (for example an unknown Hopper-backed MIG slice).
+_SAGE_COMPILED_CAPABILITIES = {(8, 9), (12, 0)}
 
 
 def _remove_path(obj: dict[str, Any], dotted: str | None) -> None:
@@ -59,12 +66,52 @@ def _round_h3_frames(job: H3Job) -> int:
     return 17 * k + 5
 
 
+def _sage_was_requested(settings: dict[str, Any]) -> bool:
+    value = settings.get("sageAttention")
+    if value is None:
+        return False
+    return str(value).strip().lower() not in {"", "0", "false", "off", "none", "disabled"}
+
+
+def _guard_sage_for_runtime_gpu(
+    prepared: dict[str, Any], manifest: dict[str, Any], job: H3Job
+) -> None:
+    if not _sage_was_requested(job.settings):
+        return
+
+    required = manifest.get("requiredPaths") or {}
+    optional = manifest.get("optionalPaths") or {}
+    sage_path = required.get("sageAttention") or optional.get("sageAttention")
+    if not sage_path:
+        return
+
+    capability: tuple[int, int] | None = None
+    try:
+        if torch.cuda.is_available():
+            major, minor = torch.cuda.get_device_capability(0)
+            capability = (int(major), int(minor))
+    except Exception:
+        capability = None
+
+    if capability in _SAGE_COMPILED_CAPABILITIES:
+        return
+
+    runtime.set_path(prepared, sage_path, "disabled")
+    detected = "none" if capability is None else f"{capability[0]}.{capability[1]}"
+    print(
+        "[SceneBuilder H3] SageAttention requested but automatically disabled: "
+        f"worker CUDA capability={detected}, compiled capabilities="
+        f"{sorted(_SAGE_COMPILED_CAPABILITIES)}"
+    )
+
+
 def _prepare_workflow(
     workflow: dict[str, Any],
     manifest: dict[str, Any],
     job: H3Job,
 ) -> dict[str, Any]:
     prepared = _ORIGINAL_PREPARE_WORKFLOW(workflow, manifest, job)
+    _guard_sage_for_runtime_gpu(prepared, manifest, job)
     output_path = (manifest.get("optionalPaths") or {}).get("outputPrefix")
     if output_path:
         runtime.set_path(
