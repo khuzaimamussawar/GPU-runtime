@@ -29,6 +29,7 @@ COMFY_ROOT = Path(os.environ.get("COMFY_ROOT", "/opt/ComfyUI"))
 COMFY_HOST = os.environ.get("COMFY_HOST", "127.0.0.1")
 COMFY_PORT = int(os.environ.get("COMFY_PORT", "8188"))
 COMFY_URL = f"http://{COMFY_HOST}:{COMFY_PORT}"
+COMFY_DEBUG_ENABLED = os.environ.get("H3_ENABLE_COMFY_UI_DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 ALLOWED_TASK_FAMILIES = {"h3_fl2va", "h3_ref2va"}
 
@@ -118,6 +119,31 @@ def emit_event(event_type: str, **fields: Any) -> None:
     }
     payload.update(fields)
     threading.Thread(target=_json_request, args=(CONTROL_URL, payload), daemon=True).start()
+
+
+def _comfy_ready_local(timeout: int = 3) -> bool:
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{COMFY_PORT}/system_stats", timeout=timeout) as response:
+            response.read(1024)
+        return True
+    except Exception:
+        return False
+
+
+def start_provider_debug_comfy() -> None:
+    if not COMFY_DEBUG_ENABLED or _comfy_ready_local():
+        return
+    cmd = [
+        "python3", "main.py", "--listen", "0.0.0.0", "--port", str(COMFY_PORT), "--disable-auto-launch"
+    ]
+    subprocess.Popen(cmd, cwd=COMFY_ROOT)
+    deadline = time.time() + int(os.environ.get("COMFY_STARTUP_TIMEOUT_SECONDS", "180"))
+    while time.time() < deadline:
+        if _comfy_ready_local():
+            print(f"[H3 Pod] provider-side ComfyUI debug ready on 0.0.0.0:{COMFY_PORT}", flush=True)
+            return
+        time.sleep(2)
+    raise RuntimeError("ComfyUI debug process did not become ready before timeout")
 
 
 def _comfy_post(path: str, payload: dict[str, Any] | None = None, timeout: int = 5) -> bool:
@@ -469,7 +495,7 @@ def diagnostics() -> dict[str, Any]:
         "nvidiaSmi": _nvidia_smi_summary(),
         "cuda": _cuda_summary(),
         "files": _required_files(),
-        "comfy": {"host": COMFY_HOST, "port": COMFY_PORT},
+        "comfy": {"host": COMFY_HOST, "port": COMFY_PORT, "debugExposed": COMFY_DEBUG_ENABLED, "ready": _comfy_ready_local()},
         "diskPk": disk.stdout.strip() if disk.returncode == 0 else None,
     }
 
@@ -644,6 +670,8 @@ class RequestHandler(BaseHTTPRequestHandler):
 def main() -> None:
     if not POD_TOKEN:
         print("[H3 Pod] WARNING: SCENEBUILDER_POD_TOKEN is missing; protected endpoints will reject requests", flush=True)
+    if COMFY_DEBUG_ENABLED:
+        start_provider_debug_comfy()
     threading.Thread(target=worker_loop, name="h3-pod-worker", daemon=True).start()
     threading.Thread(target=idle_watchdog, name="h3-pod-idle-watchdog", daemon=True).start()
     server = ThreadingHTTPServer((HOST, PORT), RequestHandler)
