@@ -1,41 +1,15 @@
 # syntax=docker/dockerfile:1.7
 ARG REGISTRY_NAMESPACE
 ARG IMAGE_TAG=latest
-
-FROM ${REGISTRY_NAMESPACE}/minimax-h3-custom-nodes:${IMAGE_TAG} AS custom_nodes_artifact
-
-# pod-models is intentionally the reusable cutoff point:
-# FL2VA base + tested ComfyUI + installed SageAttention + copied Ref2VA diffusion.
-FROM ${REGISTRY_NAMESPACE}/minimax-h3-pod-models:${IMAGE_TAG}
-
-ARG KJNODES_COMMIT=073efb07419f56cc714e099a82e49fbc23ad9263
-ARG SPECTRUM_COMMIT=1427dfe96029985be9cbc0033abb44bf2e7adc4f
+FROM ${REGISTRY_NAMESPACE}/minimax-h3-pod-loras:${IMAGE_TAG}
 
 LABEL org.opencontainers.image.title="minimax-h3-pod-workflow"
-LABEL scene_builder.layer="pod-combined-workflows-loras-nodes"
+LABEL scene_builder.layer="pod-combined-workflows"
 LABEL scene_builder.task_families="h3_fl2va,h3_ref2va"
-LABEL scene_builder.kjnodes.commit="${KJNODES_COMMIT}"
-LABEL scene_builder.spectrum.version="0.2.1"
-LABEL scene_builder.spectrum.commit="${SPECTRUM_COMMIT}"
 
-# Apply the shared KJNodes + Spectrum artifact only once, after both diffusion
-# families are present. These exact revisions are the ones used by Serverless.
-RUN rm -rf \
-    /opt/ComfyUI/custom_nodes/ComfyUI-KJNodes \
-    /opt/ComfyUI/custom_nodes/ComfyUI-Spectrum-MiniMax-H3
-COPY --from=custom_nodes_artifact /artifacts/custom_nodes/ComfyUI-KJNodes/ /opt/ComfyUI/custom_nodes/ComfyUI-KJNodes/
-COPY --from=custom_nodes_artifact /artifacts/custom_nodes/ComfyUI-Spectrum-MiniMax-H3/ /opt/ComfyUI/custom_nodes/ComfyUI-Spectrum-MiniMax-H3/
-RUN set -eux; \
-    python3 -m pip install --no-cache-dir -r /opt/ComfyUI/custom_nodes/ComfyUI-KJNodes/requirements.txt; \
-    test -f /opt/ComfyUI/custom_nodes/ComfyUI-Spectrum-MiniMax-H3/nodes.py
-
-# Both current Serverless LoRA layers are intentionally empty placeholders. Keep
-# the common directory in the combined image without pulling two huge family
-# images just to copy an empty directory. When real FL2VA/Ref2VA LoRAs are added,
-# their files belong in this layer before the workflow validation step.
-RUN mkdir -p /opt/ComfyUI/models/loras
-
-# Carry both validated workflow contracts in the final combined family layer.
+# Workflows/manifests are deliberately the last family-content layer. By this
+# point both diffusion families, tested ComfyUI, SageAttention, shared nodes,
+# Spectrum, and both LoRA sets are already present.
 COPY workflows/fl2va_master.json /opt/scenebuilder-h3/workflows/fl2va_master.json
 COPY workflows/manifests/fl2va_manifest.json /opt/scenebuilder-h3/workflows/manifests/fl2va_manifest.json
 COPY workflows/ref2va_master.json /opt/scenebuilder-h3/workflows/ref2va_master.json
