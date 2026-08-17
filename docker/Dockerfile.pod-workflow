@@ -1,0 +1,77 @@
+# syntax=docker/dockerfile:1.7
+ARG REGISTRY_NAMESPACE
+ARG IMAGE_TAG=latest
+
+FROM ${REGISTRY_NAMESPACE}/minimax-h3-comfyui:${IMAGE_TAG} AS comfyui_artifact
+FROM ${REGISTRY_NAMESPACE}/minimax-h3-sageattention:${IMAGE_TAG} AS sageattention_artifact
+FROM ${REGISTRY_NAMESPACE}/minimax-h3-custom-nodes:${IMAGE_TAG} AS custom_nodes_artifact
+
+FROM ${REGISTRY_NAMESPACE}/minimax-h3-pod-models:${IMAGE_TAG}
+
+ARG COMFYUI_COMMIT=2a68ce33b4c9ea6ee4283e618a74560cefb32694
+ARG KJNODES_COMMIT=073efb07419f56cc714e099a82e49fbc23ad9263
+ARG SPECTRUM_COMMIT=1427dfe96029985be9cbc0033abb44bf2e7adc4f
+ARG SAGEATTENTION_VERSION=2.2.0
+
+LABEL org.opencontainers.image.title="minimax-h3-pod-workflow"
+LABEL scene_builder.layer="pod-combined-workflow"
+LABEL scene_builder.task_families="h3_fl2va,h3_ref2va"
+LABEL scene_builder.comfyui.commit="${COMFYUI_COMMIT}"
+LABEL scene_builder.kjnodes.commit="${KJNODES_COMMIT}"
+LABEL scene_builder.spectrum.version="0.2.1"
+LABEL scene_builder.spectrum.commit="${SPECTRUM_COMMIT}"
+LABEL scene_builder.sageattention.version="${SAGEATTENTION_VERSION}"
+
+# Apply the same pinned ComfyUI overlay used by the production task-family images
+# without touching the combined model directory inherited from pod-models.
+COPY --from=comfyui_artifact /artifacts/comfyui-overlay.tar.gz /tmp/comfyui-overlay.tar.gz
+COPY --from=comfyui_artifact /artifacts/COMFYUI_COMMIT /tmp/COMFYUI_COMMIT
+RUN set -eux; \
+    test "$(cat /tmp/COMFYUI_COMMIT)" = "${COMFYUI_COMMIT}"; \
+    find /opt/ComfyUI -mindepth 1 -maxdepth 1 \
+      ! -name models \
+      ! -name custom_nodes \
+      ! -name input \
+      ! -name output \
+      ! -name temp \
+      ! -name user \
+      -exec rm -rf {} +; \
+    tar -xzf /tmp/comfyui-overlay.tar.gz -C /opt/ComfyUI; \
+    python3 -m pip install --no-cache-dir -r /opt/ComfyUI/requirements.txt; \
+    rm -f /tmp/comfyui-overlay.tar.gz /tmp/COMFYUI_COMMIT
+
+# Install the existing shared SageAttention wheel. runtime_adapter.py already
+# disables Sage on GPU capabilities not covered by this wheel.
+COPY --from=sageattention_artifact /artifacts/wheels/ /tmp/sage-wheels/
+RUN set -eux; \
+    python3 -m pip install --no-cache-dir /tmp/sage-wheels/sageattention-2.2.0-*.whl; \
+    python3 - <<'PY'
+import importlib.metadata
+assert importlib.metadata.version('sageattention') == '2.2.0'
+print('SageAttention 2.2.0 installed')
+PY
+RUN rm -rf /tmp/sage-wheels
+
+# Apply the exact custom-node artifacts once for both task families.
+RUN rm -rf \
+    /opt/ComfyUI/custom_nodes/ComfyUI-KJNodes \
+    /opt/ComfyUI/custom_nodes/ComfyUI-Spectrum-MiniMax-H3
+COPY --from=custom_nodes_artifact /artifacts/custom_nodes/ComfyUI-KJNodes/ /opt/ComfyUI/custom_nodes/ComfyUI-KJNodes/
+COPY --from=custom_nodes_artifact /artifacts/custom_nodes/ComfyUI-Spectrum-MiniMax-H3/ /opt/ComfyUI/custom_nodes/ComfyUI-Spectrum-MiniMax-H3/
+RUN set -eux; \
+    python3 -m pip install --no-cache-dir -r /opt/ComfyUI/custom_nodes/ComfyUI-KJNodes/requirements.txt; \
+    test -f /opt/ComfyUI/custom_nodes/ComfyUI-Spectrum-MiniMax-H3/nodes.py
+
+# Carry both validated master workflows/manifests in one provider-neutral image.
+COPY workflows/fl2va_master.json /opt/scenebuilder-h3/workflows/fl2va_master.json
+COPY workflows/manifests/fl2va_manifest.json /opt/scenebuilder-h3/workflows/manifests/fl2va_manifest.json
+COPY workflows/ref2va_master.json /opt/scenebuilder-h3/workflows/ref2va_master.json
+COPY workflows/manifests/ref2va_manifest.json /opt/scenebuilder-h3/workflows/manifests/ref2va_manifest.json
+COPY scripts/validate_workflows.py /opt/scenebuilder-h3/scripts/validate_workflows.py
+
+RUN python3 /opt/scenebuilder-h3/scripts/validate_workflows.py \
+      --workflow /opt/scenebuilder-h3/workflows/fl2va_master.json \
+      --manifest /opt/scenebuilder-h3/workflows/manifests/fl2va_manifest.json \
+ && python3 /opt/scenebuilder-h3/scripts/validate_workflows.py \
+      --workflow /opt/scenebuilder-h3/workflows/ref2va_master.json \
+      --manifest /opt/scenebuilder-h3/workflows/manifests/ref2va_manifest.json
