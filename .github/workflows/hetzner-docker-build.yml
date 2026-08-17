@@ -17,6 +17,7 @@ on:
           - qwen-int8
           - fl2va-base
           - ref2va-base
+          - pod-models
           - comfyui
           - sageattention
           - custom-nodes
