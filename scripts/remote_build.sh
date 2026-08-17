@@ -68,6 +68,7 @@ image_for_target() {
     qwen-int8) echo "${REGISTRY_NAMESPACE}/minimax-h3-qwen-int8:${IMAGE_TAG}" ;;
     fl2va-base) echo "${REGISTRY_NAMESPACE}/minimax-h3-fl2va-base:${IMAGE_TAG}" ;;
     ref2va-base) echo "${REGISTRY_NAMESPACE}/minimax-h3-ref2va-base:${IMAGE_TAG}" ;;
+    pod-models) echo "${REGISTRY_NAMESPACE}/minimax-h3-pod-models:${IMAGE_TAG}" ;;
     comfyui) echo "${REGISTRY_NAMESPACE}/minimax-h3-comfyui:${IMAGE_TAG}" ;;
     sageattention) echo "${REGISTRY_NAMESPACE}/minimax-h3-sageattention:${IMAGE_TAG}" ;;
     custom-nodes) echo "${REGISTRY_NAMESPACE}/minimax-h3-custom-nodes:${IMAGE_TAG}" ;;
