@@ -74,12 +74,14 @@ image_for_target() {
     custom-nodes) echo "${REGISTRY_NAMESPACE}/minimax-h3-custom-nodes:${IMAGE_TAG}" ;;
     fl2va-workflow) echo "${REGISTRY_NAMESPACE}/minimax-h3-fl2va-workflow:${IMAGE_TAG}" ;;
     ref2va-workflow) echo "${REGISTRY_NAMESPACE}/minimax-h3-ref2va-workflow:${IMAGE_TAG}" ;;
+    pod-workflow) echo "${REGISTRY_NAMESPACE}/minimax-h3-pod-workflow:${IMAGE_TAG}" ;;
     fl2va-loras) echo "${REGISTRY_NAMESPACE}/minimax-h3-fl2va-loras:${IMAGE_TAG}" ;;
     ref2va-loras) echo "${REGISTRY_NAMESPACE}/minimax-h3-ref2va-loras:${IMAGE_TAG}" ;;
     runpod-fl2va) echo "${REGISTRY_NAMESPACE}/minimax-h3-runpod-fl2va:${IMAGE_TAG}" ;;
     runpod-ref2va) echo "${REGISTRY_NAMESPACE}/minimax-h3-runpod-ref2va:${IMAGE_TAG}" ;;
     novita-fl2va) echo "${REGISTRY_NAMESPACE}/minimax-h3-novita-fl2va:${IMAGE_TAG}" ;;
     novita-ref2va) echo "${REGISTRY_NAMESPACE}/minimax-h3-novita-ref2va:${IMAGE_TAG}" ;;
+    pod) echo "${REGISTRY_NAMESPACE}/minimax-h3-pod:${IMAGE_TAG}" ;;
     *) echo "Unknown BUILD_TARGET: $1" >&2; return 1 ;;
   esac
 }
