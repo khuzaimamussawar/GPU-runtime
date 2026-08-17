@@ -23,6 +23,11 @@ COPY src /opt/scenebuilder-h3/src
 COPY scripts/cleanup_video.sh /opt/scenebuilder-h3/scripts/cleanup_video.sh
 COPY scripts/encode_outputs.sh /opt/scenebuilder-h3/scripts/encode_outputs.sh
 
+RUN python3 -m py_compile \
+      /opt/scenebuilder-h3/src/common/h3_runtime.py \
+      /opt/scenebuilder-h3/src/common/runtime_adapter.py \
+      /opt/scenebuilder-h3/src/pod/server.py
+
 ENV H3_POD_HOST=0.0.0.0
 ENV H3_POD_PORT=8000
 ENV H3_POD_IDLE_TIMEOUT_SECONDS=60
