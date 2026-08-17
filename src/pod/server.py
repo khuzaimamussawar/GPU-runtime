@@ -46,6 +46,7 @@ class WorkloadRecord:
     results: list[dict[str, Any]] = field(default_factory=list)
     errors: list[dict[str, Any]] = field(default_factory=list)
     cancel_requested: bool = False
+    cancelled_job_ids: set[str] = field(default_factory=set)
 
     def public(self) -> dict[str, Any]:
         return {
@@ -60,6 +61,7 @@ class WorkloadRecord:
             "results": list(self.results),
             "errors": list(self.errors),
             "cancelRequested": self.cancel_requested,
+            "cancelledJobIds": sorted(self.cancelled_job_ids),
         }
 
 
@@ -232,14 +234,19 @@ def process_workload(payload: dict[str, Any]) -> None:
     emit_event("workload_started", workloadId=workload_id, itemCount=len(items))
 
     for index, raw_item in enumerate(items):
+        item = dict(raw_item)
+        job_id = _job_id(item)
+        child_cancelled = False
         with STATE.lock:
             if record.cancel_requested:
                 record.status = "cancelled"
                 record.progress_phase = "cancelled"
                 break
+            child_cancelled = job_id in record.cancelled_job_ids
+        if child_cancelled:
+            emit_event("job_cancelled", workloadId=workload_id, jobId=job_id)
+            continue
 
-        item = dict(raw_item)
-        job_id = _job_id(item)
         try:
             family = _task_family(item)
             if STATE.loaded_family and STATE.loaded_family != family:
@@ -264,6 +271,11 @@ def process_workload(payload: dict[str, Any]) -> None:
                 progress_callback=_progress_callback(record, job_id),
             )
             STATE.loaded_family = family
+            with STATE.lock:
+                child_cancelled = job_id in record.cancelled_job_ids
+            if child_cancelled:
+                emit_event("job_cancelled", workloadId=workload_id, jobId=job_id)
+                continue
             result_summary = {
                 "index": index,
                 "jobId": job_id,
@@ -281,6 +293,12 @@ def process_workload(payload: dict[str, Any]) -> None:
                 result=result,
             )
         except Exception as exc:
+            with STATE.lock:
+                child_cancelled = job_id in record.cancelled_job_ids
+            if child_cancelled:
+                emit_event("job_cancelled", workloadId=workload_id, jobId=job_id)
+                release_models_for_family_switch()
+                continue
             error = {
                 "index": index,
                 "jobId": job_id,
@@ -583,6 +601,23 @@ class RequestHandler(BaseHTTPRequestHandler):
                 STATE.queue.put_nowait(payload)
             emit_event("workload_accepted", workloadId=workload_id, itemCount=len(items), idleTimeoutSeconds=idle_timeout)
             self._send(HTTPStatus.ACCEPTED, {"ok": True, "accepted": True, "workloadId": workload_id})
+            return
+
+        parts = [part for part in path.split("/") if part]
+        if len(parts) == 5 and parts[0] == "workloads" and parts[2] == "items" and parts[4] == "cancel":
+            workload_id = parts[1]
+            job_id = parts[3]
+            with STATE.lock:
+                record = STATE.workloads.get(workload_id)
+                if not record:
+                    self._send(HTTPStatus.NOT_FOUND, {"ok": False, "error": "Unknown workload"})
+                    return
+                record.cancelled_job_ids.add(job_id)
+                active = record.current_job_id == job_id
+            if active:
+                interrupt_current_generation()
+            emit_event("job_cancel_requested", workloadId=workload_id, jobId=job_id)
+            self._send(HTTPStatus.ACCEPTED, {"ok": True, "jobId": job_id, "cancelRequested": True})
             return
 
         if path.startswith("/workloads/") and path.endswith("/cancel"):
