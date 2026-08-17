@@ -23,12 +23,14 @@ on:
           - custom-nodes
           - fl2va-workflow
           - ref2va-workflow
+          - pod-workflow
           - fl2va-loras
           - ref2va-loras
           - runpod-fl2va
           - runpod-ref2va
           - novita-fl2va
           - novita-ref2va
+          - pod
       targets_csv:
         description: "Optional comma-separated target batch; uses one Hetzner server for all targets"
         required: false
