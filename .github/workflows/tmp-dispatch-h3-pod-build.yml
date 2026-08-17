@@ -1,0 +1,37 @@
+name: Temporary Dispatch H3 Pod Build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/h3-pod-build-dispatch-trigger'
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch existing Hetzner Docker Build workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh api --method POST \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/${REPO}/actions/workflows/hetzner-docker-build.yml/dispatches" \
+            -f ref=main \
+            -f 'inputs[target]=pod-models' \
+            -f 'inputs[targets_csv]=pod-models,pod-nodes,pod-loras,pod-workflow,pod' \
+            -f 'inputs[image_tag]=latest' \
+            -f 'inputs[server_type]=cpx42' \
+            -f 'inputs[location]=fsn1' \
+            -f 'inputs[hetzner_image]=ubuntu-24.04' \
+            -f 'inputs[debug_keep_server_on_failure]=false' \
+            -f 'inputs[delete_server_after_success]=true' \
+            -f 'inputs[debug_keep_minutes]=15' \
+            -f 'inputs[docker_build_attempts]=2'
+          echo 'Dispatched Hetzner Docker Build for full H3 Pod chain.'
