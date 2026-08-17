@@ -1,0 +1,39 @@
+# syntax=docker/dockerfile:1.7
+ARG REGISTRY_NAMESPACE
+ARG IMAGE_TAG=latest
+FROM ${REGISTRY_NAMESPACE}/minimax-h3-pod-workflow:${IMAGE_TAG}
+
+LABEL org.opencontainers.image.title="minimax-h3-pod"
+LABEL scene_builder.runtime="pod"
+LABEL scene_builder.providers="runpod,novita"
+LABEL scene_builder.task_families="h3_fl2va,h3_ref2va"
+
+# Provider API credentials never enter this image. The runtime only needs the
+# libraries required by the shared H3 adapter to read/write R2 media.
+RUN set -eux; \
+    python3 -m pip install --no-cache-dir boto3 pillow; \
+    python3 - <<'PY'
+import boto3
+from PIL import Image
+print('boto3', boto3.__version__)
+print('Pillow', Image.__version__)
+PY
+
+COPY src /opt/scenebuilder-h3/src
+COPY scripts/cleanup_video.sh /opt/scenebuilder-h3/scripts/cleanup_video.sh
+COPY scripts/encode_outputs.sh /opt/scenebuilder-h3/scripts/encode_outputs.sh
+
+ENV H3_POD_HOST=0.0.0.0
+ENV H3_POD_PORT=8000
+ENV H3_POD_IDLE_TIMEOUT_SECONDS=60
+ENV COMFY_HOST=127.0.0.1
+ENV COMFY_PORT=8188
+ENV SCENEBUILDER_VFX_CLEANUP_ENABLED=0
+ENV SCENEBUILDER_VFX_CLEANUP_PROVIDER=maxine
+
+# 8000 is the SceneBuilder workload API. 8188 is optional provider-side ComfyUI
+# debugging only; provider launch configuration decides whether it is reachable.
+EXPOSE 8000 8188
+
+WORKDIR /opt/scenebuilder-h3
+CMD ["python3", "-m", "src.pod.server"]
