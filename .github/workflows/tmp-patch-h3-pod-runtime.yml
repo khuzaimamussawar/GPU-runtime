@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Add child-aware cancellation and validate
+      - name: Add explicit provider-side Comfy debug startup and validate
         shell: bash
         run: |
           set -euo pipefail
@@ -25,30 +25,29 @@ jobs:
           path = Path('src/pod/server.py')
           text = path.read_text()
 
-          old = '''    errors: list[dict[str, Any]] = field(default_factory=list)\n    cancel_requested: bool = False\n'''
-          new = '''    errors: list[dict[str, Any]] = field(default_factory=list)\n    cancel_requested: bool = False\n    cancelled_job_ids: set[str] = field(default_factory=set)\n'''
-          assert old in text
-          text = text.replace(old, new, 1)
+          old = '''COMFY_URL = f"http://{COMFY_HOST}:{COMFY_PORT}"\n\nALLOWED_TASK_FAMILIES'''
+          new = '''COMFY_URL = f"http://{COMFY_HOST}:{COMFY_PORT}"\nCOMFY_DEBUG_ENABLED = os.environ.get("H3_ENABLE_COMFY_UI_DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"}\n\nALLOWED_TASK_FAMILIES'''
+          if 'COMFY_DEBUG_ENABLED' not in text:
+              assert old in text
+              text = text.replace(old, new, 1)
 
-          old = '''            "errors": list(self.errors),\n            "cancelRequested": self.cancel_requested,\n'''
-          new = '''            "errors": list(self.errors),\n            "cancelRequested": self.cancel_requested,\n            "cancelledJobIds": sorted(self.cancelled_job_ids),\n'''
-          assert old in text
-          text = text.replace(old, new, 1)
+          marker = '''def _comfy_post(path: str, payload: dict[str, Any] | None = None, timeout: int = 5) -> bool:\n'''
+          insert = '''def _comfy_ready_local(timeout: int = 3) -> bool:\n    try:\n        with urllib.request.urlopen(f"http://127.0.0.1:{COMFY_PORT}/system_stats", timeout=timeout) as response:\n            response.read(1024)\n        return True\n    except Exception:\n        return False\n\n\ndef start_provider_debug_comfy() -> None:\n    if not COMFY_DEBUG_ENABLED or _comfy_ready_local():\n        return\n    cmd = [\n        "python3", "main.py", "--listen", "0.0.0.0", "--port", str(COMFY_PORT), "--disable-auto-launch"\n    ]\n    subprocess.Popen(cmd, cwd=COMFY_ROOT)\n    deadline = time.time() + int(os.environ.get("COMFY_STARTUP_TIMEOUT_SECONDS", "180"))\n    while time.time() < deadline:\n        if _comfy_ready_local():\n            print(f"[H3 Pod] provider-side ComfyUI debug ready on 0.0.0.0:{COMFY_PORT}", flush=True)\n            return\n        time.sleep(2)\n    raise RuntimeError("ComfyUI debug process did not become ready before timeout")\n\n\n'''
+          if 'def start_provider_debug_comfy' not in text:
+              assert marker in text
+              text = text.replace(marker, insert + marker, 1)
 
-          old = '''    for index, raw_item in enumerate(items):\n        with STATE.lock:\n            if record.cancel_requested:\n                record.status = "cancelled"\n                record.progress_phase = "cancelled"\n                break\n\n        item = dict(raw_item)\n        job_id = _job_id(item)\n        try:\n'''
-          new = '''    for index, raw_item in enumerate(items):\n        item = dict(raw_item)\n        job_id = _job_id(item)\n        child_cancelled = False\n        with STATE.lock:\n            if record.cancel_requested:\n                record.status = "cancelled"\n                record.progress_phase = "cancelled"\n                break\n            child_cancelled = job_id in record.cancelled_job_ids\n        if child_cancelled:\n            emit_event("job_cancelled", workloadId=workload_id, jobId=job_id)\n            continue\n\n        try:\n'''
-          assert old in text
-          text = text.replace(old, new, 1)
+          old = '''        "comfy": {"host": COMFY_HOST, "port": COMFY_PORT},\n'''
+          new = '''        "comfy": {"host": COMFY_HOST, "port": COMFY_PORT, "debugExposed": COMFY_DEBUG_ENABLED, "ready": _comfy_ready_local()},\n'''
+          if '"debugExposed": COMFY_DEBUG_ENABLED' not in text:
+              assert old in text
+              text = text.replace(old, new, 1)
 
-          old = '''            STATE.loaded_family = family\n            result_summary = {\n                "index": index,\n                "jobId": job_id,\n                "taskFamily": family,\n                "ok": bool(result.get("ok", True)),\n                "result": result,\n            }\n            with STATE.lock:\n                record.results.append(result_summary)\n            emit_event(\n                "job_completed",\n                workloadId=workload_id,\n                jobId=job_id,\n                taskFamily=family,\n                result=result,\n            )\n        except Exception as exc:\n            error = {\n'''
-          new = '''            STATE.loaded_family = family\n            with STATE.lock:\n                child_cancelled = job_id in record.cancelled_job_ids\n            if child_cancelled:\n                emit_event("job_cancelled", workloadId=workload_id, jobId=job_id)\n                continue\n            result_summary = {\n                "index": index,\n                "jobId": job_id,\n                "taskFamily": family,\n                "ok": bool(result.get("ok", True)),\n                "result": result,\n            }\n            with STATE.lock:\n                record.results.append(result_summary)\n            emit_event(\n                "job_completed",\n                workloadId=workload_id,\n                jobId=job_id,\n                taskFamily=family,\n                result=result,\n            )\n        except Exception as exc:\n            with STATE.lock:\n                child_cancelled = job_id in record.cancelled_job_ids\n            if child_cancelled:\n                emit_event("job_cancelled", workloadId=workload_id, jobId=job_id)\n                release_models_for_family_switch()\n                continue\n            error = {\n'''
-          assert old in text
-          text = text.replace(old, new, 1)
-
-          marker = '''        if path.startswith("/workloads/") and path.endswith("/cancel"):\n            workload_id = path[len("/workloads/") : -len("/cancel")].strip("/")\n'''
-          replacement = '''        parts = [part for part in path.split("/") if part]\n        if len(parts) == 5 and parts[0] == "workloads" and parts[2] == "items" and parts[4] == "cancel":\n            workload_id = parts[1]\n            job_id = parts[3]\n            with STATE.lock:\n                record = STATE.workloads.get(workload_id)\n                if not record:\n                    self._send(HTTPStatus.NOT_FOUND, {"ok": False, "error": "Unknown workload"})\n                    return\n                record.cancelled_job_ids.add(job_id)\n                active = record.current_job_id == job_id\n            if active:\n                interrupt_current_generation()\n            emit_event("job_cancel_requested", workloadId=workload_id, jobId=job_id)\n            self._send(HTTPStatus.ACCEPTED, {"ok": True, "jobId": job_id, "cancelRequested": True})\n            return\n\n        if path.startswith("/workloads/") and path.endswith("/cancel"):\n            workload_id = path[len("/workloads/") : -len("/cancel")].strip("/")\n'''
-          assert marker in text
-          text = text.replace(marker, replacement, 1)
+          old = '''def main() -> None:\n    if not POD_TOKEN:\n        print("[H3 Pod] WARNING: SCENEBUILDER_POD_TOKEN is missing; protected endpoints will reject requests", flush=True)\n    threading.Thread(target=worker_loop, name="h3-pod-worker", daemon=True).start()\n'''
+          new = '''def main() -> None:\n    if not POD_TOKEN:\n        print("[H3 Pod] WARNING: SCENEBUILDER_POD_TOKEN is missing; protected endpoints will reject requests", flush=True)\n    if COMFY_DEBUG_ENABLED:\n        start_provider_debug_comfy()\n    threading.Thread(target=worker_loop, name="h3-pod-worker", daemon=True).start()\n'''
+          if 'if COMFY_DEBUG_ENABLED:\n        start_provider_debug_comfy()' not in text:
+              assert old in text
+              text = text.replace(old, new, 1)
 
           path.write_text(text)
           PY
@@ -57,5 +56,7 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add src/pod/server.py
-          git commit -m 'Add child-aware H3 pod cancellation'
-          git push origin HEAD:main
+          if ! git diff --cached --quiet; then
+            git commit -m 'Add provider-side ComfyUI debug mode to H3 pod'
+            git push origin HEAD:main
+          fi
