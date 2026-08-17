@@ -18,6 +18,8 @@ on:
           - fl2va-base
           - ref2va-base
           - pod-models
+          - pod-nodes
+          - pod-loras
           - comfyui
           - sageattention
           - custom-nodes
