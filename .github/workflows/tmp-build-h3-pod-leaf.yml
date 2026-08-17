@@ -1,0 +1,68 @@
+name: Temporary Build H3 Pod Leaf
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/h3-pod-leaf-build-trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      BUILDER_NAME: h3-pod-leaf-${{ github.run_id }}-${{ github.run_attempt }}
+      SERVER_TYPE: cpx42
+      HETZNER_LOCATION: fsn1
+      HETZNER_IMAGE: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create temporary SSH key
+        id: sshkey
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .tmp
+          ssh-keygen -t ed25519 -f .tmp/h3_builder_key -N '' -C "h3-pod-leaf-${GITHUB_RUN_ID}"
+          echo "key_path=${GITHUB_WORKSPACE}/.tmp/h3_builder_key" >> "$GITHUB_OUTPUT"
+          echo "public_key=$(cat .tmp/h3_builder_key.pub)" >> "$GITHUB_OUTPUT"
+      - name: Create Hetzner builder
+        id: create
+        shell: bash
+        env:
+          HETZNER_TOKEN: ${{ secrets.HETZNER_TOKEN }}
+          BUILDER_SSH_PUBLIC_KEY: ${{ steps.sshkey.outputs.public_key }}
+        run: bash scripts/hetzner_create.sh
+      - name: Wait for SSH
+        shell: bash
+        run: bash scripts/wait_for_ssh.sh "${{ steps.create.outputs.server_ip }}" "${{ steps.sshkey.outputs.key_path }}" 900
+      - name: Build and push current Pod leaf only
+        shell: bash
+        env:
+          REMOTE_IP: ${{ steps.create.outputs.server_ip }}
+          SSH_KEY_PATH: ${{ steps.sshkey.outputs.key_path }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          GH_FH_TOKEN_MM_H3_SERVERLESS: ${{ secrets.GH_FH_TOKEN_MM_H3_SERVERLESS }}
+        run: |
+          set -euo pipefail
+          ssh -i "$SSH_KEY_PATH" \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
+            "root@${REMOTE_IP}" \
+            "BUILD_TARGET='pod' BUILD_TARGETS='pod' IMAGE_TAG='latest' \
+             DOCKERHUB_USERNAME='${DOCKERHUB_USERNAME}' DOCKERHUB_TOKEN='${DOCKERHUB_TOKEN}' \
+             HF_TOKEN='${HF_TOKEN}' GH_FH_TOKEN_MM_H3_SERVERLESS='${GH_FH_TOKEN_MM_H3_SERVERLESS}' \
+             DOCKER_BUILD_ATTEMPTS='2' GITHUB_REPOSITORY='${GITHUB_REPOSITORY}' \
+             GITHUB_REF_NAME='${GITHUB_REF_NAME}' bash -s" < scripts/remote_build.sh
+      - name: Delete Hetzner builder
+        if: always() && steps.create.outputs.server_id != ''
+        shell: bash
+        env:
+          HETZNER_TOKEN: ${{ secrets.HETZNER_TOKEN }}
+          SERVER_ID: ${{ steps.create.outputs.server_id }}
+        run: bash scripts/hetzner_delete.sh "$SERVER_ID" "${{ steps.create.outputs.ssh_key_id }}"
