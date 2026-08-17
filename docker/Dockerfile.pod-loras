@@ -1,0 +1,15 @@
+# syntax=docker/dockerfile:1.7
+ARG REGISTRY_NAMESPACE
+ARG IMAGE_TAG=latest
+FROM ${REGISTRY_NAMESPACE}/minimax-h3-pod-nodes:${IMAGE_TAG}
+
+LABEL org.opencontainers.image.title="minimax-h3-pod-loras"
+LABEL scene_builder.layer="pod-combined-loras"
+LABEL scene_builder.task_families="h3_fl2va,h3_ref2va"
+
+# LoRAs intentionally sit AFTER the shared custom-node/Spectrum layer and BEFORE
+# workflow/manifests. Both current family LoRA images are empty placeholders, so
+# this layer is zero-weight today apart from the directory metadata. When real
+# FL2VA/Ref2VA adapters are added, merge both sets here without changing the
+# lower model/Sage/node layers.
+RUN mkdir -p /opt/ComfyUI/models/loras
