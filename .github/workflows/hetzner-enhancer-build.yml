@@ -1,0 +1,91 @@
+name: Hetzner Enhancer Docker Build
+run-name: Build enhancer images ${{ inputs.image_tag || 'latest' }}
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'enhancer/**'
+      - '.github/workflows/hetzner-enhancer-build.yml'
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Docker tag"
+        required: true
+        default: "latest"
+        type: string
+      server_type:
+        description: "Hetzner builder server type"
+        required: true
+        default: "ccx43"
+        type: string
+      location:
+        description: "Hetzner location"
+        required: true
+        default: "fsn1"
+        type: string
+      hetzner_image:
+        description: "Hetzner OS image"
+        required: true
+        default: "ubuntu-24.04"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build enhancer ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 720
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [fast, quality]
+    env:
+      BUILDER_NAME: enhancer-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+      SERVER_TYPE: ${{ inputs.server_type || 'ccx43' }}
+      HETZNER_LOCATION: ${{ inputs.location || 'fsn1' }}
+      HETZNER_IMAGE: ${{ inputs.hetzner_image || 'ubuntu-24.04' }}
+      IMAGE_TAG: ${{ inputs.image_tag || 'latest' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create temporary SSH key
+        id: sshkey
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p .tmp
+          ssh-keygen -t ed25519 -f .tmp/enhancer_builder_key -N "" -C "enhancer-${{ matrix.target }}-${GITHUB_RUN_ID}"
+          echo "key_path=${GITHUB_WORKSPACE}/.tmp/enhancer_builder_key" >> "$GITHUB_OUTPUT"
+          echo "public_key=$(cat .tmp/enhancer_builder_key.pub)" >> "$GITHUB_OUTPUT"
+      - name: Create temporary Hetzner builder
+        id: create
+        shell: bash
+        env:
+          HETZNER_TOKEN: ${{ secrets.HETZNER_TOKEN }}
+          BUILDER_SSH_PUBLIC_KEY: ${{ steps.sshkey.outputs.public_key }}
+        run: bash scripts/hetzner_create.sh
+      - name: Wait for SSH
+        shell: bash
+        run: bash scripts/wait_for_ssh.sh "${{ steps.create.outputs.server_ip }}" "${{ steps.sshkey.outputs.key_path }}" 900
+      - name: Build and push enhancer image
+        shell: bash
+        env:
+          REMOTE_IP: ${{ steps.create.outputs.server_ip }}
+          SSH_KEY_PATH: ${{ steps.sshkey.outputs.key_path }}
+          BUILD_TARGET: ${{ matrix.target }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          GH_FH_TOKEN_MM_H3_SERVERLESS: ${{ secrets.GH_FH_TOKEN_MM_H3_SERVERLESS }}
+        run: |
+          set -Eeuo pipefail
+          ssh -i "${SSH_KEY_PATH}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=20 "root@${REMOTE_IP}" \
+            "BUILD_TARGET='${BUILD_TARGET}' IMAGE_TAG='${IMAGE_TAG}' DOCKERHUB_USERNAME='${DOCKERHUB_USERNAME}' DOCKERHUB_TOKEN='${DOCKERHUB_TOKEN}' GH_FH_TOKEN_MM_H3_SERVERLESS='${GH_FH_TOKEN_MM_H3_SERVERLESS}' GITHUB_REPOSITORY='${GITHUB_REPOSITORY}' GITHUB_REF_NAME='${GITHUB_REF_NAME}' bash -s" < enhancer/scripts/remote_build.sh
+      - name: Delete temporary builder
+        if: always() && steps.create.outputs.server_id != ''
+        shell: bash
+        env:
+          HETZNER_TOKEN: ${{ secrets.HETZNER_TOKEN }}
+          SERVER_ID: ${{ steps.create.outputs.server_id }}
+        run: bash scripts/hetzner_delete.sh "${SERVER_ID}" "${{ steps.create.outputs.ssh_key_id }}"
