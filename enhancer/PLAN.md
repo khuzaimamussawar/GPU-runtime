@@ -4,27 +4,40 @@ Status: **canonical implementation plan**
 
 Branch: `feat/enhancer-gpu-runtime`
 
-This file is intentionally separate from the H3 runtime/lifecycle design. Enhancer code lives in the same GPU-runtime repository, but enhancer lifecycle state and H3 lifecycle state remain physically separate.
+This file is intentionally separate from the mature H3 lifecycle design. Enhancer code may live in the same GPU-runtime repository, but enhancer lifecycle/state remains physically separate from H3. When older enhancer drafts or earlier revisions conflict with this file, **this file wins**.
 
-This revision incorporates the approved operational/UI/TensorRT details from the older enhancer plans while keeping the newer locked decisions: **no FILM, no TensorRT for Storyboard image ESRGAN, RIFE 4.9, GIMM-VFI-F, CUDA 13.x, TensorRT 10.16.1, and GPU-only neural inference.**
+Current hard runtime lock:
+
+```text
+System CUDA userspace/toolkit: CUDA 13.0 Update 2 (13.0.2)
+PyTorch:                      2.13.0 / cu130 build family
+CuPy:                         cupy-cuda13x
+TensorRT:                     10.14.1.48
+Neural CPU fallback:          forbidden
+```
+
+`CUDA 13.0 Update 2` is still CUDA **13.0**, not CUDA 13.1. RunPod/Novita scheduling should request/filter for CUDA 13.0-class hosts and then boot-qualify the actual driver/runtime. CUDA 13.x minor-version compatibility begins at NVIDIA driver 580, while CUDA 13.0 Update 2 is paired with driver 580.95.05; boot-time CUDA/CuPy/model/TensorRT smoke tests remain authoritative.
 
 ---
 
 ## 1. Product goal
 
-Build a SceneBuilder enhancer backend that behaves operationally like the existing H3 pod system without putting enhancer jobs/workers into H3 state.
+Build a SceneBuilder image/video enhancer using RunPod and Novita GPU pods with the same operational discipline as H3 while preserving H3 implementation/state.
 
-Supported product paths:
+Product paths:
 
-- Storyboard still-image upscale.
+- Storyboard single-image upscale remains the existing legacy path unless deliberately changed later.
+- Storyboard **Upscale All** uses local enhancer pods only; zero Replicate.
 - Video Generation Timeline / Director video upscale.
-- Video frame interpolation.
-- FAST and QUALITY local GPU runtimes.
-- Existing Topaz external/premium upscale/VFI choices remain available through their existing external path.
-- RunPod and Novita local enhancer pod provisioning.
-- H3-style priority, retries, debug/error state, heartbeat, idle reuse, configurable idle timeout, job timeout, provider fallback, delete locks, delete verification/backoff, and orphan cleanup.
+- Local FAST and QUALITY enhancement.
+- Local VFI with RIFE 4.9 or GIMM-VFI-F.
+- Existing Topaz premium/external upscale/VFI choices remain behind their existing external backend.
+- Video output targets: 1080p, 1440p/2K, 2160p/4K.
+- VFI/output FPS product targets: **30, 48, 60 FPS only**.
+- Source FPS may be arbitrary/variable: e.g. 16, 20, 23.976, 24, 25, 29.97, 30, 35, 48, 50, 59.94, 60, or VFR.
+- H3-style priority, retries, heartbeats, error/debug state, idle reuse, configurable idle timeout, provision/job timeout, provider fallback, delete locks, delete verification/backoff, stale allocation cleanup, cancel and orphan cleanup.
 
-Neural inference on a paid enhancer GPU pod must never silently run on CPU.
+Expensive spatial enhancement should normally create an enhanced master once. Trim/speed/FPS-only changes should reuse the valid enhanced master and rerun only timing/VFI when possible.
 
 ---
 
@@ -32,7 +45,7 @@ Neural inference on a paid enhancer GPU pod must never silently run on CPU.
 
 ### 2.1 H3 lifecycle remains untouched
 
-H3 state remains:
+H3 state:
 
 ```text
 h3_pod_workers
@@ -40,7 +53,7 @@ video_generation_batches
 video_generation_jobs
 ```
 
-Enhancer state is separate:
+Enhancer state:
 
 ```text
 enhancer_pod_workers
@@ -53,13 +66,13 @@ enhancer_config
 Rules:
 
 - Never insert enhancer workers into `h3_pod_workers`.
-- H3 code never queries `enhancer_pod_workers`.
-- Enhancer allocation never treats `h3_pod_workers` as its worker pool.
-- Enhancer has its own callback/replay/delete-lock/reaper state.
-- Enhancer may reuse stateless provider/R2 helper patterns from H3, but not H3 stateful lifecycle rows/functions.
-- Do not modify mature H3 lifecycle behavior to make enhancer work.
+- H3 code never queries enhancer lifecycle tables.
+- Enhancer never treats H3 workers as its pool.
+- Enhancer has its own callback endpoint, HMAC derivation domain, replay state, delete locks and reaper state.
+- Mature H3 runtime/lifecycle source behavior is not modified to make enhancer work.
+- Stateless provider/R2 helper patterns may be reused only where they do not share lifecycle state.
 
-### 2.2 Existing product D1/JSON contracts remain authoritative
+### 2.2 Product D1/JSON contracts remain authoritative
 
 Do not add enhancer-specific product schema to:
 
@@ -68,11 +81,11 @@ projects_timeline
 project_video_timeline
 ```
 
-Do not create a second project-media state table. Enhancer-specific D1 changes are operational only.
+Do not create a second product-media state table. Detailed enhancer provenance belongs in operational enhancer rows.
 
-### 2.3 Existing product R2 layout remains authoritative
+### 2.3 Product R2 layout remains authoritative
 
-Permanent product output locations remain resolved through current media-layout rules. Canonical V2 destinations are:
+Permanent outputs remain under existing media-layout ownership. Canonical semantic destinations:
 
 ```text
 Storyboard image upscale:
@@ -82,64 +95,64 @@ Director video upscale:
 projects/{projectId}/video/upscaled/
 ```
 
-No R2 product-media migration is part of enhancer work.
+No product-media R2 migration is part of enhancer work.
 
-### 2.4 Replicate routing
+### 2.4 Replicate boundary
 
-- Storyboard **Upscale All** uses local enhancer pods only.
-- No Replicate worker/cron may claim enhancer batch jobs.
-- Existing single-image `/api/upscale` remains the legacy Replicate path unless deliberately changed later.
+- `POST /api/upscale-batch` / Storyboard **Upscale All** -> local enhancer FAST pods only.
+- New local jobs use enhancer-owned queue state such as `waiting_for_pod`, not legacy Replicate-claimable state.
+- Existing single-image `/api/upscale` remains legacy Replicate unless deliberately changed later.
 
 ### 2.5 FILM is deleted
 
-FILM is not installed, exposed, advertised, benchmarked, routed, or stored anywhere in the enhancer runtime/product.
+FILM is not installed, exposed, routed, benchmarked, documented as supported, or stored in either enhancer image.
 
 ---
 
-## 3. Final model/runtime topology
+## 3. Final model/runtime matrix
 
-There are two local enhancer Docker image families:
+Two local Docker image families:
 
 ```text
 scenebuilder-enhancer-fast
 scenebuilder-enhancer-quality
 ```
 
-### 3.1 FAST image
+### 3.1 FAST
 
 ```text
-CUDA 13.x userspace
-PyTorch 2.x CUDA-13 build selected/validated for the final image
+CUDA 13.0 Update 2
+PyTorch 2.13.0 cu130
 CuPy cupy-cuda13x
-TensorRT 10.16.1 runtime + builder
+TensorRT 10.14.1.48 runtime + builder
 FFmpeg with NVDEC/NVENC where available
 NVML telemetry
 
-Storyboard image upscale:
-  RealESRGAN_x4plus_anime_6B
-  RealESRGAN_x4plus
+Storyboard IMAGE:
+  Anime -> RealESRGAN_x4plus_anime_6B
+  Real  -> RealESRGAN_x4plus
 
-Director video upscale:
-  realesr-animevideov3
-  realesr-general-x4v3
+Director VIDEO:
+  Anime -> realesr-animevideov3
+  Real  -> realesr-general-x4v3
 
 VFI:
   RIFE 4.9
   GIMM-VFI-F
 ```
 
-### 3.2 QUALITY image
+### 3.2 QUALITY
 
 ```text
-CUDA 13.x userspace
-PyTorch 2.x CUDA-13 build selected/validated for the final image
+CUDA 13.0 Update 2
+PyTorch 2.13.0 cu130
 CuPy cupy-cuda13x
-TensorRT 10.16.1 runtime for RIFE
+TensorRT 10.14.1.48 runtime for RIFE engine execution
 FFmpeg with NVDEC/NVENC where available
 NVML telemetry
 
 Video upscale:
-  FlashVSR
+  FlashVSR v1.1 / qualified FlashVSR+ implementation path
 
 VFI:
   RIFE 4.9
@@ -148,7 +161,7 @@ VFI:
 
 ### 3.3 Topaz remains external
 
-Keep existing premium/external choices behind their existing SceneBuilder path:
+Keep the existing external premium contract for:
 
 ```text
 Topaz Gaia 2
@@ -157,105 +170,141 @@ Topaz Chronos where supported
 Topaz Apollo where supported
 ```
 
-Do not bake or redistribute Topaz assets in local enhancer Docker images.
+Do not bake/redistribute Topaz assets in local enhancer Docker images or local TensorRT engine storage.
 
 ---
 
-## 4. CUDA / PyTorch / CuPy / TensorRT baseline
+## 4. CUDA / PyTorch / CuPy / TensorRT lock
 
-### 4.1 One CUDA line per Docker image
+### 4.1 One CUDA toolkit/userspace line per Docker image
 
-Use one CUDA userspace line in each enhancer Docker image.
+Both FAST and QUALITY use the same selected system CUDA line:
 
 ```text
-CUDA userspace: 13.x
-PyTorch: 2.x build for the selected CUDA-13 runtime
-CuPy: cupy-cuda13x
-TensorRT: 10.16.1
+CUDA Toolkit/userspace: 13.0 Update 2 (13.0.2)
 ```
 
-Do not install CUDA 11/12/13 side by side in one image. `PyTorch 2.x` is the framework version; its CUDA build/runtime tag is a separate compatibility dimension.
+Do not install CUDA 11, CUDA 12.x, or CUDA 13.1 beside it.
 
-### 4.2 CuPy
+`PyTorch 2.13.0` is the framework version. `cu130` is its CUDA build/runtime tag, not a PyTorch major version.
 
-Install only `cupy-cuda13x`. Do not allow third-party installers to add `cupy-cuda12x` or another CuPy CUDA family beside it. GIMM-VFI-F uses the validated PyTorch/CuPy CUDA path.
-
-### 4.3 TensorRT version
-
-Pin **TensorRT 10.16.1**. Do not move to TensorRT 11.x until our exporters/runtime are intentionally migrated and parity-tested.
-
-### 4.4 GPU architecture / VRAM policy
+Install one CuPy family only:
 
 ```text
-Ampere    -> primarily sm_86 allowed <=48 GB SKUs
-Ada       -> sm_89 allowed <=48 GB SKUs
-Blackwell -> sm_120 RTX/workstation allowed <=48 GB SKUs
+cupy-cuda13x
 ```
 
-**48 GB GPUs are allowed.** Do not provision excluded high-cost datacenter classes such as A100/H100/H200/B200 or >48 GB workers for this product.
+Never let third-party installers add `cupy-cuda12x` alongside it.
 
-### 4.5 FlashVSR QUALITY floor
+### 4.2 TensorRT version
 
-FlashVSR production routing starts at the approved RTX-4090-class floor or a validated equal/higher allowed GPU. Do not route FlashVSR to lower FAST-pool cards merely because they have enough nominal VRAM.
-
----
-
-## 5. GPU-only execution invariant
-
-Neural inference must never silently fall back to CPU.
+Pin:
 
 ```text
-torch.cuda.is_available() == false
-  -> worker unhealthy
-  -> do not advertise ready
-  -> report/requeue/fail according to policy
-  -> terminate/replace pod
-
-model parameters on CPU at inference boundary -> abort job
-input tensors on CPU at inference boundary    -> abort job
-unexpected framework CPU/offload path         -> abort job
+TensorRT 10.14.1.48
 ```
 
-Explicitly own `CUDA_VISIBLE_DEVICES`, `cuda:0`, model device, input tensor device, output validation, and CUDA synchronization/events.
+Reason: this is an NVIDIA-tested TensorRT 10.x release explicitly supporting CUDA 13.0 Update 2 and retaining the TensorRT 10 builder/runtime style required by our FP16 RIFE/ESRGAN path. Do not move to TensorRT 11.x until our own exporters are deliberately migrated and parity-tested.
 
-CPU remains valid for HTTP/orchestration, R2 I/O, JSON/filesystem, probing, audio, and codec/pre/post work. It is not a neural fallback.
+### 4.3 Host/provider compatibility
 
-### 5.1 Startup qualification
+Provider scheduling requests CUDA 13.0-class hosts where the API exposes CUDA selection.
 
-Before `/ready` becomes true, run actual GPU tests.
-
-FAST:
+Boot qualification is mandatory:
 
 ```text
-CUDA allocation + CUDA op
+nvidia-smi / driver inspection
+CUDA allocation + real CUDA op
+PyTorch CUDA availability/version
 CuPy CUDA kernel
-Storyboard ESRGAN native CUDA inference
-video ESRGAN native CUDA inference
-RIFE 4.9 native CUDA inference
-RIFE TensorRT deserialize/inference when a compatible engine is present
-GIMM-VFI-F native CUDA/CuPy inference
-NVENC smoke test when configured
+TensorRT load/build smoke where applicable
+model-specific smoke tests
+NVENC smoke where configured
+```
+
+A host that cannot execute the required CUDA 13.0 runtime correctly is never advertised ready; mark unhealthy, delete and reprovision. No CPU workaround.
+
+---
+
+## 5. GPU fleet policy
+
+Supported architecture families:
+
+```text
+Ampere    -> primarily sm_86 fleet
+Ada       -> sm_89
+Blackwell -> sm_120 RTX/workstation
+```
+
+Global product limit:
+
+```text
+VRAM <= 48 GB, including 48 GB
+```
+
+Exclude A100/A800/H100/H200/B200 and other high-cost datacenter classes outside product economics even when technically usable.
+
+Representative candidates subject to live inventory and qualification:
+
+```text
+Ampere: RTX 3090, RTX A4000/A4500/A5000, A40 48GB, RTX A6000 48GB
+Ada:    RTX 4090, L4, L40/L40S 48GB, RTX 6000 Ada 48GB
+Blackwell <=48GB: RTX 5090 and qualified workstation variants
+```
+
+QUALITY/FlashVSR starts at the approved RTX-4090-class floor or validated equal/higher allowed GPU.
+
+---
+
+## 6. GPU-only inference invariant
+
+Neural inference may not silently use CPU.
+
+```text
+torch.cuda.is_available() == false -> worker unhealthy
+model parameters/buffers unexpectedly on CPU at inference boundary -> fail/requeue
+input tensors on CPU at neural boundary -> fail/requeue
+framework/model offload to CPU -> capability/job failure
+```
+
+Explicitly own `CUDA_VISIBLE_DEVICES`, select `cuda:0`, move models/inputs there, validate outputs, and synchronize around diagnostics/benchmarks.
+
+CPU is allowed for HTTP, JSON, R2 I/O, filesystem, ffprobe, orchestration, audio, codecs and controlled pre/post-processing. It is not a neural fallback.
+
+### 6.1 Startup qualification
+
+FAST before `/ready=true`:
+
+```text
+CUDA op
+CuPy kernel
+Storyboard ESRGAN native CUDA
+video ESRGAN native CUDA
+available video ESRGAN TRT deserialize/inference
+RIFE native CUDA
+available RIFE TRT deserialize/inference
+GIMM-F native CUDA/CuPy
+FFmpeg/NVENC smoke when configured
 ```
 
 QUALITY:
 
 ```text
-CUDA allocation + CUDA op
-CuPy CUDA kernel
+CUDA op
+CuPy kernel
 FlashVSR representative inference
-RIFE 4.9 native CUDA inference
-RIFE TensorRT deserialize/inference when a compatible engine is present
-GIMM-VFI-F native CUDA/CuPy inference
-NVENC smoke test when configured
+RIFE native CUDA + available TRT
+GIMM-F native CUDA/CuPy
+FFmpeg/NVENC smoke
 ```
 
-Advertise only capabilities that actually pass.
+Advertise only capabilities that pass. Record GPU, VRAM, compute capability, driver, CUDA, PyTorch, CuPy, TensorRT, model capability and peak VRAM.
 
 ---
 
-## 6. Exact TensorRT scope
+## 7. Exact TensorRT scope
 
-TensorRT `.engine` files are allowed for exactly three model families:
+TensorRT `.engine` files exist for exactly:
 
 ```text
 1. realesr-animevideov3
@@ -263,306 +312,252 @@ TensorRT `.engine` files are allowed for exactly three model families:
 3. RIFE 4.9
 ```
 
-No `.engine` for:
+Explicitly no TensorRT engine for:
 
 ```text
-RealESRGAN_x4plus_anime_6B  # Storyboard image
-RealESRGAN_x4plus           # Storyboard image
-GIMM-VFI-F
+RealESRGAN_x4plus_anime_6B
+RealESRGAN_x4plus
 FlashVSR
+GIMM-VFI-F
 ```
 
-### 6.1 Storyboard image ESRGAN is native PyTorch CUDA only
+The two Storyboard image ESRGAN models are native PyTorch CUDA only.
 
-```text
-Anime -> RealESRGAN_x4plus_anime_6B
-Real  -> RealESRGAN_x4plus
-```
+### 7.1 Video ESRGAN rules
 
-No ONNX/TensorRT engine generation, R2 engine folder, or TensorRT admin build option for these image models.
+- FP16 TensorRT preferred when a valid engine matches.
+- Static full-frame engines.
+- No tiled ESRGAN TensorRT.
+- No hidden ESRGAN tiling fallback.
+- Missing/non-matching engine -> native full-frame PyTorch CUDA FP16.
+- If full-frame PyTorch still OOMs after concurrency backoff -> requeue a larger allowed GPU or fail/retry; never CPU.
 
-### 6.2 Video ESRGAN uses full-frame static engines
+`realesr-general-x4v3` uses one fixed balanced denoise preset in V1; do not multiply engines for arbitrary DNI values.
 
-```text
-Anime -> realesr-animevideov3
-Real  -> realesr-general-x4v3
-```
+### 7.2 BasicSR compatibility patch
 
-Primary strategy:
-
-- FP16 TensorRT.
-- Full-frame static video engines.
-- No tiled TensorRT path.
-- No separate engine for duration/FPS/concurrency.
-- Native GPU PyTorch fallback for non-matching/invalid/missing engines.
-- Never CPU fallback.
-
-Do not use tiled ESRGAN/RIFE inference in the locked video paths. If full-frame execution cannot fit after concurrency backoff, requeue to a larger allowed GPU or fail/retry according to policy.
-
-### 6.3 `general-x4v3` denoise policy
-
-Use one fixed balanced denoise network/preset for the V1 TensorRT export. Do **not** create extra `.engine` variants for arbitrary DNI/denoise values.
-
-### 6.4 BasicSR compatibility patch
-
-Do not alter Real-ESRGAN architecture, weights, or quality behavior to make the modern runtime work. The approved BasicSR compatibility patch, when required by the pinned revision, is only:
+When required by pinned upstream revision, only the deterministic import compatibility patch is approved:
 
 ```python
 # old
 from torchvision.transforms.functional_tensor import rgb_to_grayscale
 
-# compatible
+# new
 from torchvision.transforms.functional import rgb_to_grayscale
 ```
 
-Pin official BasicSR/Real-ESRGAN source revisions and apply this deterministic compatibility patch during build. Validate BasicSR import, Real-ESRGAN import, and representative CUDA inference.
+No architecture/weight/quality changes.
 
 ---
 
-## 7. TensorRT engine topology
+## 8. TensorRT engine topology
 
-### 7.1 Video ESRGAN: 12 engines per compatibility target
+### 8.1 Video ESRGAN: 12 per compatibility set
 
-For `realesr-animevideov3`:
-
-```text
-Landscape: 854x480, 1056x594, 1280x720
-Portrait:  480x854, 594x1056, 720x1280
-= 6 engines
-```
-
-For `realesr-general-x4v3`: same six shapes = 6 engines.
+Per model:
 
 ```text
-6 anime + 6 real = 12 video ESRGAN engines
+Landscape:
+854x480
+1056x594
+1280x720
+
+Portrait:
+480x854
+594x1056
+720x1280
+
+= 6 static engines/model
 ```
 
-### 7.2 RIFE 4.9: 3 engines, not 6
+Therefore:
 
-RIFE uses three resolution-class engine files per compatibility target:
+```text
+realesr-animevideov3 = 6
+realesr-general-x4v3 = 6
+video ESRGAN total   = 12
+```
+
+### 8.2 RIFE: exactly 3 engine files per compatibility set
 
 ```text
 1080 class
-  landscape profile: 1920x1080
-  portrait profile:  1080x1920
+  profile: 1920x1080
+  profile: 1080x1920
 
-1440 / 2K class
-  landscape profile: 2560x1440
-  portrait profile:  1440x2560
+1440 class
+  profile: 2560x1440
+  profile: 1440x2560
 
-2160 / 4K class
-  landscape profile: 3840x2160
-  portrait profile:  2160x3840
+2160 class
+  profile: 3840x2160
+  profile: 2160x3840
 ```
 
-Each engine contains validated landscape/portrait profiles. Portrait support therefore does **not** double the file count.
+Landscape + portrait are optimization profiles inside each resolution-class engine, not separate engine files.
 
 ```text
-RIFE engine files = 3
+RIFE = 3 .engine files/set
 ```
 
-Split into 6 only if later benchmarks prove separate orientation engines materially better; do not do so by default.
+### 8.3 RIFE TensorRT must keep `timestep` dynamic
 
-### 7.3 Total
-
-Per TensorRT compatibility target:
+Our RIFE ONNX/TensorRT adapter must expose runtime inputs equivalent to:
 
 ```text
-video ESRGAN anime = 6
-video ESRGAN real  = 6
-RIFE 4.9           = 3
-----------------------
-total              = 15 .engine files
+img0
+img1
+timestep
 ```
 
-If three separate same-compute-capability sets are generated for `sm_86`, `sm_89`, and `sm_120`, that is 45 physical engine files.
+`timestep` is a runtime value, not baked/constant-folded to `0.5`.
 
-### 7.4 What does NOT create another engine
+This is critical: the same spatial RIFE engine must accept arbitrary interpolation positions between two source frames. Do not build separate RIFE engines for x2/x3/x4, source FPS, target FPS or clip duration.
 
-No additional engine for:
+### 8.4 Engine count
+
+Per compatibility target:
 
 ```text
-video duration
-number of frames
-24 -> 48 FPS
-24 -> 60 FPS
-30 -> 48 FPS
-30 -> 60 FPS
-x2/x3/x4 frame concurrency
-Director trim range
+12 video ESRGAN
+ 3 RIFE
+----------------
+15 engine files
+```
+
+Required baseline retained sets:
+
+```text
+sm_86 same-CC      = 15
+sm_89 same-CC      = 15
+sm_120 same-CC     = 15
+AMPERE_PLUS        = 15
+-----------------------
+baseline cache     = 60 engines
+```
+
+Exact-GPU sets are optional and add another 15 only when deliberately generated/benchmarked.
+
+### 8.5 Things that NEVER create another engine
+
+```text
+clip duration
+total frame count
+input FPS
+30/48/60 target FPS
+24->48
+24->60
+16->60
+20->30
+35->48
+35->60
+x1/x2/x3/x4 runtime concurrency
+trim/range
 Director playback speed
 ```
 
-Those are runtime scheduling/timestamp concerns.
-
 ---
 
-## 8. TensorRT portability and lookup order
+## 9. TensorRT portability and runtime lookup
 
-Support these compatibility targets where TensorRT 10.16.1 validates them:
+Supported artifact modes:
 
 ```text
-AMPERE_PLUS portable
-SAME_COMPUTE_CAPABILITY / sm_86
-SAME_COMPUTE_CAPABILITY / sm_89
-SAME_COMPUTE_CAPABILITY / sm_120
 Exact GPU
+SAME_COMPUTE_CAPABILITY sm_86
+SAME_COMPUTE_CAPABILITY sm_89
+SAME_COMPUTE_CAPABILITY sm_120
+AMPERE_PLUS portable
 ```
-
-The allocator still filters through the SceneBuilder <=48 GB GPU allowlist. `AMPERE_PLUS` is an engine compatibility mode, not permission to provision excluded GPUs.
 
 Runtime preference:
 
 ```text
 1. exact-GPU validated active engine
 2. same-compute-capability validated active engine
-3. AMPERE_PLUS validated active engine
-4. native PyTorch CUDA FP16 fallback
+3. validated AMPERE_PLUS engine
+4. native GPU PyTorch fallback
 ```
 
-Never use an engine whose metadata/compatibility does not match the actual runtime/GPU.
+Do not deserialize an engine whose recorded TRT/CUDA/model/hash/profile/hardware compatibility does not match runtime requirements.
 
 ---
 
-## 9. Non-canonical video fallback
+## 10. TensorRT engine building
 
-The 12 video ESRGAN engines are static shapes. A source that does not match an approved static shape must not be destructively resized merely to force a TensorRT hit unless a separate normalization rule has been explicitly approved for that source class.
+Yes: the CUDA 13.0 FAST image carries the full TensorRT 10.14.1.48 **builder + runtime**, so it can build the approved `.engine` files on actual RunPod/Novita GPUs.
+
+Engine generation is an admin/offline control-plane job and is allowed to be slow. Build time is not customer inference latency. TensorRT tactic profiling may take minutes; that is acceptable because validated artifacts are generated once, uploaded to private R2 and reused.
+
+Build on the intended compatibility target:
 
 ```text
-exact supported static shape -> TensorRT
-no exact safe approved shape -> native PyTorch CUDA FP16 at source raster
+sm_86 set      -> validated sm_86 GPU
+sm_89 set      -> validated sm_89 GPU
+sm_120 set     -> validated sm_120 GPU
+AMPERE_PLUS    -> validated allowed builder configured for hardware compatibility
+Exact GPU      -> exact requested allowed SKU
 ```
 
-Do not crush a 1920x1080 source to 1280x720 solely because only a 720 engine exists.
+Use a compatible FAST pod; no separate builder Docker image is required. QUALITY consumes compatible RIFE engines built through this trusted path.
 
----
-
-## 10. Output resolution and aspect handling
-
-Neural scale and final product delivery resolution are separate.
-
-Video targets:
+### 10.1 Build lifecycle
 
 ```text
-1080p
-1440p / 2K
-2160p / 4K
+admin Generate engine
+-> pending_upscales job_type=engine_build
+-> validate ALLOWED_EMAILS + server allowlists
+-> resolve baked trusted ONNX/checkpoint hash
+-> reuse/provision compatible FAST GPU pod
+-> verify CUDA 13.0 + TRT 10.14.1.48 + GPU
+-> build FP16 engine
+-> deserialize/self-test
+-> correctness comparison vs native CUDA reference
+-> optional benchmark
+-> SHA-256
+-> upload to temporary private R2 key
+-> callback
+-> Worker verifies job/pod/object/hash/metadata
+-> promote immutable final object
+-> D1 transaction activates new engine
+-> deactivate prior matching engine only after replacement succeeds
 ```
 
-For video Real-ESRGAN, run the native x4 model and then perform final high-quality resize/conform to the exact requested output raster. Storyboard keeps existing 2K/4K product semantics.
-
-Support both 16:9 and 9:16. Model identity is not tied to orientation. `ffprobe` actual video metadata instead of trusting requested/provider metadata blindly.
+Failed replacement never disables the prior active engine.
 
 ---
 
-## 11. RIFE 4.9 timing behavior
+## 11. TensorRT artifacts: Docker / R2 / D1
 
-Pin the exact RIFE 4.9 implementation revision and checkpoint SHA-256 used by native PyTorch and TensorRT export. Do not opportunistically download a different/latest checkpoint at pod startup.
-
-RIFE must support arbitrary interpolation timestamps, not only integer `--multi`.
-
-For source FPS `S`, target FPS `T`, and playback speed `p`:
+Docker owns durable sources:
 
 ```text
-sourcePositionStep = S * p / T
-sourcePosition = outputTime * S * p
-left  = floor(sourcePosition)
-right = left + 1
-t     = sourcePosition - left
+model code
+weights/checkpoints
+video-ESRGAN ONNX/export source
+RIFE ONNX/export source
+runtime dependencies
+TRT builder/runtime
+FFmpeg/NVML service code
 ```
 
-Invoke the same RIFE model/engine with the required fractional timestep `t`.
+Generated `.engine` binaries are never baked into Docker.
 
-The same engine supports 24→48, 24→60, 30→48, 30→60, and other supported mappings.
-
-### 11.1 Director range/playback-speed semantics
-
-- Full-master enhancement preserves the authoritative full-master duration.
-- If the Director action requests the current Director segment/range, process that authoritative trim/range rather than assuming the whole source.
-- If `Apply Director playback speed` is enabled, VFI scheduling incorporates that playback speed.
-- If disabled, VFI runs at normal source/master timing and Director speed remains a later timeline operation.
-- No extra RIFE engine is created for trim, duration, or speed.
-
-Output duration/frame count follows the selected full-master or Director timing policy exactly.
-
----
-
-## 12. GIMM-VFI-F
-
-Selected variant:
-
-```text
-GIMM-VFI-F
-FlowFormer estimator
-native PyTorch + CuPy CUDA
-```
-
-Do not substitute GIMM-VFI-R or perceptual `*-P` variants. No TensorRT engine for GIMM.
-
-The original GIMM-VFI license is non-commercial by default unless required commercial permission is obtained; commercial production enablement remains blocked until that is cleared.
-
----
-
-## 13. FlashVSR
-
-FlashVSR exists only in QUALITY.
-
-```text
-native CUDA/PyTorch/custom-attention path
-NO TensorRT .engine
-NO CPU neural fallback
-QUALITY GPU floor starts at approved 4090-class or higher
-GPU/architecture capability only after real self-test
-```
-
-Do not reintroduce old FlashVSR TensorRT ideas in V1.
-
----
-
-## 14. Model artifacts, R2 and D1 ownership
-
-### 14.1 Docker contains durable source/model artifacts
-
-FAST contains the four ESRGAN weight sets, RIFE 4.9 code/weights plus trusted ONNX/export source, GIMM-VFI-F permitted assets, video-ESRGAN ONNX/export artifacts, and TensorRT runtime/builder.
-
-QUALITY contains FlashVSR code/weights/custom runtime, RIFE 4.9 code/weights plus trusted ONNX/export source, GIMM-VFI-F permitted assets, and TensorRT runtime for RIFE.
-
-Do not bake generated `.engine` binaries into Docker.
-
-### 14.2 Private engine R2 namespace
-
-For model artifacts, R2 stores generated `.engine` binaries, TensorRT timing caches where useful, and optional immutable diagnostic sidecars. Model weights stay baked in Docker.
-
-Product media continues using the existing SceneBuilder project R2 layout from Section 2.3.
-
-### 14.3 No provider network volume
-
-Do not require RunPod or Novita network volumes.
-
-```text
-Docker = durable model/source artifacts
-R2     = generated engine/timing-cache artifacts + existing product media
-pod disk = temporary working/download cache only
-```
-
-The temporary local cache directory is an implementation detail, not a product contract.
-
----
-
-## 15. Private R2 engine layout
-
-Use:
+Private R2 root:
 
 ```text
 models/.engine/
-├── esrgananime/
-├── esrganreal/
-└── rife-4.9/
 ```
 
-Do **not** create image-ESRGAN engine directories.
+Allowed model trees only:
 
-Compatibility directories:
+```text
+models/.engine/realesr-animevideov3/
+models/.engine/realesr-general-x4v3/
+models/.engine/rife-4.9/
+```
+
+Compatibility paths include:
 
 ```text
 ampere-plus/
@@ -572,304 +567,278 @@ blackwell-cc120/
 exact/<gpu-slug>/
 ```
 
-Use immutable filenames containing model/hash/TRT/CUDA/precision/profile/build identity, for example:
+Use immutable names containing model/version/hash/TRT/CUDA/precision/profile/build identity. No mutable global `engine.plan`.
+
+Example identity:
 
 ```text
-v3__onnx-<sha>__trt-10.16.1__cuda-13__fp16__854x480__e-<id>.engine
-rife49__onnx-<sha>__trt-10.16.1__cuda-13__fp16__1080-class__e-<id>.engine
+...__trt-10.14.1.48__cuda-13.0.2__fp16__...
 ```
 
-Engine identity includes model/version, checkpoint/ONNX hash, TensorRT version, CUDA compatibility, precision, hardware compatibility mode, compute capability/exact GPU when relevant, shape/profile, and builder/plugin config hash.
+Temporary upload:
+
+```text
+models/.engine/.tmp/{engineBuildJobId}/...
+```
+
+D1 stores metadata/control state only, never binary bytes. `pending_upscales` remains the V1 job/history/engine-registry source of truth; do not create a parallel product-media state table. D1 records exact R2 key, SHA, size, model/version, ONNX hash, TRT/CUDA, compatibility, compute capability, profile, precision, builder GPU/provider, validation/benchmark data and active state.
+
+Runtime does not scan R2 and guess. D1 selects the exact active engine; pod downloads/verifies it into disposable local cache and then deserializes it.
+
+No provider network volume is required.
 
 ---
 
-## 16. D1 operational schema
+## 12. Video ESRGAN source-raster normalization
 
-### 16.1 Enhancer workers
+Known H3-origin enhancer inputs may map to canonical enhancer engines, but this does **not** put enhancer models into H3 pods.
 
-Maintain separate `enhancer_pod_workers` with enhancer-only provider lifecycle data including service kind, provider/instance ID, endpoint, GPU/compute capability, runtime image/digest, CUDA, status/current job, capabilities/telemetry, heartbeat/error/debug, idle timeout, terminate/delete retry state, and timestamps.
-
-### 16.2 Unified enhancer jobs stay in `pending_upscales`
-
-Use the existing physical table `pending_upscales`. Do not create parallel image/video/VFI job tables.
-
-Supported job types:
+Landscape mapping:
 
 ```text
-image_upscale
-video_upscale
-vfi_only
-engine_build
-engine_validate
-benchmark
+.4 MP -> 854x480  -> exact
+.6 MP -> 1056x594 -> exact
+.7 MP -> 1138x640 -> may normalize to 1056x594 when quality rule permits
+.9 MP -> 1280x720 -> exact
 ```
 
-Expand `pending_upscales` additively for project/scene/segment identity, payer/priority, requested/actual provider, enhancer worker/GPU, model/version/backend, input/settings/execution/output metadata, status/stage/progress, telemetry, attempts/errors/debug, and timestamps.
+Portrait mirrors use portrait engines.
 
-Image jobs also persist:
+Never stretch. For small aspect mismatch, crop excess first, then Lanczos resize.
+
+Example:
 
 ```text
-input_width
-input_height
-input_aspect_ratio
-input_megapixels
-shape_bucket
+1344x768
+-> center-crop 1344x756
+-> Lanczos 1280x720
+-> static TRT engine
 ```
 
-### 16.3 TensorRT metadata in D1
+For non-canonical source where normalization would discard meaningful detail:
 
-Never put engine binaries in D1. Engine-build/history rows retain model/version, checkpoint/ONNX hash, precision, TRT/CUDA, compatibility target, compute capability/exact GPU, shape/profile, builder provider/GPU, exact `engine_r2_key`, SHA-256, size, build/validation/benchmark metadata, active state, and requesting-admin audit identity.
+```text
+native full-frame PyTorch CUDA FP16 at source raster
+```
 
-V1 does not require a separate TRT binary table. R2 stores the binary; D1 is the authoritative registry/control state.
+Never downscale 1920x1080 to 1280x720 solely to force an engine hit.
+
+Neural x4 scale and final delivery resolution are separate:
+
+```text
+source -> x4 neural inference -> exact final resize/conform -> 1080/1440/2160
+```
 
 ---
 
-## 17. Engine lookup and job handoff
+## 13. FPS/VFI contract: arbitrary source FPS, outputs only 30/48/60
+
+Product output FPS values are exactly:
 
 ```text
-Worker resolves requested model/profile/GPU compatibility
--> query authoritative D1 engine metadata
--> choose exact/same-CC/portable active engine if valid
--> include engine identity, expected SHA/metadata and private R2 access information in the job
--> pod obtains matching .engine from R2
--> verify SHA/metadata
--> deserialize/self-test
--> execute
+30
+48
+60
 ```
 
-Do not proxy engine bytes through the frontend. Do not scan R2 folders and guess which engine is active; D1 supplies the exact immutable key.
+Source rate is not restricted to those values.
 
-If no compatible engine exists, use approved build/cache behavior or native GPU PyTorch fallback according to policy.
+### 13.1 CFR scheduling
+
+For constant-frame-rate source FPS `S`, requested output FPS `T`, and effective playback-speed multiplier `p` when Director speed is intentionally baked:
+
+```text
+outputTime[n] = n / T
+sourcePosition = outputTime[n] * S * p
+left  = floor(sourcePosition)
+right = left + 1
+alpha = sourcePosition - left
+```
+
+For an output timestamp falling exactly on a source frame (`alpha == 0`), reuse that authoritative source frame. Otherwise interpolate between `left` and `right` using `alpha` as the timestep.
+
+Examples with `p=1`:
+
+```text
+24 -> 48: source step = 24/48 = 0.5
+24 -> 60: source step = 24/60 = 0.4
+16 -> 60: source step = 16/60 = 0.266666...
+20 -> 30: source step = 20/30 = 0.666666...
+20 -> 48: source step = 20/48 = 0.416666...
+35 -> 48: source step = 35/48 = 0.729166...
+35 -> 60: source step = 35/60 = 0.583333...
+```
+
+Same model, same spatial engine. Only runtime `alpha/timestep` values and number of output timestamps change.
+
+### 13.2 RIFE behavior
+
+RIFE TensorRT and native adapters must accept arbitrary runtime timestep values. Do not reduce RIFE to integer multiplier-only logic.
+
+For each required synthetic output frame:
+
+```text
+RIFE(frame[left], frame[right], timestep=alpha)
+```
+
+The RIFE `.engine` remains keyed by spatial resolution/profile + model/TRT/GPU compatibility, never by FPS ratio.
+
+### 13.3 GIMM-VFI-F behavior
+
+GIMM-VFI-F natively models motion continuously between adjacent frames and supports arbitrary interpolation timesteps.
+
+For each required synthetic output frame:
+
+```text
+GIMM-F(frame[left], frame[right], timestep=alpha)
+```
+
+GIMM stays native PyTorch + CuPy CUDA; no TensorRT engine.
+
+### 13.4 Target FPS lower than source FPS
+
+If requested target FPS is below the authoritative source sampling rate, e.g.:
+
+```text
+35 -> 30
+50 -> 48
+60 -> 30
+```
+
+this is temporal downsampling/resampling, not an interpolation requirement. Do not waste RIFE/GIMM compute just to reduce FPS. Generate the requested target-time grid from source PTS and select/bracket source frames deterministically.
+
+This does **not** violate the rule against duplicate/static-frame skipping: we are not detecting and deleting visually similar frames as an optimization; we are producing a deliberately lower requested output frame rate.
+
+UI/backend should normalize an unnecessary local VFI selection to `None` for a pure downsample/pass-through case so the user is not charged for GIMM that did not execute.
+
+### 13.5 Target FPS equal to source FPS
+
+If target timing already equals source timing, do not invoke neural VFI.
+
+### 13.6 VFR inputs
+
+For variable-frame-rate sources, nominal FPS is not authoritative. Use `ffprobe`/presentation timestamps.
+
+Create output timestamps on the exact 30/48/60 grid, find the bracketing source PTS for each output timestamp, and compute:
+
+```text
+alpha = (targetPTS - leftPTS) / (rightPTS - leftPTS)
+```
+
+Then reuse exact source frames or invoke RIFE/GIMM for `0 < alpha < 1` as required.
+
+Preserve exact selected duration and audio/timeline semantics.
+
+### 13.7 Scene-cut-aware VFI is mandatory
+
+Detect or consume authoritative hard-cut boundaries. Never interpolate between the final frame before a hard cut and first frame after it.
+
+At a cut:
+
+```text
+finish boundary timestamp according to deterministic policy
+-> no synthetic cross-cut frame
+-> restart VFI context in next scene
+```
+
+This applies to both RIFE and GIMM.
+
+### 13.8 No duplicate/static-frame optimization
+
+Do not add a detector that drops/collapses/substitutes duplicate-looking or static source frames to save compute. Preserve authoritative source timestamps. Disable third-party `static-skip`/duplicate-skip options unless a future explicit product decision changes this.
 
 ---
 
-## 18. Engine generation lifecycle
+## 14. GIMM-VFI-F
 
-Admin engine generation creates a durable `pending_upscales` row with `job_type=engine_build` and the complete engine identity/profile/compatibility target.
-
-Use a compatible enhancer FAST pod for engine generation; no separate builder Docker image is required. Reuse a compatible idle FAST pod or provision a builder through RunPod/Novita.
-
-Compatibility target determines the builder class:
+Locked variant:
 
 ```text
-Ampere CC 8.6     -> validated sm_86 builder
-Ada CC 8.9        -> validated sm_89 builder
-Blackwell CC 12.0 -> validated sm_120 builder
-Exact GPU         -> exact requested allowed SKU
-AMPERE_PLUS       -> validated permitted Ampere-or-newer builder
+GIMM-VFI-F
+FlowFormer estimator
+native PyTorch + CuPy CUDA
 ```
 
-Live provider inventory remains authoritative and all builders are filtered by the <=48 GB allowlist.
+Do not substitute GIMM-VFI-R or `*-P` variants. No GIMM TensorRT.
 
-### 18.1 Temporary upload -> immutable promotion
-
-Builder:
-
-```text
-verify trusted ONNX/checkpoint hash
-build engine
-deserialize/self-test
-correctness inference
-optional benchmark
-compute SHA-256
-upload to models/.engine/.tmp/{engineBuildJobId}/...
-report metadata
-```
-
-Worker verifies job/pod binding, object existence, size, SHA, model/version/hash, TRT/CUDA compatibility, precision, profile, and self-test.
-
-Then:
-
-```text
-promote/copy to immutable final R2 key
-BEGIN D1 transaction
-  mark new engine ready/active
-  persist exact R2 key/checksum/metadata
-  deactivate prior engine for same logical key
-COMMIT
-```
-
-The old engine stays active until replacement is completely built, uploaded, verified, and activated. Failed builds never disable the old engine. R2 upload alone never makes an engine active.
+Commercial production remains license-gated because upstream licensing is non-commercial by default unless commercial permission is obtained.
 
 ---
 
-## 19. Engine trust boundary
+## 15. FlashVSR / QUALITY architecture
 
-Only load engines produced by the trusted SceneBuilder engine-build path. Never accept arbitrary user/browser-supplied `.engine` files.
+FlashVSR is QUALITY-only and native GPU.
 
-Every load verifies trusted R2 key, SHA-256, model/version/hash, TRT/runtime compatibility and GPU target metadata.
+```text
+FlashVSR v1.1 / qualified FlashVSR+ lineage
+no TensorRT
+no CPU neural fallback
+4090-class-or-better initial floor
+```
 
-Admin engine actions require the existing SceneBuilder `ALLOWED_EMAILS` authorization on Worker/API. UI visibility alone is not authorization.
+SECourses Upscaler Pro is an implementation reference: standalone Python/Gradio, not a required ComfyUI dependency. Relevant architectural ideas we may reproduce from permissive/open upstreams after quality tests:
+
+```text
+2x/4x neural SR scale
+optional pre-downscale to reach desired final raster
+scene detection
+scene/chunk processing
+restartable chunk boundaries
+GPU/output-dependent temporal chunk size
+DiT tiling for VRAM control
+large-tile/fewer-tile preference while staying below OOM/shared-memory spill
+tile overlap adjustment if seams appear
+VAE tiling disabled by default in full-model path
+RIFE/GIMM as separate VFI stage
+FFmpeg audio preservation
+H.265/10-bit output
+queue/cancel/health/progress
+```
+
+FlashVSR-specific DiT tiling is allowed. This does not change the separate no-tiling rule for video ESRGAN and RIFE.
+
+Prefer full/non-DiT-tiled FlashVSR when validated VRAM allows; otherwise use the largest validated DiT tile that avoids OOM/shared-RAM spill. Do not use system shared memory as a hidden VRAM substitute.
+
+Public Apache-2.0 FlashVSR+ implementations that replace Block-Sparse-Attention with Sparse SageAttention and support CUDA 13.0/Blackwell are candidates, not automatically trusted drop-ins. Compare against official FlashVSR v1.1 for fidelity and LCSA/attention behavior before production.
+
+Qualify at minimum:
+
+```text
+sm_86
+sm_89
+sm_120
+CUDA 13.0.2
+PyTorch 2.13.0 cu130
+4090/L40S/5090-class throughput + VRAM
+DiT tiled vs full quality
+scene-boundary continuity
+exact frame count/duration/audio sync
+```
 
 ---
 
-## 20. Pod API and stages
+## 16. Streaming video / codec / audio
 
-Enhancer pods expose an H3-like authenticated service contract:
-
-```text
-GET  /health
-GET  /ready
-GET  /capabilities
-GET  /telemetry
-POST /jobs
-GET  /jobs/:id
-POST /jobs/:id/cancel
-```
-
-Representative stages:
+Persistent path:
 
 ```text
-queued
-waiting_for_pod
-downloading
-probing
-upscaling/interpolating as applicable
-encoding
-uploading
-completed
-failed
-cancelled
+authoritative input
+-> ffprobe
+-> decode/NVDEC where available
+-> trim/range/timestamp preparation
+-> approved aspect normalization
+-> spatial upscale
+-> optional scene-aware VFI
+-> exact final resize/conform
+-> H.265 encode/NVENC default
+-> audio remux/timing handling
+-> existing R2 upload
+-> authenticated completion callback
 ```
 
-All state-changing job/cancel endpoints are authenticated. Callback events are job/pod bound and replay protected.
+Never implement video enhancement as thousands of JPEG/PNG dumps or one model process per frame. Keep model/engine persistent with bounded frame/task buffers.
 
----
-
-## 21. Enhancer authentication/security
-
-Use the H3 operational security philosophy while keeping enhancer identity distinct:
-
-- separate enhancer callback endpoint;
-- enhancer-specific HMAC derivation domain such as `enhancer:${workerId}`;
-- timestamp/nonce replay protection;
-- timing-safe validation;
-- callbacks bound to expected worker + job;
-- engine/admin/provider values validated against server-side allowlists.
-
-Reuse existing repository/build secret sources already used by H3 infrastructure where appropriate, including current Docker Hub, Hetzner, Hugging Face and repository-clone credentials. Do not duplicate enhancer copies solely because enhancer shares the repository.
-
-Build-only secrets remain build/workflow secrets and are not injected into runtime pods unless genuinely required. Runtime pods receive only required enhancer auth/control and existing R2 access values following the H3 pattern.
-
----
-
-## 22. Provider provisioning/lifecycle
-
-Mirror proven H3 provider-control behavior without sharing H3 D1 rows.
-
-RunPod uses the equivalent of name, image, custom GPU priority/list, `gpuCount=1`, GPU compute type, compatible CUDA/driver requirement, disk, env/ports, non-interruptible/non-locked policy.
-
-Novita uses the equivalent of name, product ID, `gpuNum`, rootfs size, image URL, env/ports, minimum compatible CUDA/driver field, and billing/network settings.
-
-Lifecycle includes:
-
-```text
-priority dispatch
-provider capability/availability filtering
-idle compatible worker reuse
-persistent admin idle timeout
-provision timeout
-job timeout
-heartbeat/progress
-structured debug/error
-retry/provider fallback
-cancel
-stale allocation recovery
-idle reaper
-enhancer delete lock
-delete verification/retry/backoff
-orphan cleanup
-```
-
-Forced provider selection does not silently cross providers; `Auto` may use configured fallback policy.
-
----
-
-## 23. Runtime concurrency
-
-Allowed-email admins can set:
-
-```text
-Execution: Sequential | Parallel
-Parallelism: x1 | x2 | x3 | x4 | Custom
-Custom initial safety range: 1..8
-Auto CUDA OOM backoff: ON
-```
-
-These are runtime controls; they do not rebuild Docker or create new engines.
-
-### 23.1 One GPU = one active video job
-
-Do not overlap neural inference from two separate video jobs on one GPU in V1. Queued compatible videos can reuse a warm pod sequentially.
-
-### 23.2 Video xN
-
-For video ESRGAN, `xN` means up to N same-size frames concurrently **inside one video**. For RIFE, `xN` means up to N frame-pair/timestep tasks concurrently inside one video. GIMM only exposes validated concurrency. Combined upscale+VFI uses xN as a stage ceiling, not N tasks in both stages simultaneously.
-
-### 23.3 OOM backoff
-
-```text
-x4 -> x3 -> x2 -> x1
-```
-
-For Custom, decrement safely. Persist unsafe GPU/model/resolution/backend/concurrency tuples so they are not repeatedly retried. Never respond to OOM by moving neural inference to CPU.
-
----
-
-## 24. Storyboard exact-shape batching
-
-Storyboard image upscale remains native PyTorch CUDA.
-
-Parallel/true-batch eligibility in V1 requires:
-
-```text
-same image model
-same backend
-same target
-same exact input width
-same exact input height
-```
-
-Exact W×H is required. Same aspect ratio with different dimensions is not enough. Do not resize/crop/pad solely to manufacture a batch.
-
-Default:
-
-```text
-exact same W×H -> x4
-mixed W×H      -> sequential on same warm pod where useful
-OOM backoff    -> x4 -> x3 -> x2 -> x1
-```
-
-If fewer than four matching jobs are available, run the available group rather than waiting indefinitely. The Worker, not the frontend alone, is authoritative for grouping/requeueing.
-
----
-
-## 25. Streaming video/codec pipeline
-
-Do not use:
-
-```text
-video -> dump JPEG/PNG -> new model process per frame -> rebuild video
-```
-
-Use a persistent pipeline:
-
-```text
-ffprobe
--> FFmpeg/NVDEC decode when supported
--> persistent GPU model / TensorRT engine
--> bounded frame/task pipeline
--> final exact output conform
--> FFmpeg/NVENC encode by default
--> audio remux/handling
--> existing SceneBuilder media upload/writeback
-```
-
-A controlled host-memory frame pipe is acceptable if true zero-copy is impractical, but measure copy overhead and keep model/engine processes persistent.
-
-### 25.1 Output codec/admin controls
-
-Default enhanced master:
+Default enhanced master target:
 
 ```text
 H.265 / HEVC
@@ -882,97 +851,257 @@ SAR 1:1
 exact requested raster/FPS
 ```
 
-Video Generation Timeline admin controls:
+Allowed-email admin encoder controls:
 
 ```text
-Encoder: NVENC | x265
-NVENC CQ default: 16
-x265 CRF default: 15
+NVENC CQ default 16, validated practical range
+x265 CRF default 15, validated practical range
 ```
 
-CQ and CRF are different rate-control systems. Validate ranges server-side. Preserve/use AAC or existing audio handling as required by current output contract. Avoid unnecessary RGB/YUV and host/device round trips.
+x265 CPU encoding is permitted; CPU neural inference is not.
+
+If duration/timing is unchanged, preserve/remux original audio. VFI alone does not inherently change duration. If Director speed is intentionally baked into the VFI master, do not apply the same speed twice later.
 
 ---
 
-## 26. Audio and duration semantics
+## 17. D1 operational schema
 
-If output duration is unchanged, preserve/remux original audio where possible. Frame interpolation alone does not inherently change playback duration.
+### 17.1 `enhancer_pod_workers`
 
-If Director playback speed/timing is baked into the enhanced output, Director/timeline policy owns final audio timing and the same speed must not be applied twice later.
-
-Output duration remains the selected full-master duration or authoritative Director range/duration requested by the action.
-
----
-
-## 27. Observability and diagnostics
-
-Expose/record provider/instance, GPU, compute capability, driver, CUDA, PyTorch, CuPy, TensorRT, VRAM total/used/free/peak, GPU/memory utilization, temperature/power where available, NVENC/NVDEC utilization, CPU/RAM summary, active model/backend, engine key/cache hit-or-miss, dimensions/FPS, concurrency, stage, frame/task progress, model/end-to-end FPS, elapsed time and queue depth.
-
-Per-stage timing distinguishes:
+Store enhancer-only lifecycle/provider/GPU/runtime ownership including:
 
 ```text
-download/R2
-probe/decode
-preprocess
-upscale inference
-VFI inference
-final resize/conform
-encode
-audio/remux
-upload/R2
+worker id/service kind
+provider/provider instance/endpoint
+GPU class/name/compute capability/region
+status/current job
+runtime image + digest/build revision
+CUDA/PyTorch/CuPy/TensorRT versions
+capabilities + compact telemetry
+heartbeat/error/debug
+idle_since/idle_timeout/terminate_after
+provider delete retry state
+timestamps
 ```
 
-Persist compact snapshots/summary in D1 on start, stage changes, restrained active intervals, and completion/failure; do not create a high-frequency D1 time-series in V1.
+### 17.2 Existing `pending_upscales`
 
-Structured errors include machine code, stage, model/backend/engine, GPU/VRAM, dimensions, concurrency, CUDA/TRT/driver, retry count and bounded recent log tail.
+Keep one physical unified job table and expand additively.
+
+Job types:
+
+```text
+image_upscale
+video_upscale
+vfi_only
+engine_build
+engine_validate
+benchmark
+```
+
+Persist project/scene/segment/payer identity, priority, requested/actual provider/GPU/worker, model/version/backend, engine metadata, input/settings/execution/output JSON, image source shape metadata, status/stage/progress, compact telemetry, attempts/errors/debug and timestamps.
+
+Engine/history rows store exact R2 engine key/SHA/size, ONNX/checkpoint hash, TRT/CUDA, precision, compatibility target, compute capability/exact GPU, profile, builder identity, validation/benchmark and active state.
+
+Keep separate:
+
+```text
+enhancer_pod_delete_locks
+enhancer_event_nonces
+enhancer_config
+```
+
+`enhancer_config` persists at least `idle_timeout_seconds` plus approved admin/runtime defaults.
 
 ---
 
-## 28. Video Generation Timeline UI contract
+## 18. Storyboard writeback and batching
 
-Reuse the existing `src/components/VideoGenerationTimeline.tsx` surface. Do not create a separate normal-user enhancer page.
-
-The current code has local/Topaz upscale choices and `interpolateTo60Fps?: boolean`; migrate to explicit upscaler + VFI model + target FPS while preserving existing Timeline/Director persistence contracts.
-
-### 28.1 Existing surfaces
-
-Keep/reuse:
+Completion patches only existing product fields:
 
 ```text
-Video / Image track
+scenes[n].image = new active upscaled image
+storyboard.thumbnail = new active thumbnail when produced
+preserve storyboard.originalImage
+preserve storyboard.originalThumbnail
+```
+
+Do not use Storyboard prompt-enhancement `isEnhanced` as upscale provenance. Do not add nested enhancer project-state fields.
+
+Keep previous successful image active until upload + authoritative patch succeeds.
+
+Exact-shape image batching eligibility:
+
+```text
+same image model
+same backend
+same target
+same exact input width
+same exact input height
+```
+
+Default:
+
+```text
+same W×H -> up to x4
+mixed W×H -> sequential on warm pod
+OOM -> x4 -> x3 -> x2 -> x1
+```
+
+Do not resize/pad images just to form a batch.
+
+---
+
+## 19. Director writeback
+
+Patch only:
+
+```text
+project_video_timeline.segments[n].upscaledVideoUrl
+```
+
+Detailed enhancer provenance stays operational.
+
+Still-image rule:
+
+```text
+active authoritative media is video -> eligible
+active authoritative media is image -> skipped_image
+```
+
+For `skipped_image`: no video job, no pod, no charge, no output and no media mutation. Bulk UI counts it separately from failure.
+
+---
+
+## 20. Provider scheduling and lifecycle
+
+RunPod/Novita jobs are provider-neutral at the control plane.
+
+RunPod creation mirrors the proven H3 operational shape: image, custom GPU priority/list, `gpuCount=1`, GPU compute, CUDA 13.0-compatible host selection, disk, env/ports, non-interruptible/non-locked policy.
+
+Novita uses current equivalent fields for product/GPU count/rootfs/image/env/ports/network/billing and CUDA compatibility filtering where exposed.
+
+Enhancer pod env contains only required enhancer worker token/control-plane URL/service kind/R2 access/idle timeout/debug/GPU-only flags/port.
+
+Forced provider selection does not silently cross provider. `Auto` may fallback according to policy.
+
+Lifecycle:
+
+```text
+priority dispatch
+compatible idle reuse
+persistent admin idle timeout
+provision timeout
+job timeout
+heartbeat/progress
+structured errors/debug
+retry/provider fallback
+cancel
+stale allocation recovery
+idle reaper
+delete lock
+delete verification/retry/backoff
+orphan cleanup
+```
+
+---
+
+## 21. Runtime concurrency / OOM
+
+Admin controls:
+
+```text
+Execution: Sequential | Parallel
+Parallelism: x1 | x2 | x3 | x4 | Custom
+Custom safety range initially 1..8
+Auto CUDA OOM backoff: ON
+```
+
+One GPU = one active video job in V1. Video xN is internal work inside that one clip:
+
+```text
+video ESRGAN xN -> up to N same-size frame tasks in flight
+RIFE xN         -> up to N pair/timestep tasks in flight
+GIMM xN         -> only validated bounded concurrency
+FlashVSR        -> conservative scene/chunk concurrency; x1 initially unless validated
+```
+
+OOM backoff:
+
+```text
+x4 -> x3 -> x2 -> x1
+```
+
+For custom, decrement safely. Persist known unsafe GPU/model/resolution/backend/concurrency combinations. If x1 full-frame still fails, requeue a larger allowed GPU. No ESRGAN/RIFE tiling and no neural CPU fallback.
+
+---
+
+## 22. Pod API / security
+
+Runtime API:
+
+```text
+GET  /health
+GET  /ready
+GET  /capabilities
+GET  /telemetry
+POST /jobs
+GET  /jobs/:id
+POST /jobs/:id/cancel
+```
+
+Stages include queued/waiting/downloading/probing/normalizing/upscaling/interpolating/encoding/uploading/verifying/completed/failed/cancelled.
+
+Enhancer security:
+
+- separate callback endpoint, e.g. `/api/projects/v2/enhancer/pod/events`;
+- enhancer HMAC derivation domain `enhancer:${workerId}`;
+- master secret may reuse `ENHANCER_POD_AUTH_MASTER_SECRET || H3_POD_AUTH_MASTER_SECRET`, but domain remains enhancer-specific;
+- timestamp + nonce replay protection in enhancer state;
+- timing-safe validation;
+- callback bound to expected worker + job;
+- signed/scoped R2 access;
+- server-side allowlists for models/profiles/provider/GPU/precision/encoder settings;
+- browser cannot send arbitrary ONNX URLs, `.engine` files or shell commands;
+- admin APIs enforce existing SceneBuilder `ALLOWED_EMAILS` server-side.
+
+---
+
+## 23. Video Generation Timeline UI
+
+Reuse existing `VideoGenerationTimeline` / Director surfaces. Do not create a separate normal-user enhancer page.
+
+Keep/extend:
+
+```text
+Video/Image track:
   Upscale All
   Upscale Selected
 
-Controls
-  Upscale tab for selected logical Director unit
+Selected unit Controls:
+  Upscale/Enhance
 ```
 
-### 28.2 Batch Upscale modal
-
-`Upscale All` opens a modal showing eligible video clips, already upscaled, remaining, and skipped still images.
-
-Scope:
+Batch modal shows eligible videos, already upscaled, remaining and skipped still images, with:
 
 ```text
-Upscale remaining             # default
+Upscale remaining              # default
 Upscale all including upscaled
 ```
 
-Including already-upscaled re-runs from the authoritative pre-enhancement source, never recursively from current `upscaledVideoUrl`. Keep the previous successful master active until replacement succeeds. `Upscale Selected` uses the same logic for selected units.
+Force reprocessing starts from authoritative pre-enhancement media, never recursively from the previous enhanced master. Keep previous successful master active until replacement succeeds.
 
-### 28.3 Upscaler selector
-
-Use one normal product dropdown:
+Upscaler selector:
 
 ```text
-Topaz · Gaia 2
-Topaz · Proteus
-Real-ESRGAN · Anime
-Real-ESRGAN · Real
+Topaz Gaia 2
+Topaz Proteus
+Real-ESRGAN Anime
+Real-ESRGAN Real
 FlashVSR
 ```
 
-Output target:
+Resolution:
 
 ```text
 1080p
@@ -980,35 +1109,17 @@ Output target:
 2160p / 4K
 ```
 
-### 28.4 Explicit VFI selector
-
-Replace boolean-only `interpolateTo60Fps` with:
-
-```text
-VFI model
-Target FPS
-Apply Director playback speed
-```
-
-For local Real-ESRGAN / FlashVSR:
+Local VFI selector:
 
 ```text
 None
 RIFE 4.9
-GIMM-VFI-F  # only when license/product enablement permits
+GIMM-VFI-F
 ```
 
-For Topaz preserve external pairings:
+Topaz exposes only compatible Topaz VFI choices.
 
-```text
-None
-Topaz Chronos where supported
-Topaz Apollo where supported
-```
-
-Changing upscaler revalidates VFI; invalid pairings reset to `None`. If VFI is `None`, preserve source/master FPS and hide VFI-only controls.
-
-When VFI is enabled, target FPS includes:
+Output FPS selector uses exactly:
 
 ```text
 30
@@ -1016,15 +1127,9 @@ When VFI is enabled, target FPS includes:
 60
 ```
 
-30→48 and non-integer mappings use timestamp scheduling and do not create new RIFE engines.
+Backend accepts arbitrary source FPS. Do not model this as `interpolateTo60Fps: boolean`.
 
-Conceptually replace:
-
-```ts
-interpolateTo60Fps?: boolean
-```
-
-with explicit fields such as:
+Conceptual fields:
 
 ```ts
 interpolationModel?: 'none' | 'rife-4.9' | 'gimm-vfi-f' | 'topaz-chronos' | 'topaz-apollo';
@@ -1032,314 +1137,67 @@ targetFps?: 30 | 48 | 60;
 applyDirectorPlaybackSpeed?: boolean;
 ```
 
----
+If a selected output FPS is <= authoritative source sampling rate and no interpolation is required, normalize local VFI to None rather than charging for an unused model.
 
-## 29. Video Generation Timeline enhancer admin UI
+When VFI is used, expose `Apply Director playback speed`; do not double-apply speed.
 
-Admin controls live inside existing Video Generation Timeline Upscale/Enhance controls following the H3 admin pattern.
-
-```text
-email in SceneBuilder2 ALLOWED_EMAILS -> render admin section
-otherwise                              -> do not render
-```
-
-Every admin API independently enforces the same `ALLOWED_EMAILS`; React hiding is not authorization. Do not add a separate enhancer-admin email variable.
-
-### 29.1 Runtime/provider controls
-
-Expose:
-
-```text
-Idle timeout seconds
-Priority
-Compute provider: Auto | RunPod | Novita
-GPU target: Auto | Ampere CC8.6 | Ada CC8.9 | Blackwell CC12.0 | Exact GPU
-Execution: Sequential | Parallel
-Parallelism: x1 | x2 | x3 | x4 | Custom
-Auto CUDA-OOM backoff
-```
-
-Exact GPU inventory comes from live allowed RunPod/Novita inventory and is filtered through the <=48 GB allowlist; do not hardcode live availability/price in Docker.
-
-### 29.2 TensorRT engine builder
-
-Build-model dropdown contains exactly:
-
-```text
-realesr-animevideov3
-realesr-general-x4v3
-RIFE 4.9
-```
-
-Never offer Storyboard image ESRGAN, GIMM-VFI-F, or FlashVSR as TensorRT build models.
-
-Expose trusted read-only model/ONNX/checkpoint identity, FP16, compatibility target, provider, GPU family/exact GPU and model-specific shape/profile.
-
-ESRGAN selector shows all six static shapes. RIFE selector shows 1080, 1440/2K and 2160/4K classes.
-
-Actions:
-
-```text
-Generate engine
-Validate engine
-Benchmark engine
-Force rebuild
-Deactivate engine
-Delete cached engine
-View build logs
-Copy R2 key
-```
-
-Statuses:
-
-```text
-queued
-waiting_for_pod
-building
-self_test
-benchmarking
-uploading
-verifying
-ready
-failed
-cancelled
-```
-
-Reuse an existing compatible active engine by default.
-
-### 29.3 Encoder/benchmark controls
-
-Expose NVENC/x265 controls from Section 25.1. Allow controlled TensorRT-vs-PyTorch, provider, GPU-family, and NVENC-vs-x265 benchmarks. FlashVSR/GIMM may be benchmarked natively but never get TensorRT options.
-
-Record inference/end-to-end FPS, peak VRAM, CPU utilization, wall time, output bytes and relevant quality checks.
-
-### 29.4 Admin security
-
-Server-side validate allowed admin identity, model, profile/shape, provider/GPU, encoder quality range, trusted baked ONNX/checkpoint, and private R2 destination. Never accept arbitrary ONNX URLs or arbitrary shell/build commands from the browser. Retain audit metadata.
+Bulk status distinguishes queued/processing/completed/failed/skipped_image/cancelled.
 
 ---
 
-## 30. Storyboard Upscale UI/integration
+## 24. Storyboard UI
 
-Preserve existing Storyboard user flow:
+Preserve:
 
 ```text
 Upscale Image
 Upscale All
 Anime / Real
 2K / 4K
-batch progress/status
+batch progress
 ```
+
+`Upscale All` uses local FAST only and zero Replicate.
+
+Where scope is shown:
 
 ```text
-Anime -> RealESRGAN_x4plus_anime_6B
-Real  -> RealESRGAN_x4plus
+Upscale remaining
+Upscale all including already-upscaled
 ```
 
-No VFI in Storyboard.
+Including already-upscaled starts from committed/base pre-upscale image, not the current upscale.
 
-`Upscale All` uses local FAST enhancer pods only and zero Replicate. Where batch scope is shown, support `Upscale remaining` and `Upscale all including already-upscaled`. Including already-upscaled starts from the committed/base pre-upscale image, never recursively from current upscaled image. Keep successful output active until replacement succeeds.
-
-Allowed-email Storyboard admin may expose provider/GPU, idle timeout/priority, x1/x2/x3/x4/custom, OOM backoff, telemetry and errors/debug. **Do not expose TensorRT engine generation for Storyboard image models.**
+Allowed-email Storyboard admin may expose provider/GPU, priority, idle timeout, xN, OOM backoff, pod telemetry/errors/debug. It must **not** show TensorRT build controls for image ESRGAN.
 
 ---
 
-## 31. Storyboard writeback
+## 25. Video enhancer admin
 
-For `image_upscale` completion:
+Inside existing Video Generation Timeline Upscale/Enhance controls for `ALLOWED_EMAILS` only; API independently authorizes every action.
 
-```text
-scenes[n].image = new active upscaled image
-scenes[n].storyboard.thumbnail = new thumbnail when current flow produces one
-preserve storyboard.originalImage
-preserve storyboard.originalThumbnail
-```
-
-Do not use `isEnhanced` as image-upscale provenance. Do not create enhancer-specific scene fields. Detailed provenance stays in `pending_upscales`.
-
----
-
-## 32. Director writeback and automatic still-image skip
-
-Director completion patches only:
+Runtime/provider controls:
 
 ```text
-project_video_timeline.segments[n].upscaledVideoUrl
+Idle timeout seconds
+Priority
+Provider Auto | RunPod | Novita
+GPU Auto | sm86 | sm89 | sm120 | Exact GPU
+Execution Sequential | Parallel
+x1/x2/x3/x4/Custom
+OOM auto-backoff
+active/idle pods
+current job
+GPU/VRAM
+runtime image/digest/build revision
+CUDA/PyTorch/CuPy/TensorRT
+loaded model/engine/SHA
+telemetry/heartbeat/error/debug
+Stop/Delete pod
+Manual dispatch
 ```
 
-Do not add enhancer provenance fields to Director JSON.
-
-Before creating a video enhancer job:
-
-```text
-active media is video -> eligible
-active media is image -> skipped_image
-```
-
-For `skipped_image`: no video enhancer job, no pod allocation, no charge, no video output, and no Storyboard mutation. Bulk progress distinguishes queued/completed/failed/skipped-image counts.
-
-Eligibility follows the **current authoritative media being enhanced**, not merely the existence of a source image reference.
-
----
-
-## 33. Completion/idempotency
-
-```text
-pod produces/uploads expected output
--> Worker verifies expected object/key ownership
--> persist pending_upscales output metadata
--> patch Storyboard OR Director authoritative state
--> mark completed
-```
-
-Retries/callback replays are idempotent. Do not create duplicate permanent references or recursively re-enhance already-enhanced assets unless the user explicitly selected include-already-upscaled.
-
----
-
-## 34. Cost/charge routing
-
-Preserve existing SceneBuilder billing/team-payer/ownership semantics.
-
-- Charge only eligible work queued under explicit product pricing.
-- `skipped_image` creates no video-enhancement charge.
-- Refund/reconcile according to existing failure/cancel policy.
-- Do not silently substitute a cheaper/different model for a paid requested choice.
-- New local-video price points must be explicit product pricing, not inferred from provider hourly cost.
-
-Provider/GPU routing may later use measured cost-per-completed-job as a scheduling input.
-
----
-
-## 35. Layered Docker build strategy
-
-Use the old H3-style layer/cache philosophy updated for the current model set and with **no FILM layer**.
-
-Conceptual DAG:
-
-```text
-enhancer-smoke
-  -> enhancer-base
-      -> enhancer-torch
-          -> enhancer-vfi-models       # RIFE 4.9 + GIMM-VFI-F
-          -> enhancer-esrgan-models    # four ESRGAN sets; ONNX only for video TRT targets
-              -> enhancer-fast
-
-          -> enhancer-flashvsr-runtime
-              -> enhancer-flashvsr-models
-                  -> enhancer-quality  # FlashVSR + RIFE 4.9 + GIMM-VFI-F
-```
-
-Goals:
-
-- stable CUDA/system/framework lower layers;
-- model layers separate from server source;
-- server source copied late;
-- server edits do not invalidate multi-GB framework/model layers;
-- model-family edits avoid redownloading unrelated layers where BuildKit cache permits;
-- remove apt/pip/build caches from final layers;
-- generated TensorRT engines are not Docker layers;
-- no routine PyTorch source build;
-- `torch.compile()` is not required production behavior.
-
----
-
-## 36. H3 repository/build-workflow isolation
-
-Keep enhancer in `khuzaimamussawar/minimax-h3-serverless` for now. A broader repo rename may happen later; it is not required now.
-
-Keep existing H3 source/build paths untouched. Enhancer remains under top-level `enhancer/` with its own `.dockerignore`, `docker/`, `src/`, model/manifests, and `scripts/`.
-
-Enhancer Docker build context is `<repo>/enhancer`, not repository root. Do not place enhancer source under H3 root `src/` or enhancer Dockerfiles under H3 root `docker/`.
-
-Use the enhancer-specific Hetzner build workflow on this feature branch, modeled on the proven H3 Hetzner lifecycle. Do not overload mature H3 build targets. Keep H3-specific `scripts/remote_build.sh` untouched and use `enhancer/scripts/remote_build.sh` for enhancer targets.
-
-Reuse existing repository-level Docker Hub/Hetzner/Hugging Face/repository-clone build secrets where appropriate. Use BuildKit secret mounts; never bake secrets into image layers.
-
-Enhancer validation is path-scoped and must not trigger heavyweight H3 image builds. Validate Python/imports, shell syntax, build context/target mappings, model/checkpoint/ONNX hashes, secret handling, absence of FILM, absence of image-ESRGAN TRT targets, and FAST/QUALITY capability manifests.
-
-### 36.1 Docker build != TensorRT engine build
-
-```text
-Docker build
-  -> CPU/Hetzner build infrastructure
-  -> code/runtime/models/ONNX
-
-TensorRT engine build
-  -> compatible NVIDIA GPU pod
-  -> generated .engine
-  -> private R2 + D1 metadata
-```
-
-Generating/replacing engines does not rebuild Docker. Provider priority, concurrency, idle timeout, engine selection, telemetry sampling and encoder CQ/CRF are runtime/control-plane settings.
-
----
-
-## 37. Promotion/qualification
-
-A Docker image merely building successfully is not enough. Qualify relevant capabilities on real provider GPUs before scheduler eligibility.
-
-Verify CUDA, PyTorch, CuPy, TensorRT, GPU-only invariant, ESRGAN native GPU, video ESRGAN TRT build/load, RIFE 4.9 native/TRT, GIMM-VFI-F CUDA/CuPy, FlashVSR on approved QUALITY GPUs, NVENC/NVDEC where required, and R2/auth/callback behavior.
-
-Record immutable image digest/build revision for admin diagnostics.
-
----
-
-## 38. Source/license policy
-
-Pin/review the exact source revisions and dependency licenses before commercial production.
-
-```text
-Real-ESRGAN -> use permissive official upstream; deterministic BasicSR compatibility patch
-RIFE 4.9   -> use permissive upstream/source; do not copy non-commercial TRT wrapper code
-FlashVSR   -> verify/pin upstream/custom-kernel dependency licenses
-GIMM-VFI-F -> production blocked until required commercial permission/license is confirmed
-Topaz       -> remains external; do not redistribute its assets locally
-```
-
-Community wrappers/Reddit examples are implementation references only unless their licenses permit commercial reuse.
-
----
-
-## 39. Final capability matrix
-
-```text
-FAST
-  CUDA 13.x
-  PyTorch 2.x CUDA-13 build
-  CuPy cuda13x
-  TensorRT 10.16.1
-
-  IMAGE UPSCALE
-    RealESRGAN_x4plus_anime_6B -> native GPU PyTorch only
-    RealESRGAN_x4plus          -> native GPU PyTorch only
-
-  VIDEO UPSCALE
-    realesr-animevideov3       -> TensorRT FP16 preferred; native GPU fallback
-    realesr-general-x4v3       -> TensorRT FP16 preferred; native GPU fallback
-
-  VFI
-    RIFE 4.9                   -> TensorRT FP16 preferred; native GPU fallback
-    GIMM-VFI-F                 -> native PyTorch + CuPy only; license gate
-
-QUALITY
-  CUDA 13.x
-  PyTorch 2.x CUDA-13 build
-  CuPy cuda13x
-  TensorRT 10.16.1 for RIFE
-
-  VIDEO UPSCALE
-    FlashVSR                   -> native GPU only; no TensorRT
-
-  VFI
-    RIFE 4.9                   -> TensorRT FP16 preferred; native GPU fallback
-    GIMM-VFI-F                 -> native PyTorch + CuPy only; license gate
-
-EXTERNAL/PREMIUM
-  Topaz Gaia 2 / Proteus
-  Topaz Chronos/Apollo where supported
-```
-
-Locked `.engine` scope:
+TensorRT builder model dropdown contains exactly:
 
 ```text
 realesr-animevideov3
@@ -1347,200 +1205,270 @@ realesr-general-x4v3
 RIFE 4.9
 ```
 
-Locked logical engine count per compatibility target:
+Never image ESRGAN, FlashVSR or GIMM.
+
+Builder controls:
 
 ```text
-6 + 6 + 3 = 15
+trusted model/checkpoint/ONNX identity
+FP16
+compatibility: AMPERE_PLUS | sm86 | sm89 | sm120 | Exact GPU
+provider Auto | RunPod | Novita
+ESRGAN static shape or RIFE 1080/1440/2160 profile class
+Generate
+Validate
+Benchmark
+Force rebuild
+Deactivate
+Delete cached engine
+Copy R2 key
+View logs
 ```
 
-**No FILM. No Storyboard image ESRGAN TensorRT. No FlashVSR TensorRT. No GIMM TensorRT. No CPU neural fallback.**
+Inventory shows model/profile/precision/compatibility/build GPU/provider/TRT/CUDA/file size/build duration/benchmark/timestamps/status.
+
+Encoder controls expose NVENC CQ and x265 CRF. Benchmark UI may compare TRT vs native CUDA, providers, GPU classes, compatibility modes and NVENC vs x265; FlashVSR/GIMM may be benchmarked natively but never get TensorRT choices.
 
 ---
 
-## 40. 21 Aug 2026 locked decisions and FlashVSR+ reference architecture
+## 26. Local video pricing
 
-This section supersedes any earlier wording that leaves the following items optional or undecided.
+Use existing SceneBuilder payer/team/credit/refund/idempotency mechanics.
 
-### 40.1 GIMM-VFI-F remains in the product
-
-Keep `GIMM-VFI-F` as the quality/slower local VFI choice alongside RIFE 4.9. It remains native PyTorch + CuPy CUDA with no TensorRT engine. The commercial-license gate in Section 38 still applies and must not be bypassed.
-
-### 40.2 Scene-cut-aware VFI is required
-
-RIFE and GIMM VFI must be scene-cut aware.
-
-Before scheduling interpolation across adjacent source frames, detect/consume authoritative scene boundaries. Never interpolate a synthetic in-between frame from the last frame of scene A to the first frame of scene B.
-
-At a hard cut:
+Locked local video pricing:
 
 ```text
-finish/select the previous scene endpoint according to timestamp policy
--> do not interpolate across the boundary
--> restart VFI context on the first frame of the next scene
--> preserve exact requested output timestamps and duration
+FAST + no VFI or RIFE 4.9 = 3 credits / billable second
+FAST + GIMM-VFI-F         = 5 credits / billable second
+QUALITY / FlashVSR        = 10 credits / billable second
 ```
 
-Scene detection may also provide natural QUALITY/FlashVSR chunk boundaries, but scene splitting is orchestration; it does not create another model or TensorRT engine.
-
-### 40.3 Do not deduplicate or skip static/duplicate frames
-
-Do **not** add a static-frame detector that drops, collapses, skips, or substitutes duplicate-looking source frames to save VFI compute.
-
-Preserve every authoritative source frame/timestamp in scheduling. Scene-cut handling is separate from duplicate/static-frame optimization. If a third-party RIFE/GIMM wrapper exposes a `static-skip`, duplicate-frame skip, or equivalent optimization, keep it disabled unless a future explicit product decision reverses this rule.
-
-### 40.4 AMPERE_PLUS portable TensorRT set is retained
-
-`AMPERE_PLUS` is a retained first-class portable fallback set, not merely an experiment.
-
-Baseline prewarmed cache target when all architecture sets are released:
-
-```text
-sm_86 same-CC set      = 15 engines
-sm_89 same-CC set      = 15 engines
-sm_120 same-CC set     = 15 engines
-AMPERE_PLUS portable   = 15 engines
--------------------------------------
-baseline cache         = 60 engines
-```
-
-Exact-GPU sets remain optional and add another 15 only when deliberately generated/benchmarked.
-
-Runtime preference stays:
-
-```text
-exact GPU
--> same compute capability
--> AMPERE_PLUS portable
--> native GPU PyTorch fallback
-```
-
-### 40.5 Locked local video pricing
-
-Use existing SceneBuilder payer/team/credit/refund/idempotency mechanics. Do not create another wallet or billing subsystem.
-
-Local video enhancement pricing is:
-
-```text
-FAST + no VFI or RIFE 4.9   = 3 credits / billable second
-FAST + GIMM-VFI-F           = 5 credits / billable second
-QUALITY / FlashVSR          = 10 credits / billable second
-```
-
-`QUALITY = 10 credits/second` is the local QUALITY price regardless of whether its allowed local VFI choice is None, RIFE, or GIMM, unless a future explicit pricing decision changes it.
+QUALITY remains 10 credits/sec whether allowed local VFI is None, RIFE or GIMM unless explicitly changed later.
 
 Rules:
 
-- `skipped_image` = 0 credits;
-- callback/retry replay never charges twice;
-- failed/cancelled work follows existing SceneBuilder refund/reconciliation behavior;
-- Topaz keeps its existing external/premium pricing path;
-- billable duration is the authoritative media range actually selected for enhancement;
-- when `Apply Director playback speed` is enabled and that speed is baked into the requested enhanced result, use the resulting authoritative Director duration/range for billing;
-- otherwise use the selected source/master range duration;
-- use the existing SceneBuilder credit normalization/rounding convention rather than inventing a second rounding rule.
+- `skipped_image` = 0;
+- retries/callback replays never double-charge;
+- failure/cancel uses existing refund/reconciliation policy;
+- Topaz keeps its existing premium/external billing path;
+- billable duration is authoritative selected media range/duration actually being enhanced;
+- if Director playback speed is baked, use resulting authoritative duration/range;
+- use existing SceneBuilder credit rounding/normalization;
+- if local VFI is bypassed because target FPS <= source and no neural interpolation executes, do not charge the FAST+GIMM premium merely because a stale UI selection existed.
 
-### 40.6 Approved repository rename target and audit
+---
 
-The approved future GitHub repository name is:
+## 27. Observability / errors
+
+Pod telemetry includes provider/instance/GPU/compute capability/driver/CUDA/PyTorch/CuPy/TRT/VRAM/GPU utilization/memory utilization/temp/power/NVENC/NVDEC/CPU/RAM/current model/backend/engine/concurrency/dimensions/FPS/stage/progress/model FPS/end-to-end FPS/queue depth/elapsed/ETA when trustworthy.
+
+Persist compact snapshots/summaries only; no one-second D1 time series.
+
+Per-stage timing:
+
+```text
+R2 download
+probe/decode
+normalization
+spatial inference
+VFI inference
+final conform
+encode
+audio/remux
+R2 upload
+TRT cache hit/miss
+```
+
+Structured errors include at least:
+
+```text
+CUDA_UNAVAILABLE
+CUDA_DRIVER_TOO_OLD
+CUDA_OOM
+GPU_CAPABILITY_MISMATCH
+TRT_ENGINE_NOT_FOUND
+TRT_DESERIALIZE_FAILED
+TRT_BUILD_FAILED
+TRT_SELF_TEST_FAILED
+MODEL_LOAD_FAILED
+RIFE_RUNTIME_FAILED
+GIMM_RUNTIME_FAILED
+FLASHVSR_SELF_TEST_FAILED
+FFMPEG_PROBE_FAILED
+FFMPEG_DECODE_FAILED
+NVENC_ENCODE_FAILED
+X265_ENCODE_FAILED
+R2_INPUT_FAILED
+R2_OUTPUT_FAILED
+PROVIDER_CAPACITY_EXHAUSTED
+POD_HEALTH_TIMEOUT
+POD_LOST
+CANCELLED
+UNKNOWN
+```
+
+Include bounded recent log tail and relevant GPU/model/engine/runtime/retry metadata.
+
+---
+
+## 28. Build architecture
+
+Enhancer stays under top-level:
+
+```text
+enhancer/
+  .dockerignore
+  docker/
+  src/
+  models/
+  scripts/
+```
+
+Do not move enhancer source into root H3 `src/` or enhancer Dockerfiles into root H3 `docker/`.
+
+Layered conceptual DAG with no FILM:
+
+```text
+enhancer-smoke
+-> enhancer-base (CUDA 13.0.2)
+-> enhancer-torch (PyTorch 2.13.0 cu130, CuPy cuda13x, TRT 10.14.1.48)
+   -> enhancer-vfi-models (RIFE + GIMM)
+   -> enhancer-esrgan-models (4 ESRGAN; ONNX only for video TRT targets)
+      -> enhancer-fast
+   -> enhancer-flashvsr-runtime/models
+      -> enhancer-quality
+```
+
+Model/checkpoint layers precede app/server code so server edits do not invalidate heavy layers. Remove package/build caches. Generated TensorRT engines are never Docker layers.
+
+Keep H3 build workflow/root `scripts/remote_build.sh` behavior untouched. Enhancer uses its own Hetzner workflow and `enhancer/scripts/remote_build.sh` with enhancer-only build context.
+
+Docker build != TensorRT build:
+
+```text
+Docker build -> temporary CPU/Hetzner builder -> runtime/model/ONNX image
+TRT build    -> actual compatible NVIDIA GPU pod -> .engine -> private R2 + D1
+```
+
+Reuse existing repository secrets such as Docker Hub/Hetzner/HF/repo-clone credentials; never bake secrets into layers.
+
+---
+
+## 29. Repository rename
+
+Approved target repository name:
 
 ```text
 khuzaimamussawar/GPU-runtime
 ```
 
-The rename is a repository-name migration only. It must not rename H3 Docker Hub images, D1 tables, H3 service names, runtime APIs, or mature H3 lifecycle identifiers.
+Rename is repository identity only. Do **not** rename H3 Docker Hub images, H3 D1 tables, task families, APIs or lifecycle identifiers.
 
-Audit findings before rename:
+Audit already established:
 
-- the maintained H3 Hetzner build workflow passes GitHub's dynamic `GITHUB_REPOSITORY` into the remote build, so cloning follows the renamed repository automatically;
-- the H3 `scripts/remote_build.sh` uses `${GITHUB_REPOSITORY}` for the actual Git clone URL;
-- `/opt/minimax-h3-serverless` in the H3 remote builder is only a temporary local checkout-directory name and may remain initially;
-- the existing secret name `GH_FH_TOKEN_MM_H3_SERVERLESS` may remain initially; renaming that secret is a separate migration and is not required for the repository rename;
-- enhancer Hetzner build workflow/remote builder also use dynamic repository identity and are compatible with the rename;
-- SceneBuilder2 uses `minimax-h3-*` primarily as Docker/runtime image/service naming, not as a hardcoded GitHub clone dependency; those runtime image names remain unchanged;
-- no external `uses: khuzaimamussawar/minimax-h3-serverless/...@...` GitHub Action reference was found in the audited H3/SceneBuilder2 repositories.
+- maintained H3 Hetzner workflow passes dynamic `${GITHUB_REPOSITORY}`;
+- H3 remote build clones `${GITHUB_REPOSITORY}` dynamically;
+- `/opt/minimax-h3-serverless` is only a temporary local checkout-dir name and may remain initially;
+- secret variable `GH_FH_TOKEN_MM_H3_SERVERLESS` may remain initially;
+- enhancer build workflow also uses dynamic repository identity;
+- SceneBuilder2 `minimax-h3-*` references are primarily Docker/runtime image/service identities, not a hardcoded GitHub clone dependency;
+- no audited external `uses: khuzaimamussawar/minimax-h3-serverless/...@...` dependency was found.
 
-After the GitHub repository rename, update documentation links and developer/local git remotes. Do not rebuild heavyweight H3 Docker images merely because the GitHub repository name changed.
+After rename, update docs/developer git remotes. Do not rebuild H3 images solely because GitHub repository name changed.
 
-### 40.7 SECourses FlashVSR+ is an implementation reference, not a ComfyUI dependency
+---
 
-SECourses Upscaler Pro is a custom Python/Gradio application with its own installer, queue, health checks and model orchestration. The supplied tutorial demonstrates FlashVSR+ running directly in this custom app on Windows and also describes cloud use. It is not presented as a ComfyUI workflow.
-
-The current public SECourses post says the Upscaler application has moved to Torch 2.13 + CUDA 13 with current compiled libraries. The same post lists CUDA 13 and cuDNN 9.17+ in Windows requirements. The exact CUDA 13 minor used by the current FlashVSR+ backend is not publicly locked in that post, so do not infer a precise minor from it.
-
-The tutorial's separate statement about CUDA 13 + Torch 2.9.1 occurs in the later Trellis/3D-library section and must **not** be treated as the FlashVSR+ runtime version.
-
-SECourses says that on 20 Feb 2026 he completely changed FlashVSR+ to a new repository and significantly modified it, but the public post does not identify that exact repository. Do not claim a specific public fork is his exact backend without direct evidence.
-
-### 40.8 FlashVSR+ behavior worth adopting/qualifying for SceneBuilder QUALITY
-
-SECourses' demonstrated FlashVSR+ architecture uses or exposes these concepts:
+## 30. Source/license policy
 
 ```text
-FlashVSR v1.1 / FlashVSR+ native GPU inference
-2x or 4x model scale
-optional pre-downscale to land on the desired final output raster
-scene detection
-scene/chunk-based processing
-resume at completed scene/chunk boundaries
-GPU-dependent frame chunk length
-DiT tiling for VRAM control
-large tile / fewer-tile preference while staying below OOM/shared VRAM
-Tile Overlap adjustment if seams appear
-VAE tiling generally avoided in the full-model path when it causes quality/noise issues
-RIFE as a separate interpolation stage
-FFmpeg audio preservation
-H.265 / 10-bit output controls
-queue/cancel/health/progress/metadata
+Real-ESRGAN -> pinned permissive official upstream + deterministic BasicSR compatibility patch
+RIFE        -> permissive upstream; build our own TRT adapters/exporters
+FlashVSR    -> pin/review upstream + attention/runtime dependency licenses
+GIMM-VFI-F  -> production blocked until commercial permission/license is confirmed
+Topaz       -> external licensed backend; do not redistribute locally
 ```
 
-For SceneBuilder QUALITY:
+Non-commercial community TensorRT wrappers may be used as technical references/benchmarks only; do not copy/vendor incompatible code into commercial runtime.
 
-- keep FlashVSR native GPU only and no TensorRT;
-- scene/chunk processing is approved and is compatible with our required scene-cut-aware VFI;
-- for our <=15-second, typically ~24 FPS clips, do not load the whole product architecture around multi-hour resume, but make scene/chunk boundaries restartable/idempotent so a failed QUALITY job can resume/retry safely where practical;
-- do not copy SECourses proprietary code; reproduce permitted architecture from open/permissive upstreams;
-- FlashVSR-specific **DiT tiling is allowed** as VRAM control and does not change the separate rule that ESRGAN and RIFE remain non-tiled;
-- on the QUALITY floor (4090-class or better), prefer non-DiT-tiled/full execution when it passes VRAM and quality tests; otherwise use the largest validated DiT tile that stays out of OOM/shared-memory spill;
-- keep VAE tiling disabled by default unless our own tests show a valid case;
-- choose frame chunk length from measured GPU/output-resolution headroom rather than hardcoding one value for every GPU;
-- preserve audio and exact duration when merging chunks;
-- do not use shared system RAM as a hidden substitute for insufficient VRAM.
+---
 
-### 40.9 Public FlashVSR+ candidate architecture to evaluate
+## 31. Qualification / release gates
 
-A public Apache-2.0 FlashVSR+ lineage (`lihaoyun6/FlashVSR_plus`, and forks based on it) is technically relevant because it explicitly supports CUDA 12.8 or CUDA 13.0 PyTorch installs, introduces Blackwell support, replaces the original Block-Sparse-Attention build with Sparse SageAttention, adds DiT tiling/memory optimizations, provides a direct Gradio/CLI runtime, and copies audio through FFmpeg.
-
-This public lineage is **not confirmed to be SECourses' exact private/custom backend**. Treat it as a candidate implementation/reference only.
-
-Before selecting it for SceneBuilder QUALITY, compare against official FlashVSR v1.1 and verify:
+Before production eligibility on each GPU/runtime class, verify:
 
 ```text
-v1.1 model fidelity
-locality-constrained sparse-attention behavior / no dense-attention quality regression
-Ampere sm_86
-Ada sm_89
-Blackwell sm_120
-CUDA 13 candidate stack
-PyTorch 2.13 candidate stack
-4090/48GB/5090 VRAM and throughput
-DiT tiled vs non-tiled quality
-scene-boundary continuity
-exact frame count / duration / audio sync
+CUDA 13.0.2
+PyTorch 2.13.0 cu130
+CuPy CUDA kernel
+TensorRT 10.14.1.48 builder/runtime as applicable
+GPU-only invariant
+native Storyboard ESRGAN
+native video ESRGAN
+video ESRGAN TRT build/load/parity
+RIFE native + TRT with non-0.5 timestep values
+GIMM-F arbitrary timestep CUDA/CuPy
+FlashVSR quality/runtime on QUALITY GPUs
+scene-cut behavior
+no static-frame skip behavior
+30/48/60 output scheduling from varied source FPS and VFR
+NVDEC/NVENC
+R2/auth/callback/idempotency
+credit charge/refund behavior
 ```
 
-Official FlashVSR has warned that third-party implementations that omit its LCSA behavior can degrade quality, so SceneBuilder must qualify actual output rather than assuming every `FlashVSR+` fork is equivalent.
+Golden inputs include realistic/anime faces, hair/detail, text, foliage, gradients, camera pans, fast motion, occlusion, hard cuts, portrait/landscape, H3-origin rasters and slightly off-ratio inputs.
 
-### 40.10 Current CUDA/PyTorch qualification candidate
+Measure inference/end-to-end FPS, VRAM, CPU/RAM, decode/encode, R2 transfer and output quality/parity.
 
-Current facts:
+---
+
+## 32. Final canonical capability matrix
 
 ```text
-SECourses current Upscaler post -> Torch 2.13 + CUDA 13
-PyTorch stable wheel exists     -> torch 2.13.0 + cu130
-CuPy                            -> cupy-cuda13x
-TensorRT                        -> 10.16.1
+FAST
+  CUDA 13.0 Update 2 (13.0.2)
+  PyTorch 2.13.0 cu130
+  CuPy cupy-cuda13x
+  TensorRT 10.14.1.48 builder + runtime
+  FFmpeg NVDEC/NVENC
+
+  IMAGE
+    RealESRGAN_x4plus_anime_6B -> native GPU PyTorch only
+    RealESRGAN_x4plus          -> native GPU PyTorch only
+
+  VIDEO
+    realesr-animevideov3       -> TRT FP16 preferred; native full-frame GPU fallback
+    realesr-general-x4v3       -> TRT FP16 preferred; native full-frame GPU fallback
+
+  VFI
+    RIFE 4.9                   -> TRT FP16 preferred; dynamic runtime timestep; native GPU fallback
+    GIMM-VFI-F                 -> native PyTorch + CuPy; arbitrary timestep; license-gated
+
+QUALITY
+  CUDA 13.0 Update 2 (13.0.2)
+  PyTorch 2.13.0 cu130
+  CuPy cupy-cuda13x
+  TensorRT 10.14.1.48 runtime for RIFE
+  FFmpeg NVDEC/NVENC
+
+  VIDEO
+    FlashVSR v1.1 / qualified FlashVSR+ -> native GPU only; no TensorRT
+
+  VFI
+    RIFE 4.9                   -> compatible TRT engine preferred
+    GIMM-VFI-F                 -> native PyTorch + CuPy
+
+OUTPUT FPS
+  30 / 48 / 60 only
+  arbitrary source FPS/VFR accepted
+
+TRT ENGINE SCOPE
+  realesr-animevideov3
+  realesr-general-x4v3
+  RIFE 4.9
+
+TRT BASELINE CACHE
+  15 sm86 + 15 sm89 + 15 sm120 + 15 AMPERE_PLUS = 60 engines
 ```
 
-Do not reinterpret `cu130` as PyTorch version 13; `2.13.0` is the PyTorch version and `cu130` is its CUDA build tag.
-
-For SceneBuilder, qualify the exact system-CUDA minor against **all** FAST + QUALITY dependencies before changing Section 4 from `13.x` to a precise minor. TensorRT 10.16.1 supports the CUDA 13 family and NVIDIA notes a CUDA-13.0 edge-Blackwell issue that is fixed in CUDA 13.1, while the normal stable PyTorch 2.13 wheel is published as `cu130`. Therefore the final minor pin must be chosen by real Ampere/Ada/Blackwell integration tests, not by assuming SECourses' unspecified CUDA-13 minor.
+**No FILM. No Storyboard image ESRGAN TensorRT. No FlashVSR TensorRT. No GIMM TensorRT. No neural CPU fallback. No RIFE engine per FPS ratio.**
