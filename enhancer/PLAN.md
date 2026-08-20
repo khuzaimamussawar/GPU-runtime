@@ -1472,3 +1472,202 @@ TRT BASELINE CACHE
 ```
 
 **No FILM. No Storyboard image ESRGAN TensorRT. No FlashVSR TensorRT. No GIMM TensorRT. No neural CPU fallback. No RIFE engine per FPS ratio.**
+
+---
+
+## 33. Timing-aware slow motion VFI and GIMM GPU floor
+
+This section supersedes the generic `Apply Director playback speed` wording above with a more specific UI/runtime contract.
+
+### 33.1 Video Timeline slow-motion UI for both local VFI models
+
+When the selected local VFI model is either:
+
+```text
+RIFE 4.9
+GIMM-VFI-F
+```
+
+inspect the authoritative Director clip speed.
+
+If:
+
+```text
+speed < 1.0
+```
+
+show a `Smooth slow motion` control and **auto-check it by default** for that clip. The UI should also show the derived timing, for example:
+
+```text
+Source: 5.0s · 24fps
+Director speed: 0.5x
+Output: 10.0s · 48fps
+Smooth slow motion: ✓
+```
+
+The user may uncheck it if they intentionally want a normal-duration VFI master and prefer Timeline Render to perform ordinary playback-speed stretching later.
+
+If:
+
+```text
+speed == 1.0
+```
+
+hide/disable the slow-motion control because there is no Director slowdown to bake.
+
+If:
+
+```text
+speed > 1.0
+```
+
+do **not** auto-check slow motion. Increased playback speed already increases effective temporal sampling density at render time. Keep the normal VFI master at source duration and let Director/Timeline Render apply the speed-up. This avoids creating a speed-baked derivative unnecessarily.
+
+For speed-up clips, the normal target-FPS rules still apply. If neural interpolation is not required for the requested final timing, the backend may bypass VFI rather than charge for work that does not execute.
+
+### 33.2 Timing-aware slow-motion output is the final requested duration/FPS
+
+When `Smooth slow motion` is checked, the enhancer receives:
+
+```text
+authoritative source/master or reusable spatial-enhanced master
+selected trim/range
+source PTS/CFR timing
+Director playback speed p (<1)
+target FPS T = 30 | 48 | 60
+scene-cut boundaries
+```
+
+It returns a **speed-baked VFI derivative** at the final requested duration and FPS. It does not return a temporary high-FPS file and ask Timeline Render to slow it again.
+
+For source duration `D` and playback speed `p`:
+
+```text
+outputDuration = D / p
+```
+
+For CFR source FPS `S` and target FPS `T`:
+
+```text
+outputTime[n]  = n / T
+sourcePosition = outputTime[n] * S * p
+left           = floor(sourcePosition)
+right          = left + 1
+alpha          = sourcePosition - left
+```
+
+Reuse an exact source frame when `alpha == 0`; otherwise invoke the selected VFI model with the required arbitrary timestep.
+
+Example:
+
+```text
+source:        5 sec @ 24fps
+Director:      0.5x
+VFI:           RIFE or GIMM-F
+target:        48fps
+
+output:        10 sec @ 48fps
+output frames: ~480 on the exact timestamp grid
+source step:   24 * 0.5 / 48 = 0.25 source frames/output frame
+```
+
+So RIFE/GIMM receives adjacent source frame pairs plus timesteps such as `0.25`, `0.5`, `0.75`; there is no requirement to encode an intermediate 96fps master first.
+
+The same rule works for arbitrary source FPS/VFR using the PTS bracketing formula from Section 13.
+
+### 33.3 Never double-apply a baked slowdown
+
+If a local VFI result has `Smooth slow motion` baked, Timeline Render/Preview must treat that derivative as already timed.
+
+```text
+speed-baked VFI derivative -> effective playbackRate = 1.0
+```
+
+Do **not** apply the Director `0.5x` (or other baked slowdown) a second time in Remotion/FFmpeg.
+
+Do not mutate or erase the user's Director speed intent solely to make this work, and do not add enhancer-specific fields to `project_video_timeline`.
+
+Persist timing provenance operationally in `pending_upscales.settings_json/output_json`, including at least:
+
+```text
+timing_baked: true
+source_speed
+source_duration
+output_duration
+target_fps
+source/master identity
+segment identity
+output URL/object key
+```
+
+When building the transient Preview/TimelineRender/Hetzner render DTO for an active `upscaledVideoUrl`, resolve the matching completed enhancer job. If its timing metadata matches the current Director speed/target, hand the renderer an effective clip speed of `1.0` for that derivative. When the user switches back to the source/original media, use the persisted Director speed normally.
+
+If Director speed or target FPS changes after a speed-baked derivative was created, that timing derivative is stale. Re-run only VFI/timing from the reusable spatial-enhanced master where possible; do not rerun ESRGAN/FlashVSR merely because timing changed. Keep the prior successful derivative available until the replacement succeeds, but do not silently render it under mismatched timing metadata.
+
+### 33.4 Increased-speed behavior
+
+For `speed > 1.0`, leave `Smooth slow motion` off.
+
+Example:
+
+```text
+source: 5 sec @ 24fps
+VFI master: 5 sec @ 48fps
+Director speed: 2.0x
+final duration: 2.5 sec
+```
+
+Timeline Render applies the speed-up and selected final render FPS. Because speeding up increases effective temporal density, it does not have the slow-motion duplicate-frame problem that a `speed < 1` clip has.
+
+If a future product feature wants a speed-baked fast-motion derivative, implement it as a separate explicit timing mode rather than overloading the `Smooth slow motion` checkbox.
+
+### 33.5 FAST + GIMM-VFI-F requires at least 24 GB VRAM
+
+When the user selects:
+
+```text
+Enhance mode: FAST
+VFI: GIMM-VFI-F
+```
+
+the scheduler must enforce:
+
+```text
+minimum physical GPU VRAM = 24 GB
+```
+
+This is an eligibility floor, not an advisory preference.
+
+Rules:
+
+- RunPod/Novita inventory filtering excludes GPUs below 24 GB for FAST+GIMM jobs.
+- Boot-time NVML/capability verification must confirm at least 24 GB physical VRAM before advertising GIMM capability for that job class.
+- A forced admin GPU choice below 24 GB is rejected before provisioning/dispatch; do not silently substitute RIFE.
+- `Auto` may try another eligible GPU/provider according to normal fallback policy.
+- If no eligible >=24 GB GPU is available, remain queued/retry or fail with provider-capacity policy; never CPU fallback.
+- GIMM on QUALITY also naturally satisfies the same >=24 GB floor because QUALITY starts at the 4090-class floor or a validated equivalent/higher GPU.
+
+Representative 24 GB-or-more candidates remain subject to the normal <=48 GB product cap and architecture/provider qualification.
+
+### 33.6 Pricing with speed-baked slow motion
+
+Existing local pricing remains unchanged per billable output second:
+
+```text
+FAST + RIFE       = 3 credits/sec
+FAST + GIMM-F     = 5 credits/sec
+QUALITY           = 10 credits/sec
+```
+
+When `Smooth slow motion` is baked, bill against the resulting authoritative output duration, consistent with Section 26.
+
+Example:
+
+```text
+5 sec source @ 0.5x -> 10 sec speed-baked output
+FAST + RIFE        -> 30 credits
+FAST + GIMM-F      -> 50 credits
+QUALITY            -> 100 credits
+```
+
+Retries/callback replay remain idempotent and must not double-charge.
