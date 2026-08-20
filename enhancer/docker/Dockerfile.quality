@@ -1,0 +1,26 @@
+FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+ARG DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1 PIP_DISABLE_PIP_VERSION_CHECK=1 FLASHVSR_ROOT=/opt/FlashVSR
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common ca-certificates curl git git-lfs ffmpeg build-essential ninja-build \
+ && add-apt-repository -y ppa:deadsnakes/ppa \
+ && apt-get update && apt-get install -y --no-install-recommends python3.11 python3.11-dev python3.11-venv \
+ && rm -rf /var/lib/apt/lists/*
+RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python3.11 && ln -sf /usr/bin/python3.11 /usr/local/bin/python3
+RUN git clone --depth 1 https://github.com/OpenImagingLab/FlashVSR.git /opt/FlashVSR \
+ && cd /opt/FlashVSR \
+ && python3 -m pip install --no-cache-dir -e . \
+ && python3 -m pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cu124 -r requirements.txt \
+ && python3 -m pip install --no-cache-dir boto3
+RUN git clone --depth 1 https://github.com/mit-han-lab/Block-Sparse-Attention.git /opt/Block-Sparse-Attention \
+ && cd /opt/Block-Sparse-Attention \
+ && python3 -m pip install --no-cache-dir packaging ninja \
+ && MAX_JOBS=2 python3 setup.py install
+RUN git lfs install \
+ && cd /opt/FlashVSR/examples/WanVSR \
+ && git clone https://huggingface.co/JunhaoZhuang/FlashVSR-v1.1 FlashVSR-v1.1
+WORKDIR /opt/scenebuilder-enhancer
+COPY enhancer/src /opt/scenebuilder-enhancer/src
+LABEL scene_builder.service="enhancer_quality" scene_builder.cuda="12.4/cu124" scene_builder.model="flashvsr-v1.1"
+EXPOSE 8000
+CMD ["python3", "-m", "src.server"]
