@@ -1,0 +1,27 @@
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
+ARG DEBIAN_FRONTEND=noninteractive
+ARG PYTORCH_VERSION=2.7.1
+ARG TORCHVISION_VERSION=0.22.1
+ENV PYTHONUNBUFFERED=1 PIP_DISABLE_PIP_VERSION_CHECK=1 REAL_ESRGAN_ROOT=/opt/Real-ESRGAN
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common ca-certificates curl git ffmpeg libgl1 libglib2.0-0 build-essential \
+ && add-apt-repository -y ppa:deadsnakes/ppa \
+ && apt-get update && apt-get install -y --no-install-recommends python3.11 python3.11-dev python3.11-venv \
+ && rm -rf /var/lib/apt/lists/*
+RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python3.11 && ln -sf /usr/bin/python3.11 /usr/local/bin/python3
+RUN python3 -m pip install --no-cache-dir torch==${PYTORCH_VERSION} torchvision==${TORCHVISION_VERSION} --index-url https://download.pytorch.org/whl/cu128
+RUN git clone --depth 1 https://github.com/xinntao/Real-ESRGAN.git /opt/Real-ESRGAN \
+ && cd /opt/Real-ESRGAN \
+ && python3 -m pip install --no-cache-dir -r requirements.txt \
+ && python3 setup.py develop \
+ && python3 -m pip install --no-cache-dir gfpgan boto3 Pillow
+RUN mkdir -p /opt/Real-ESRGAN/weights \
+ && curl -fL https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth -o /opt/Real-ESRGAN/weights/realesr-general-x4v3.pth \
+ && curl -fL https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-wdn-x4v3.pth -o /opt/Real-ESRGAN/weights/realesr-general-wdn-x4v3.pth \
+ && curl -fL https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-animevideov3.pth -o /opt/Real-ESRGAN/weights/realesr-animevideov3.pth \
+ && curl -fL https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth -o /opt/Real-ESRGAN/weights/RealESRGAN_x4plus.pth
+WORKDIR /opt/scenebuilder-enhancer
+COPY enhancer/src /opt/scenebuilder-enhancer/src
+LABEL scene_builder.service="enhancer_fast" scene_builder.cuda="12.8/cu128"
+EXPOSE 8000
+CMD ["python3", "-m", "src.server"]
