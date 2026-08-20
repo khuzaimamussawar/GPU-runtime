@@ -1354,3 +1354,193 @@ Locked logical engine count per compatibility target:
 ```
 
 **No FILM. No Storyboard image ESRGAN TensorRT. No FlashVSR TensorRT. No GIMM TensorRT. No CPU neural fallback.**
+
+---
+
+## 40. 21 Aug 2026 locked decisions and FlashVSR+ reference architecture
+
+This section supersedes any earlier wording that leaves the following items optional or undecided.
+
+### 40.1 GIMM-VFI-F remains in the product
+
+Keep `GIMM-VFI-F` as the quality/slower local VFI choice alongside RIFE 4.9. It remains native PyTorch + CuPy CUDA with no TensorRT engine. The commercial-license gate in Section 38 still applies and must not be bypassed.
+
+### 40.2 Scene-cut-aware VFI is required
+
+RIFE and GIMM VFI must be scene-cut aware.
+
+Before scheduling interpolation across adjacent source frames, detect/consume authoritative scene boundaries. Never interpolate a synthetic in-between frame from the last frame of scene A to the first frame of scene B.
+
+At a hard cut:
+
+```text
+finish/select the previous scene endpoint according to timestamp policy
+-> do not interpolate across the boundary
+-> restart VFI context on the first frame of the next scene
+-> preserve exact requested output timestamps and duration
+```
+
+Scene detection may also provide natural QUALITY/FlashVSR chunk boundaries, but scene splitting is orchestration; it does not create another model or TensorRT engine.
+
+### 40.3 Do not deduplicate or skip static/duplicate frames
+
+Do **not** add a static-frame detector that drops, collapses, skips, or substitutes duplicate-looking source frames to save VFI compute.
+
+Preserve every authoritative source frame/timestamp in scheduling. Scene-cut handling is separate from duplicate/static-frame optimization. If a third-party RIFE/GIMM wrapper exposes a `static-skip`, duplicate-frame skip, or equivalent optimization, keep it disabled unless a future explicit product decision reverses this rule.
+
+### 40.4 AMPERE_PLUS portable TensorRT set is retained
+
+`AMPERE_PLUS` is a retained first-class portable fallback set, not merely an experiment.
+
+Baseline prewarmed cache target when all architecture sets are released:
+
+```text
+sm_86 same-CC set      = 15 engines
+sm_89 same-CC set      = 15 engines
+sm_120 same-CC set     = 15 engines
+AMPERE_PLUS portable   = 15 engines
+-------------------------------------
+baseline cache         = 60 engines
+```
+
+Exact-GPU sets remain optional and add another 15 only when deliberately generated/benchmarked.
+
+Runtime preference stays:
+
+```text
+exact GPU
+-> same compute capability
+-> AMPERE_PLUS portable
+-> native GPU PyTorch fallback
+```
+
+### 40.5 Locked local video pricing
+
+Use existing SceneBuilder payer/team/credit/refund/idempotency mechanics. Do not create another wallet or billing subsystem.
+
+Local video enhancement pricing is:
+
+```text
+FAST + no VFI or RIFE 4.9   = 3 credits / billable second
+FAST + GIMM-VFI-F           = 5 credits / billable second
+QUALITY / FlashVSR          = 10 credits / billable second
+```
+
+`QUALITY = 10 credits/second` is the local QUALITY price regardless of whether its allowed local VFI choice is None, RIFE, or GIMM, unless a future explicit pricing decision changes it.
+
+Rules:
+
+- `skipped_image` = 0 credits;
+- callback/retry replay never charges twice;
+- failed/cancelled work follows existing SceneBuilder refund/reconciliation behavior;
+- Topaz keeps its existing external/premium pricing path;
+- billable duration is the authoritative media range actually selected for enhancement;
+- when `Apply Director playback speed` is enabled and that speed is baked into the requested enhanced result, use the resulting authoritative Director duration/range for billing;
+- otherwise use the selected source/master range duration;
+- use the existing SceneBuilder credit normalization/rounding convention rather than inventing a second rounding rule.
+
+### 40.6 Approved repository rename target and audit
+
+The approved future GitHub repository name is:
+
+```text
+khuzaimamussawar/GPU-runtime
+```
+
+The rename is a repository-name migration only. It must not rename H3 Docker Hub images, D1 tables, H3 service names, runtime APIs, or mature H3 lifecycle identifiers.
+
+Audit findings before rename:
+
+- the maintained H3 Hetzner build workflow passes GitHub's dynamic `GITHUB_REPOSITORY` into the remote build, so cloning follows the renamed repository automatically;
+- the H3 `scripts/remote_build.sh` uses `${GITHUB_REPOSITORY}` for the actual Git clone URL;
+- `/opt/minimax-h3-serverless` in the H3 remote builder is only a temporary local checkout-directory name and may remain initially;
+- the existing secret name `GH_FH_TOKEN_MM_H3_SERVERLESS` may remain initially; renaming that secret is a separate migration and is not required for the repository rename;
+- enhancer Hetzner build workflow/remote builder also use dynamic repository identity and are compatible with the rename;
+- SceneBuilder2 uses `minimax-h3-*` primarily as Docker/runtime image/service naming, not as a hardcoded GitHub clone dependency; those runtime image names remain unchanged;
+- no external `uses: khuzaimamussawar/minimax-h3-serverless/...@...` GitHub Action reference was found in the audited H3/SceneBuilder2 repositories.
+
+After the GitHub repository rename, update documentation links and developer/local git remotes. Do not rebuild heavyweight H3 Docker images merely because the GitHub repository name changed.
+
+### 40.7 SECourses FlashVSR+ is an implementation reference, not a ComfyUI dependency
+
+SECourses Upscaler Pro is a custom Python/Gradio application with its own installer, queue, health checks and model orchestration. The supplied tutorial demonstrates FlashVSR+ running directly in this custom app on Windows and also describes cloud use. It is not presented as a ComfyUI workflow.
+
+The current public SECourses post says the Upscaler application has moved to Torch 2.13 + CUDA 13 with current compiled libraries. The same post lists CUDA 13 and cuDNN 9.17+ in Windows requirements. The exact CUDA 13 minor used by the current FlashVSR+ backend is not publicly locked in that post, so do not infer a precise minor from it.
+
+The tutorial's separate statement about CUDA 13 + Torch 2.9.1 occurs in the later Trellis/3D-library section and must **not** be treated as the FlashVSR+ runtime version.
+
+SECourses says that on 20 Feb 2026 he completely changed FlashVSR+ to a new repository and significantly modified it, but the public post does not identify that exact repository. Do not claim a specific public fork is his exact backend without direct evidence.
+
+### 40.8 FlashVSR+ behavior worth adopting/qualifying for SceneBuilder QUALITY
+
+SECourses' demonstrated FlashVSR+ architecture uses or exposes these concepts:
+
+```text
+FlashVSR v1.1 / FlashVSR+ native GPU inference
+2x or 4x model scale
+optional pre-downscale to land on the desired final output raster
+scene detection
+scene/chunk-based processing
+resume at completed scene/chunk boundaries
+GPU-dependent frame chunk length
+DiT tiling for VRAM control
+large tile / fewer-tile preference while staying below OOM/shared VRAM
+Tile Overlap adjustment if seams appear
+VAE tiling generally avoided in the full-model path when it causes quality/noise issues
+RIFE as a separate interpolation stage
+FFmpeg audio preservation
+H.265 / 10-bit output controls
+queue/cancel/health/progress/metadata
+```
+
+For SceneBuilder QUALITY:
+
+- keep FlashVSR native GPU only and no TensorRT;
+- scene/chunk processing is approved and is compatible with our required scene-cut-aware VFI;
+- for our <=15-second, typically ~24 FPS clips, do not load the whole product architecture around multi-hour resume, but make scene/chunk boundaries restartable/idempotent so a failed QUALITY job can resume/retry safely where practical;
+- do not copy SECourses proprietary code; reproduce permitted architecture from open/permissive upstreams;
+- FlashVSR-specific **DiT tiling is allowed** as VRAM control and does not change the separate rule that ESRGAN and RIFE remain non-tiled;
+- on the QUALITY floor (4090-class or better), prefer non-DiT-tiled/full execution when it passes VRAM and quality tests; otherwise use the largest validated DiT tile that stays out of OOM/shared-memory spill;
+- keep VAE tiling disabled by default unless our own tests show a valid case;
+- choose frame chunk length from measured GPU/output-resolution headroom rather than hardcoding one value for every GPU;
+- preserve audio and exact duration when merging chunks;
+- do not use shared system RAM as a hidden substitute for insufficient VRAM.
+
+### 40.9 Public FlashVSR+ candidate architecture to evaluate
+
+A public Apache-2.0 FlashVSR+ lineage (`lihaoyun6/FlashVSR_plus`, and forks based on it) is technically relevant because it explicitly supports CUDA 12.8 or CUDA 13.0 PyTorch installs, introduces Blackwell support, replaces the original Block-Sparse-Attention build with Sparse SageAttention, adds DiT tiling/memory optimizations, provides a direct Gradio/CLI runtime, and copies audio through FFmpeg.
+
+This public lineage is **not confirmed to be SECourses' exact private/custom backend**. Treat it as a candidate implementation/reference only.
+
+Before selecting it for SceneBuilder QUALITY, compare against official FlashVSR v1.1 and verify:
+
+```text
+v1.1 model fidelity
+locality-constrained sparse-attention behavior / no dense-attention quality regression
+Ampere sm_86
+Ada sm_89
+Blackwell sm_120
+CUDA 13 candidate stack
+PyTorch 2.13 candidate stack
+4090/48GB/5090 VRAM and throughput
+DiT tiled vs non-tiled quality
+scene-boundary continuity
+exact frame count / duration / audio sync
+```
+
+Official FlashVSR has warned that third-party implementations that omit its LCSA behavior can degrade quality, so SceneBuilder must qualify actual output rather than assuming every `FlashVSR+` fork is equivalent.
+
+### 40.10 Current CUDA/PyTorch qualification candidate
+
+Current facts:
+
+```text
+SECourses current Upscaler post -> Torch 2.13 + CUDA 13
+PyTorch stable wheel exists     -> torch 2.13.0 + cu130
+CuPy                            -> cupy-cuda13x
+TensorRT                        -> 10.16.1
+```
+
+Do not reinterpret `cu130` as PyTorch version 13; `2.13.0` is the PyTorch version and `cu130` is its CUDA build tag.
+
+For SceneBuilder, qualify the exact system-CUDA minor against **all** FAST + QUALITY dependencies before changing Section 4 from `13.x` to a precise minor. TensorRT 10.16.1 supports the CUDA 13 family and NVIDIA notes a CUDA-13.0 edge-Blackwell issue that is fixed in CUDA 13.1, while the normal stable PyTorch 2.13 wheel is published as `cu130`. Therefore the final minor pin must be chosen by real Ampere/Ada/Blackwell integration tests, not by assuming SECourses' unspecified CUDA-13 minor.
