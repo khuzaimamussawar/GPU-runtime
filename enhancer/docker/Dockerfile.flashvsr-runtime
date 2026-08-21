@@ -23,8 +23,9 @@ RUN set -eux; \
       matplotlib==3.10.3 'numpy>=1.26.4' peft==0.16.0 pillow==11.0.0 \
       safetensors==0.5.3 sentencepiece==0.2.0 transformers==4.46.2 \
       pytorch-lightning==2.5.2 imageio==2.37.0 imageio-ffmpeg==0.6.0 \
-      protobuf==3.20.3 ftfy==6.3.1 pandas==2.3.0 tqdm datasets; \
-    python3 -m pip install --no-deps -e /opt/FlashVSR; \
+      protobuf==3.20.3 ftfy==6.3.1 pandas==2.3.0 tqdm datasets \
+      'setuptools<81'; \
+    python3 -m pip install --no-build-isolation --no-deps -e /opt/FlashVSR; \
     git clone https://github.com/mit-han-lab/Block-Sparse-Attention.git /opt/Block-Sparse-Attention; \
     cd /opt/Block-Sparse-Attention; \
     git checkout "${BLOCK_SPARSE_COMMIT}"; \
