@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable
 
@@ -107,25 +108,56 @@ def run_image_upscale_batch(job: dict[str, Any], cancel_event, progress: Progres
         raise ValueError("image_upscale_batch input.images is required")
     with tempfile.TemporaryDirectory(prefix="sb-enhancer-image-batch-") as tmp:
         root = Path(tmp)
-        outputs = []
+        outputs: list[dict[str, Any] | None] = [None] * len(images)
         total = len(images)
-        for index, item in enumerate(images):
+        workers = max(1, min(int(settings.get("parallelism") or 1), int(settings.get("maxParallelism") or 4), total))
+
+        def one(index: int, item: dict[str, Any]) -> dict[str, Any]:
             if cancel_event.is_set():
                 raise RuntimeError("CANCELLED")
             source = str(item.get("url") or "").strip()
             output_key = str(item.get("objectKey") or "").strip()
-            pct = 5 + (index / max(1, total)) * 85
-            progress("upscaling", pct, {"model": model_name, "precision": "fp16", "tile": 0, "index": index + 1, "total": total})
             stored = _upscale_one(source, output_key, model_name, settings, root)
-            outputs.append({**stored, "sceneId": item.get("sceneId"), "index": index})
+            return {**stored, "sceneId": item.get("sceneId"), "index": index}
+
+        def run_sequential(start_count: int = 0) -> None:
+            completed = start_count
+            for index, item in enumerate(images):
+                if outputs[index] is not None:
+                    continue
+                progress("upscaling", 5 + (completed / max(1, total)) * 85, {"model": model_name, "precision": "fp16", "tile": 0, "index": index + 1, "total": total, "xN": 1})
+                outputs[index] = one(index, item)
+                completed += 1
+
+        if workers <= 1:
+            run_sequential()
+        else:
+            completed = 0
+            try:
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    futures = {pool.submit(one, index, item): index for index, item in enumerate(images)}
+                    for future in as_completed(futures):
+                        index = futures[future]
+                        outputs[index] = future.result()
+                        completed += 1
+                        progress("upscaling", 5 + (completed / max(1, total)) * 85, {"model": model_name, "precision": "fp16", "tile": 0, "index": index + 1, "total": total, "xN": workers})
+            except Exception as error:
+                if "out of memory" not in str(error).lower() and "CUDA_OOM" not in str(error):
+                    raise
+                if not settings.get("oomAutoBackoff", True):
+                    raise
+                progress("upscaling", 5 + (completed / max(1, total)) * 85, {"model": model_name, "oomBackoff": True, "xN": 1})
+                run_sequential(completed)
+
+        compact_outputs = [item for item in outputs if item is not None]
         progress("completed", 100, {"count": len(outputs)})
         return {
             "runtime": "scenebuilder-enhancer-fast",
             "modelFamily": model_name,
             "precision": "fp16",
             "targetResolution": settings.get("targetResolution") or "2k",
-            "items": outputs,
-            "count": len(outputs),
+            "items": compact_outputs,
+            "count": len(compact_outputs),
         }
 
 

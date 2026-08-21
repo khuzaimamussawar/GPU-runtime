@@ -9,6 +9,7 @@ import av
 import cv2
 import numpy as np
 
+from .engine_runtime import try_interpolate_rife_trt
 from .models import interpolate_rife
 
 Progress = Callable[[str, float, dict[str, Any] | None], None]
@@ -38,9 +39,10 @@ def interpolate_file(
     playback_speed: float = 1.0,
     timing_baked: bool = False,
     interpolation_model: str = "rife-4.9",
-    cq: int = 16,
+    cq: int = 17,
     cancel_event=None,
     progress: Progress | None = None,
+    settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if target_fps not in {30, 48, 60}:
         raise ValueError("target_fps must be 30, 48, or 60")
@@ -84,7 +86,17 @@ def interpolate_file(
             elif alpha >= 1 - 1e-6: out = current
             elif cut or not neural: out = prev if alpha < 0.5 else current
             else:
-                rgb = interpolate_rife(cv2.cvtColor(prev, cv2.COLOR_BGR2RGB), cv2.cvtColor(current, cv2.COLOR_BGR2RGB), alpha)
+                prev_rgb = cv2.cvtColor(prev, cv2.COLOR_BGR2RGB)
+                current_rgb = cv2.cvtColor(current, cv2.COLOR_BGR2RGB)
+                try:
+                    rgb = try_interpolate_rife_trt(prev_rgb, current_rgb, alpha, settings or {})
+                except Exception as error:
+                    if settings and not settings.get("allowNativeFallback", True):
+                        raise
+                    print(f"[enhancer] TensorRT RIFE fallback to native PyTorch: {error}", flush=True)
+                    rgb = None
+                if rgb is None:
+                    rgb = interpolate_rife(prev_rgb, current_rgb, alpha)
                 out = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
             emit(out); next_out += 1.0 / target_fps
         decoded += 1; prev = current; prev_t = current_t

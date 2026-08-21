@@ -16,6 +16,7 @@ import numpy as np
 
 from .models import interpolate_rife, upscale_bgr
 from .r2_store import upload_file
+from .engine_runtime import try_interpolate_rife_trt, try_upscale_bgr_trt
 
 Progress = Callable[[str, float, dict[str, Any] | None], None]
 
@@ -97,14 +98,22 @@ def _hard_cut(a: np.ndarray, b: np.ndarray) -> bool:
     return mad >= 0.32 and corr <= 0.55
 
 
-def _spatial(frame_bgr: np.ndarray, model_name: str, target_w: int, target_h: int) -> np.ndarray:
+def _spatial(frame_bgr: np.ndarray, model_name: str, target_w: int, target_h: int, settings: dict[str, Any]) -> np.ndarray:
     cropped = _center_crop_to_aspect(frame_bgr, target_w, target_h)
     h, w = cropped.shape[:2]
     scale = min(4.0, max(1.0, max(target_w / w, target_h / h)))
     if target_w <= w and target_h <= h:
         enhanced = cropped
     else:
-        enhanced = upscale_bgr(cropped, model_name, outscale=scale)
+        try:
+            enhanced = try_upscale_bgr_trt(cropped, settings, target_w, target_h)
+        except Exception as error:
+            if not settings.get("allowNativeFallback", True):
+                raise
+            print(f"[enhancer] TensorRT spatial fallback to native PyTorch: {error}", flush=True)
+            enhanced = None
+        if enhanced is None:
+            enhanced = upscale_bgr(cropped, model_name, outscale=scale)
     if enhanced.shape[1] != target_w or enhanced.shape[0] != target_h:
         enhanced = cv2.resize(enhanced, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4)
     return enhanced
@@ -174,7 +183,7 @@ def run_fast_video(job: dict[str, Any], cancel_event, progress: Progress) -> dic
         probe = _probe(source)
         out_w, out_h = _target_dimensions(str(settings.get("targetResolution") or "1080p"), probe.width, probe.height)
         fps_out = float(target_fps or probe.fps or 24.0)
-        encoder = _open_encoder(video_only, out_w, out_h, fps_out, int(settings.get("nvencCq") or 16))
+        encoder = _open_encoder(video_only, out_w, out_h, fps_out, int(settings.get("nvencCq") or 17))
         assert encoder.stdin is not None
 
         container = av.open(str(source)); stream = container.streams.video[0]
@@ -186,7 +195,7 @@ def run_fast_video(job: dict[str, Any], cancel_event, progress: Progress) -> dic
             raise RuntimeError("FFMPEG_DECODE_FAILED:no frames")
         prev_raw = first.to_ndarray(format="bgr24")
         prev_pts = float(first.pts or 0) * time_base
-        prev_sr = _spatial(prev_raw, model_name, out_w, out_h)
+        prev_sr = _spatial(prev_raw, model_name, out_w, out_h, settings)
         next_output_t = 0.0
         emitted = 0
         decoded = 1
@@ -207,7 +216,7 @@ def run_fast_video(job: dict[str, Any], cancel_event, progress: Progress) -> dic
             cur_pts = float(current.pts if current.pts is not None else decoded) * time_base
             if cur_pts <= prev_pts:
                 cur_pts = prev_pts + 1.0 / nominal_source_fps
-            cur_sr = _spatial(cur_raw, model_name, out_w, out_h)
+            cur_sr = _spatial(cur_raw, model_name, out_w, out_h, settings)
             cut = _hard_cut(prev_raw, cur_raw)
             while next_output_t * effective_speed <= cur_pts + 1e-9:
                 src_t = next_output_t * effective_speed
@@ -222,9 +231,17 @@ def run_fast_video(job: dict[str, Any], cancel_event, progress: Progress) -> dic
                 elif cut or not neural_vfi:
                     out = prev_sr if alpha < 0.5 else cur_sr
                 else:
-                    out_rgb = interpolate_rife(
-                        cv2.cvtColor(prev_sr, cv2.COLOR_BGR2RGB), cv2.cvtColor(cur_sr, cv2.COLOR_BGR2RGB), alpha
-                    )
+                    prev_rgb = cv2.cvtColor(prev_sr, cv2.COLOR_BGR2RGB)
+                    cur_rgb = cv2.cvtColor(cur_sr, cv2.COLOR_BGR2RGB)
+                    try:
+                        out_rgb = try_interpolate_rife_trt(prev_rgb, cur_rgb, alpha, settings)
+                    except Exception as error:
+                        if not settings.get("allowNativeFallback", True):
+                            raise
+                        print(f"[enhancer] TensorRT RIFE fallback to native PyTorch: {error}", flush=True)
+                        out_rgb = None
+                    if out_rgb is None:
+                        out_rgb = interpolate_rife(prev_rgb, cur_rgb, alpha)
                     out = cv2.cvtColor(out_rgb, cv2.COLOR_RGB2BGR)
                 emit(out)
                 next_output_t += 1.0 / fps_out

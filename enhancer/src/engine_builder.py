@@ -49,11 +49,8 @@ def _run(args: list[str], timeout: int, debug: list[str]) -> str:
     return output
 
 
-def _trtexec() -> str:
-    binary = shutil.which("trtexec")
-    if not binary:
-        raise RuntimeError("TRT_BUILD_FAILED:trtexec not found in runtime image")
-    return binary
+def _trtexec() -> str | None:
+    return shutil.which("trtexec")
 
 
 def _model(job: dict[str, Any]) -> str:
@@ -105,6 +102,53 @@ def _benchmark(binary: str, engine_path: Path, debug: list[str], profile: str) -
     return {"profile": profile, "durationSeconds": round(time.time() - started, 3), "summaryTail": output[-2000:]}
 
 
+def _profile_shapes(model: str, profile: str, trusted: dict[str, Any]) -> dict[str, tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]]:
+    height, width = PROFILE_SHAPES.get(profile, PROFILE_SHAPES["1080 class"])
+    names = trusted.get("inputNames") or trusted.get("input_names")
+    if not names:
+        names = ["img0", "img1"] if model == "rife-4.9" else ["input"]
+    shape = (1, 3, height, width)
+    return {str(name): (shape, shape, shape) for name in names}
+
+
+def _build_with_python_api(onnx: Path, engine_path: Path, model: str, profile: str, compatibility: str, trusted: dict[str, Any], debug: list[str]) -> None:
+    import tensorrt as trt
+
+    logger = trt.Logger(trt.Logger.INFO)
+    builder = trt.Builder(logger)
+    flag = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
+    network = builder.create_network(flag)
+    parser = trt.OnnxParser(network, logger)
+    if not parser.parse(onnx.read_bytes()):
+        errors = [str(parser.get_error(i)) for i in range(parser.num_errors)]
+        debug.extend(errors[-20:])
+        raise RuntimeError("TRT_BUILD_FAILED:ONNX parse failed: " + " | ".join(errors[-3:]))
+    config = builder.create_builder_config()
+    config.set_flag(trt.BuilderFlag.FP16)
+    if compatibility == "AMPERE_PLUS" and hasattr(trt, "HardwareCompatibilityLevel"):
+        config.hardware_compatibility_level = trt.HardwareCompatibilityLevel.AMPERE_PLUS
+    profile_obj = builder.create_optimization_profile()
+    shapes = _profile_shapes(model, profile, trusted)
+    for name, (minimum, optimum, maximum) in shapes.items():
+        profile_obj.set_shape(name, minimum, optimum, maximum)
+    config.add_optimization_profile(profile_obj)
+    debug.append(f"python TensorRT builder: {trt.__version__} profile={profile} compatibility={compatibility}")
+    serialized = builder.build_serialized_network(network, config)
+    if serialized is None:
+        raise RuntimeError("TRT_BUILD_FAILED:build_serialized_network returned None")
+    engine_path.write_bytes(bytes(serialized))
+
+
+def _validate_deserialize(engine_path: Path) -> None:
+    import tensorrt as trt
+
+    logger = trt.Logger(trt.Logger.WARNING)
+    runtime = trt.Runtime(logger)
+    engine = runtime.deserialize_cuda_engine(engine_path.read_bytes())
+    if engine is None:
+        raise RuntimeError("TRT_DESERIALIZE_FAILED:generated engine cannot be deserialized")
+
+
 def run_engine_build(job: dict[str, Any], cancel_event, progress: Progress) -> dict[str, Any]:
     settings = job.get("settings") if isinstance(job.get("settings"), dict) else {}
     trusted = job.get("trustedSource") if isinstance(job.get("trustedSource"), dict) else {}
@@ -129,19 +173,23 @@ def run_engine_build(job: dict[str, Any], cancel_event, progress: Progress) -> d
             onnx = _onnx_path(model, trusted)
             onnx_sha = _sha256(onnx)
             engine_path = tmp / f"{model}-{_slug(profile)}-{_slug(compatibility)}.engine"
-            args = [binary, f"--onnx={onnx}", f"--saveEngine={engine_path}", "--fp16", "--skipInference", *_shape_args(model, profile, trusted)]
-            if compatibility == "AMPERE_PLUS":
-                args.append("--hardwareCompatibilityLevel=ampere+")
             progress("building", 20, {"onnx": str(onnx), "onnxSha256": onnx_sha})
-            _run(args, int(settings.get("buildTimeoutSeconds") or 7200), debug)
+            if binary:
+                args = [binary, f"--onnx={onnx}", f"--saveEngine={engine_path}", "--fp16", "--skipInference", *_shape_args(model, profile, trusted)]
+                if compatibility == "AMPERE_PLUS":
+                    args.append("--hardwareCompatibilityLevel=ampere+")
+                _run(args, int(settings.get("buildTimeoutSeconds") or 7200), debug)
+            else:
+                _build_with_python_api(onnx, engine_path, model, profile, compatibility, trusted, debug)
             if cancel_event.is_set():
                 raise RuntimeError("CANCELLED")
             if not engine_path.is_file() or engine_path.stat().st_size <= 0:
                 raise RuntimeError("TRT_BUILD_FAILED:engine file missing after trtexec")
             trusted = {**trusted, "onnxSha256": onnx_sha}
         progress("validating", 70, {"engine": str(engine_path)})
-        validation = {"ok": True, "engineSha256": _sha256(engine_path)}
-        benchmark = _benchmark(binary, engine_path, debug, profile) if action in {"generate", "benchmark"} else {}
+        _validate_deserialize(engine_path)
+        validation = {"ok": True, "engineSha256": _sha256(engine_path), "deserializeOk": True}
+        benchmark = _benchmark(binary, engine_path, debug, profile) if binary and action in {"generate", "benchmark"} else {"skipped": "trtexec unavailable; Python TensorRT build/deserialize path used"} if action in {"generate", "benchmark"} else {}
         progress("uploading", 90, None)
         engine_sha = validation["engineSha256"]
         output = job.get("output") if isinstance(job.get("output"), dict) else {}

@@ -122,11 +122,12 @@ def run_video_upscale(job: dict[str, Any], cancel_event, progress: Progress) -> 
             progress("interpolating", 72, {"model": interpolation, "targetFps": target_fps})
             vfi_meta = interpolate_file(flash_raw, temporal, target_fps=target_fps, playback_speed=speed,
                                         timing_baked=timing_baked, interpolation_model=interpolation,
-                                        cq=int(settings.get("nvencCq") or 16), cancel_event=cancel_event, progress=progress)
+                                        cq=int(settings.get("nvencCq") or 17), cancel_event=cancel_event, progress=progress,
+                                        settings=settings)
             base_for_finish = temporal
         progress("encoding", 91, None)
         _finish_video(base_for_finish, source, final, target_w, target_h, speed=speed,
-                      timing_baked=timing_baked and not target_fps, has_audio=source_probe["hasAudio"], cq=int(settings.get("nvencCq") or 16))
+                      timing_baked=timing_baked and not target_fps, has_audio=source_probe["hasAudio"], cq=int(settings.get("nvencCq") or 17))
         # interpolate_file changes video timing but intentionally emits video-only;
         # mux/stretches audio here when VFI ran.
         if target_fps and source_probe["hasAudio"]:

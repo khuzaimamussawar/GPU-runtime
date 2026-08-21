@@ -186,9 +186,9 @@ def _boot() -> None:
             if not torch.cuda.is_bf16_supported():
                 raise RuntimeError("GPU_CAPABILITY_MISMATCH:BF16 required for QUALITY")
         elif config().service_kind == "enhancer_engine_builder":
-            import shutil
-            if not shutil.which("trtexec"):
-                raise RuntimeError("TRT_BUILD_FAILED:trtexec not found")
+            import tensorrt as trt
+            if trt.Builder(trt.Logger(trt.Logger.WARNING)) is None:
+                raise RuntimeError("TRT_BUILD_FAILED:TensorRT builder unavailable")
         _READY = True
         _IDLE_SINCE = time.time()
         _event("worker_ready", qualification=_QUALIFICATION, capabilities=_capabilities())
