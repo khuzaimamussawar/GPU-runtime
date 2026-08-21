@@ -11,6 +11,8 @@ on:
         type: choice
         options:
           - smoke
+          - all
+          - remaining
           - base
           - torch
           - vfi-models
@@ -20,7 +22,12 @@ on:
           - flashvsr-models
           - quality
       targets_csv:
-        description: "Optional comma-separated target batch; one Hetzner server builds all targets"
+        description: "Optional comma-separated target batch; supports all/remaining aliases; one Hetzner server builds all targets"
+        required: false
+        default: ""
+        type: string
+      previous_workflow_run_id:
+        description: "Optional failed/partial workflow run id for resume traceability when target=remaining"
         required: false
         default: ""
         type: string
@@ -32,7 +39,7 @@ on:
       server_type:
         description: "Hetzner builder server type"
         required: true
-        default: "cpx42"
+        default: "cpx32"
         type: string
       location:
         description: "Hetzner location"
@@ -112,6 +119,7 @@ jobs:
           SSH_KEY_PATH: ${{ steps.sshkey.outputs.key_path }}
           BUILD_TARGET: ${{ inputs.target }}
           BUILD_TARGETS: ${{ inputs.targets_csv }}
+          PREVIOUS_WORKFLOW_RUN_ID: ${{ inputs.previous_workflow_run_id }}
           IMAGE_TAG: ${{ inputs.image_tag }}
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -129,6 +137,7 @@ jobs:
             "root@${REMOTE_IP}" \
             "BUILD_TARGET='${BUILD_TARGET}' \
              BUILD_TARGETS='${BUILD_TARGETS}' \
+             PREVIOUS_WORKFLOW_RUN_ID='${PREVIOUS_WORKFLOW_RUN_ID}' \
              IMAGE_TAG='${IMAGE_TAG}' \
              DOCKERHUB_USERNAME='${DOCKERHUB_USERNAME}' \
              DOCKERHUB_TOKEN='${DOCKERHUB_TOKEN}' \

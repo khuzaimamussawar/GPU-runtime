@@ -1758,19 +1758,22 @@ Do not move enhancer source into root H3 `src/` or enhancer Dockerfiles into roo
 Conceptual layered DAG:
 
 ```text
-enhancer-smoke
--> enhancer-base (CUDA 13.0.2)
--> enhancer-torch (PyTorch 2.13 cu130, CuPy cuda13x, TRT 10.14.1.48)
-   -> enhancer-vfi-models (RIFE + GIMM)
-   -> enhancer-esrgan-models (4 ESRGAN; ONNX only video TRT targets)
-      -> enhancer-fast
-   -> enhancer-flashvsr-runtime/models
-      -> enhancer-quality
+smoke
+-> base (CUDA 13.0.2)
+-> torch (PyTorch 2.13 cu130, CuPy cuda13x, TRT 10.14.1.48)
+   -> vfi-models (RIFE + GIMM)
+   -> esrgan-models (4 ESRGAN; ONNX only video TRT targets)
+      -> fast        # final Docker image: scenebuilder-enhancer-fast
+   -> flashvsr-runtime
+      -> flashvsr-models
+         -> quality  # final Docker image: scenebuilder-enhancer-quality
 ```
 
 Model/checkpoint layers precede app code. Remove build/package caches. Generated TRT engines are never Docker layers.
 
 H3 root build workflow and `scripts/remote_build.sh` behavior stay untouched. Enhancer has its own Hetzner workflow and `enhancer/scripts/remote_build.sh` with enhancer-only context.
+
+The enhancer workflow defaults to a Hetzner `cpx32` CPU builder. `target=all` expands to every layer in the order above. `target=remaining` is the continuation path after a partial/failed run: pass the same `image_tag` and optional previous workflow run id; the remote script checks Docker Hub for already-pushed layer images and builds only the missing targets.
 
 Docker build != TensorRT build:
 
@@ -2093,7 +2096,7 @@ GH_FH_TOKEN_MM_H3_SERVERLESS
 
 These exact GitHub secret names are the enhancer build contract too. Do not add enhancer-prefixed equivalents.
 
-The current enhancer workflow already reuses:
+The enhancer workflow reuses:
 
 ```text
 HETZNER_TOKEN
@@ -2102,7 +2105,7 @@ DOCKERHUB_TOKEN
 GH_FH_TOKEN_MM_H3_SERVERLESS
 ```
 
-but currently omits `HF_TOKEN`. Before production merge, `.github/workflows/hetzner-enhancer-build.yml` and `enhancer/scripts/remote_build.sh` must pass/use the existing:
+`.github/workflows/hetzner-enhancer-build.yml` and `enhancer/scripts/remote_build.sh` pass/use the existing:
 
 ```text
 HF_TOKEN

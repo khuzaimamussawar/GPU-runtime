@@ -13,6 +13,8 @@ repo_dir="/opt/scenebuilder-gpu-runtime-enhancer"
 context_dir="${repo_dir}/enhancer"
 docker_build_attempts="${DOCKER_BUILD_ATTEMPTS:-2}"
 min_free_disk_gb="${MIN_FREE_DISK_GB:-35}"
+previous_workflow_run_id="${PREVIOUS_WORKFLOW_RUN_ID:-}"
+ALL_TARGETS=(smoke base torch vfi-models esrgan-models fast flashvsr-runtime flashvsr-models quality)
 
 valid_target() {
   case "$1" in
@@ -23,6 +25,43 @@ valid_target() {
 
 image_for_target() {
   echo "${REGISTRY_NAMESPACE}/scenebuilder-enhancer-$1:${IMAGE_TAG}"
+}
+
+image_exists() {
+  local target="$1" image
+  image="$(image_for_target "$target")"
+  docker manifest inspect "$image" >/dev/null 2>&1
+}
+
+append_target() {
+  local target="$1"
+  valid_target "$target" || { echo "Unknown enhancer target: $target" >&2; exit 2; }
+  EXPANDED_TARGETS+=("$target")
+}
+
+append_all_targets() {
+  local target
+  for target in "${ALL_TARGETS[@]}"; do
+    append_target "$target"
+  done
+}
+
+append_remaining_targets() {
+  local target image
+  if [ -n "$previous_workflow_run_id" ]; then
+    echo "Resume requested from previous workflow run id: ${previous_workflow_run_id}"
+  else
+    echo "Resume requested without previous_workflow_run_id; using Docker Hub image presence for ${IMAGE_TAG}."
+  fi
+  for target in "${ALL_TARGETS[@]}"; do
+    image="$(image_for_target "$target")"
+    if image_exists "$target"; then
+      echo "Skipping already-published layer: ${image}"
+    else
+      echo "Remaining layer missing: ${image}"
+      append_target "$target"
+    fi
+  done
 }
 
 dockerfile_for_target() {
@@ -108,9 +147,24 @@ docker buildx create --name enhancerbuilder --use 2>/dev/null || docker buildx u
 
 targets_csv="${BUILD_TARGETS:-}"
 if [ -z "${targets_csv// }" ]; then targets_csv="$BUILD_TARGET"; fi
+EXPANDED_TARGETS=()
 IFS=',' read -ra targets <<< "$targets_csv"
 for raw in "${targets[@]}"; do
   target="$(echo "$raw" | xargs)"
   [ -z "$target" ] && continue
+  case "$target" in
+    all) append_all_targets ;;
+    remaining) append_remaining_targets ;;
+    *) append_target "$target" ;;
+  esac
+done
+
+if [ "${#EXPANDED_TARGETS[@]}" -eq 0 ]; then
+  echo "No enhancer targets to build after expansion."
+  exit 0
+fi
+
+echo "Expanded enhancer targets: ${EXPANDED_TARGETS[*]}"
+for target in "${EXPANDED_TARGETS[@]}"; do
   build_one_target "$target"
 done
