@@ -1,23 +1,38 @@
 name: Hetzner Enhancer Docker Build
-run-name: Build enhancer images ${{ inputs.image_tag || 'latest' }}
+run-name: Build enhancer ${{ inputs.targets_csv != '' && inputs.targets_csv || inputs.target }} on ${{ inputs.server_type }}
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'enhancer/**'
-      - '.github/workflows/hetzner-enhancer-build.yml'
   workflow_dispatch:
     inputs:
+      target:
+        description: "Enhancer Docker layer/image target to build"
+        required: true
+        default: "smoke"
+        type: choice
+        options:
+          - smoke
+          - base
+          - torch
+          - vfi-models
+          - esrgan-models
+          - fast
+          - flashvsr-runtime
+          - flashvsr-models
+          - quality
+      targets_csv:
+        description: "Optional comma-separated target batch; one Hetzner server builds all targets"
+        required: false
+        default: ""
+        type: string
       image_tag:
-        description: "Docker tag"
+        description: "Docker tag to push"
         required: true
         default: "latest"
         type: string
       server_type:
         description: "Hetzner builder server type"
         required: true
-        default: "ccx43"
+        default: "cpx42"
         type: string
       location:
         description: "Hetzner location"
@@ -29,63 +44,121 @@ on:
         required: true
         default: "ubuntu-24.04"
         type: string
+      debug_keep_server_on_failure:
+        description: "Keep failed builder briefly for SSH debugging"
+        required: true
+        default: false
+        type: boolean
+      delete_server_after_success:
+        description: "Delete builder after successful build(s)"
+        required: true
+        default: true
+        type: boolean
+      debug_keep_minutes:
+        description: "Minutes to keep failed builder when debugging"
+        required: true
+        default: "15"
+        type: string
+      docker_build_attempts:
+        description: "Retry count per Docker target"
+        required: true
+        default: "2"
+        type: string
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Build enhancer ${{ matrix.target }}
+    name: Build enhancer ${{ inputs.target }} on temporary Hetzner builder
     runs-on: ubuntu-latest
     timeout-minutes: 720
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [fast, quality]
     env:
-      BUILDER_NAME: enhancer-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
-      SERVER_TYPE: ${{ inputs.server_type || 'ccx43' }}
-      HETZNER_LOCATION: ${{ inputs.location || 'fsn1' }}
-      HETZNER_IMAGE: ${{ inputs.hetzner_image || 'ubuntu-24.04' }}
-      IMAGE_TAG: ${{ inputs.image_tag || 'latest' }}
+      BUILDER_NAME: enhancer-builder-${{ github.run_id }}-${{ github.run_attempt }}
+      SERVER_TYPE: ${{ inputs.server_type }}
+      HETZNER_LOCATION: ${{ inputs.location }}
+      HETZNER_IMAGE: ${{ inputs.hetzner_image }}
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Create temporary SSH key
         id: sshkey
         shell: bash
         run: |
           set -Eeuo pipefail
           mkdir -p .tmp
-          ssh-keygen -t ed25519 -f .tmp/enhancer_builder_key -N "" -C "enhancer-${{ matrix.target }}-${GITHUB_RUN_ID}"
+          ssh-keygen -t ed25519 -f .tmp/enhancer_builder_key -N "" -C "enhancer-${GITHUB_RUN_ID}"
           echo "key_path=${GITHUB_WORKSPACE}/.tmp/enhancer_builder_key" >> "$GITHUB_OUTPUT"
           echo "public_key=$(cat .tmp/enhancer_builder_key.pub)" >> "$GITHUB_OUTPUT"
-      - name: Create temporary Hetzner builder
+
+      - name: Create Hetzner builder
         id: create
         shell: bash
         env:
           HETZNER_TOKEN: ${{ secrets.HETZNER_TOKEN }}
           BUILDER_SSH_PUBLIC_KEY: ${{ steps.sshkey.outputs.public_key }}
         run: bash scripts/hetzner_create.sh
+
       - name: Wait for SSH
         shell: bash
         run: bash scripts/wait_for_ssh.sh "${{ steps.create.outputs.server_ip }}" "${{ steps.sshkey.outputs.key_path }}" 900
-      - name: Build and push enhancer image
+
+      - name: Run remote layered enhancer build
         shell: bash
         env:
           REMOTE_IP: ${{ steps.create.outputs.server_ip }}
           SSH_KEY_PATH: ${{ steps.sshkey.outputs.key_path }}
-          BUILD_TARGET: ${{ matrix.target }}
+          BUILD_TARGET: ${{ inputs.target }}
+          BUILD_TARGETS: ${{ inputs.targets_csv }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
           GH_FH_TOKEN_MM_H3_SERVERLESS: ${{ secrets.GH_FH_TOKEN_MM_H3_SERVERLESS }}
+          DOCKER_BUILD_ATTEMPTS: ${{ inputs.docker_build_attempts }}
         run: |
           set -Eeuo pipefail
-          ssh -i "${SSH_KEY_PATH}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=20 "root@${REMOTE_IP}" \
-            "BUILD_TARGET='${BUILD_TARGET}' IMAGE_TAG='${IMAGE_TAG}' DOCKERHUB_USERNAME='${DOCKERHUB_USERNAME}' DOCKERHUB_TOKEN='${DOCKERHUB_TOKEN}' GH_FH_TOKEN_MM_H3_SERVERLESS='${GH_FH_TOKEN_MM_H3_SERVERLESS}' GITHUB_REPOSITORY='${GITHUB_REPOSITORY}' GITHUB_REF_NAME='${GITHUB_REF_NAME}' bash -s" < enhancer/scripts/remote_build.sh
-      - name: Delete temporary builder
+          ssh -i "${SSH_KEY_PATH}" \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=20 \
+            -o TCPKeepAlive=yes \
+            "root@${REMOTE_IP}" \
+            "BUILD_TARGET='${BUILD_TARGET}' \
+             BUILD_TARGETS='${BUILD_TARGETS}' \
+             IMAGE_TAG='${IMAGE_TAG}' \
+             DOCKERHUB_USERNAME='${DOCKERHUB_USERNAME}' \
+             DOCKERHUB_TOKEN='${DOCKERHUB_TOKEN}' \
+             HF_TOKEN='${HF_TOKEN}' \
+             GH_FH_TOKEN_MM_H3_SERVERLESS='${GH_FH_TOKEN_MM_H3_SERVERLESS}' \
+             DOCKER_BUILD_ATTEMPTS='${DOCKER_BUILD_ATTEMPTS}' \
+             GITHUB_REPOSITORY='${GITHUB_REPOSITORY}' \
+             GITHUB_REF_NAME='${GITHUB_REF_NAME}' \
+             bash -s" < enhancer/scripts/remote_build.sh
+
+      - name: Delete Hetzner builder
         if: always() && steps.create.outputs.server_id != ''
         shell: bash
         env:
           HETZNER_TOKEN: ${{ secrets.HETZNER_TOKEN }}
           SERVER_ID: ${{ steps.create.outputs.server_id }}
-        run: bash scripts/hetzner_delete.sh "${SERVER_ID}" "${{ steps.create.outputs.ssh_key_id }}"
+          KEEP_ON_FAILURE: ${{ inputs.debug_keep_server_on_failure }}
+          KEEP_MINUTES: ${{ inputs.debug_keep_minutes }}
+          DELETE_ON_SUCCESS: ${{ inputs.delete_server_after_success }}
+          BUILD_STATUS: ${{ job.status }}
+        run: |
+          set -Eeuo pipefail
+          if [ "${BUILD_STATUS}" = "success" ] && [ "${DELETE_ON_SUCCESS}" != "true" ]; then
+            echo "Build succeeded; keeping Hetzner builder ${SERVER_ID}. It keeps billing until deleted."
+            echo "Server IP: ${{ steps.create.outputs.server_ip }}"
+            exit 0
+          fi
+          if [ "${BUILD_STATUS}" != "success" ] && [ "${KEEP_ON_FAILURE}" = "true" ]; then
+            echo "Build failed; keeping builder ${SERVER_ID} for ${KEEP_MINUTES} minute(s)."
+            echo "SSH: ssh -i .tmp/enhancer_builder_key root@${{ steps.create.outputs.server_ip }}"
+            sleep "$((KEEP_MINUTES * 60))"
+          fi
+          bash scripts/hetzner_delete.sh "${SERVER_ID}" "${{ steps.create.outputs.ssh_key_id }}"
