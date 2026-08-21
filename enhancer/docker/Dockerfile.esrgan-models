@@ -13,19 +13,31 @@ RUN set -eux; \
     git clone https://github.com/xinntao/Real-ESRGAN.git /opt/Real-ESRGAN; \
     cd /opt/Real-ESRGAN; \
     git checkout "${REALESRGAN_COMMIT}"; \
-    python3 -m pip install basicsr>=1.4.2 facexlib>=0.2.5 gfpgan>=1.3.5 tqdm; \
+    python3 -m pip install 'basicsr>=1.4.2' 'facexlib>=0.2.5' 'gfpgan>=1.3.5' tqdm; \
     python3 -m pip install --no-deps -e /opt/Real-ESRGAN; \
     python3 - <<'PY'
 from pathlib import Path
-import basicsr
-root = Path(basicsr.__file__).resolve().parent
-path = root / 'data' / 'degradations.py'
-if path.is_file():
+import site
+
+paths = []
+paths.extend(Path(item) for item in site.getsitepackages())
+user_site = site.getusersitepackages()
+if user_site:
+    paths.append(Path(user_site))
+for root in paths:
+    path = root / 'basicsr' / 'data' / 'degradations.py'
+    if not path.is_file():
+        continue
     text = path.read_text()
-    text = text.replace('from torchvision.transforms.functional_tensor import rgb_to_grayscale',
-                        'from torchvision.transforms.functional import rgb_to_grayscale')
-    path.write_text(text)
-print('patched', path)
+    old = 'from torchvision.transforms.functional_tensor import rgb_to_grayscale'
+    new = 'from torchvision.transforms.functional import rgb_to_grayscale'
+    if old not in text:
+        raise SystemExit(f'basicsr patch anchor missing: {path}')
+    path.write_text(text.replace(old, new))
+    print('patched', path)
+    break
+else:
+    raise SystemExit('basicsr degradations.py not found')
 PY
 
 RUN set -eux; \
