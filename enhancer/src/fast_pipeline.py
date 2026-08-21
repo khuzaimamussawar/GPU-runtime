@@ -44,40 +44,52 @@ def _target_long_side(target: str) -> int:
     raise ValueError(f"Unsupported image target: {target}")
 
 
-def run_image_upscale(job: dict[str, Any], cancel_event, progress: Progress) -> dict[str, Any]:
-    source = str((job.get("input") or {}).get("url") or "").strip()
-    output_key = str((job.get("output") or {}).get("objectKey") or "").strip()
+def _resolve_image_model(job: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     settings = job.get("settings") or {}
-    if not source.startswith(("http://", "https://")):
-        raise ValueError("image_upscale input.url must be HTTP(S)")
-    if not output_key:
-        raise ValueError("output.objectKey is required")
     requested = str(job.get("modelFamily") or settings.get("upscalerModel") or "realesrgan-real")
     model_name = IMAGE_MODELS.get(requested)
     if not model_name:
         raise ValueError(f"Unsupported Storyboard FAST image model: {requested}")
+    return model_name, settings
 
+
+def _upscale_one(source: str, output_key: str, model_name: str, settings: dict[str, Any], root: Path) -> dict[str, Any]:
+    if not source.startswith(("http://", "https://")):
+        raise ValueError("image_upscale input.url must be HTTP(S)")
+    if not output_key:
+        raise ValueError("output.objectKey is required")
+    input_path = root / f"{abs(hash(source))}.input"
+    final = root / f"{abs(hash(output_key))}.png"
+    _download(source, input_path)
+    frame = cv2.imread(str(input_path), cv2.IMREAD_COLOR)
+    if frame is None:
+        raise RuntimeError("FFMPEG_DECODE_FAILED:image decode")
+    target = _target_long_side(settings.get("targetResolution") or "2k")
+    h, w = frame.shape[:2]
+    scale = min(4.0, max(1.0, target / max(w, h)))
+    enhanced = frame if scale <= 1.0 else upscale_bgr(frame, model_name, outscale=scale)
+    h2, w2 = enhanced.shape[:2]
+    if max(w2, h2) > target:
+        ratio = target / max(w2, h2)
+        enhanced = cv2.resize(enhanced, (max(1, round(w2 * ratio)), max(1, round(h2 * ratio))), interpolation=cv2.INTER_LANCZOS4)
+    if not cv2.imwrite(str(final), enhanced, [cv2.IMWRITE_PNG_COMPRESSION, 3]):
+        raise RuntimeError("IMAGE_ENCODE_FAILED")
+    stored = upload_file(final, output_key, "image/png")
+    return {**stored, "width": int(enhanced.shape[1]), "height": int(enhanced.shape[0])}
+
+
+def run_image_upscale(job: dict[str, Any], cancel_event, progress: Progress) -> dict[str, Any]:
+    source = str((job.get("input") or {}).get("url") or "").strip()
+    output_key = str((job.get("output") or {}).get("objectKey") or "").strip()
+    model_name, settings = _resolve_image_model(job)
     with tempfile.TemporaryDirectory(prefix="sb-enhancer-image-") as tmp:
-        root = Path(tmp); input_path = root / "input"; final = root / "final.png"
-        progress("downloading", 5, None); _download(source, input_path)
-        if cancel_event.is_set(): raise RuntimeError("CANCELLED")
-        frame = cv2.imread(str(input_path), cv2.IMREAD_COLOR)
-        if frame is None:
-            raise RuntimeError("FFMPEG_DECODE_FAILED:image decode")
-        target = _target_long_side(settings.get("targetResolution") or "2k")
-        h, w = frame.shape[:2]
-        scale = min(4.0, max(1.0, target / max(w, h)))
+        root = Path(tmp)
+        progress("downloading", 5, None)
         progress("upscaling", 20, {"model": model_name, "precision": "fp16", "tile": 0})
-        enhanced = frame if scale <= 1.0 else upscale_bgr(frame, model_name, outscale=scale)
-        if cancel_event.is_set(): raise RuntimeError("CANCELLED")
-        h2, w2 = enhanced.shape[:2]
-        if max(w2, h2) > target:
-            ratio = target / max(w2, h2)
-            enhanced = cv2.resize(enhanced, (max(1, round(w2 * ratio)), max(1, round(h2 * ratio))), interpolation=cv2.INTER_LANCZOS4)
-        if not cv2.imwrite(str(final), enhanced, [cv2.IMWRITE_PNG_COMPRESSION, 3]):
-            raise RuntimeError("IMAGE_ENCODE_FAILED")
+        stored = _upscale_one(source, output_key, model_name, settings, root)
+        if cancel_event.is_set():
+            raise RuntimeError("CANCELLED")
         progress("uploading", 90, None)
-        stored = upload_file(final, output_key, "image/png")
         progress("completed", 100, None)
         return {
             **stored,
@@ -85,9 +97,36 @@ def run_image_upscale(job: dict[str, Any], cancel_event, progress: Progress) -> 
             "modelFamily": model_name,
             "precision": "fp16",
             "targetResolution": settings.get("targetResolution") or "2k",
-            "width": int(enhanced.shape[1]),
-            "height": int(enhanced.shape[0]),
         }
 
 
-__all__ = ["run_image_upscale", "run_fast_video"]
+def run_image_upscale_batch(job: dict[str, Any], cancel_event, progress: Progress) -> dict[str, Any]:
+    model_name, settings = _resolve_image_model(job)
+    images = (job.get("input") or {}).get("images") or []
+    if not isinstance(images, list) or not images:
+        raise ValueError("image_upscale_batch input.images is required")
+    with tempfile.TemporaryDirectory(prefix="sb-enhancer-image-batch-") as tmp:
+        root = Path(tmp)
+        outputs = []
+        total = len(images)
+        for index, item in enumerate(images):
+            if cancel_event.is_set():
+                raise RuntimeError("CANCELLED")
+            source = str(item.get("url") or "").strip()
+            output_key = str(item.get("objectKey") or "").strip()
+            pct = 5 + (index / max(1, total)) * 85
+            progress("upscaling", pct, {"model": model_name, "precision": "fp16", "tile": 0, "index": index + 1, "total": total})
+            stored = _upscale_one(source, output_key, model_name, settings, root)
+            outputs.append({**stored, "sceneId": item.get("sceneId"), "index": index})
+        progress("completed", 100, {"count": len(outputs)})
+        return {
+            "runtime": "scenebuilder-enhancer-fast",
+            "modelFamily": model_name,
+            "precision": "fp16",
+            "targetResolution": settings.get("targetResolution") or "2k",
+            "items": outputs,
+            "count": len(outputs),
+        }
+
+
+__all__ = ["run_image_upscale", "run_image_upscale_batch", "run_fast_video"]

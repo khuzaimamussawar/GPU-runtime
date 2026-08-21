@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 from .callbacks import post_event
 from .config import RuntimeConfig
 from .engine_builder import run_engine_build
-from .fast_pipeline import run_fast_video, run_image_upscale
+from .fast_pipeline import run_fast_video, run_image_upscale, run_image_upscale_batch
 from .gpu import qualify_gpu, telemetry
 from .quality_pipeline import run_video_upscale as run_quality_video
 
@@ -124,6 +124,10 @@ def _run_job(record: JobRecord) -> None:
             if config().service_kind != "enhancer_fast":
                 raise RuntimeError("MODEL_LOAD_FAILED:image_upscale requires FAST runtime")
             result = run_image_upscale(record.payload, record.cancel_event, progress)
+        elif job_type == "image_upscale_batch":
+            if config().service_kind != "enhancer_fast":
+                raise RuntimeError("MODEL_LOAD_FAILED:image_upscale_batch requires FAST runtime")
+            result = run_image_upscale_batch(record.payload, record.cancel_event, progress)
         elif job_type == "video_upscale":
             result = run_quality_video(record.payload, record.cancel_event, progress) if config().service_kind == "enhancer_quality" else run_fast_video(record.payload, record.cancel_event, progress)
         elif job_type == "engine_build":
