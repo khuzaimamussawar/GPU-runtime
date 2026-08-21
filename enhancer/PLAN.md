@@ -228,7 +228,7 @@ Ada:    RTX 4090, L4, L40/L40S 48GB, RTX 6000 Ada 48GB
 Blackwell <=48GB: RTX 5090 and qualified workstation variants
 ```
 
-Exclude A100/A800/H100/H200/B200 and other high-cost product-outlier classes even if technically usable.
+Exclude all MIG/partitioned GPU products. Also exclude A100/A800/H100/H200/B200 and other high-cost product-outlier classes even if technically usable.
 
 QUALITY/FlashVSR starts at an approved RTX-4090-class floor or validated equal/higher allowed GPU.
 
@@ -1925,7 +1925,7 @@ SLOW-MO
   non-baked upscale active -> original Director speed remains
 ```
 
-**No FILM. No Storyboard image ESRGAN TensorRT. No FlashVSR TensorRT. No GIMM TensorRT. No FP8 V1. No neural CPU fallback. No recursive re-upscale from `upscaledVideoUrl`.**
+**No FILM. No Storyboard image ESRGAN TensorRT. No FlashVSR TensorRT. No GIMM TensorRT. No FP8 V1. No neural CPU fallback. No recursive re-upscale from `upscaledVideoUrl`. No MIG/partitioned GPUs.**
 
 ---
 
@@ -2254,15 +2254,15 @@ L40S           48 GB
 **Blackwell / sm120:**
 
 ```text
-RTX PRO 4000 / RTX PRO 4000 Blackwell                  24 GB
-PRO 6000 MIG 24GB / RTX PRO 6000 Blackwell MIG 24 GB  24 GB
-RTX 5090                                                32 GB
-RTX PRO 4500 / RTX PRO 4500 Blackwell                  32 GB
-RTX PRO 4500 SE / RTX PRO 4500 Blackwell Server Ed.    32 GB
-PRO 6000 MIG 48GB / RTX PRO 6000 Blackwell MIG 48 GB  48 GB
+RTX PRO 4000 / RTX PRO 4000 Blackwell               24 GB
+RTX 5090                                             32 GB
+RTX PRO 4500 / RTX PRO 4500 Blackwell               32 GB
+RTX PRO 4500 SE / RTX PRO 4500 Blackwell Server Ed. 32 GB
 ```
 
 The provider-facing matcher must tolerate RunPod display-name variations while normalizing to one canonical internal SKU/family.
+
+**MIG/partitioned GPUs are always excluded**, even when their reported VRAM is <=48 GB or their underlying GPU family is otherwise supported. Provider inventory entries containing `MIG`, or otherwise reported as partitioned/sliced instances, are rejected before scheduling.
 
 Do not include GPUs above the global 48 GB cap. In particular, screenshots may expose A100/H100 and other 80+ GB products; they remain ineligible for enhancer V1 even if technically compatible.
 
@@ -2292,8 +2292,8 @@ Therefore the routing matrix is:
 |---|---|---|---|
 | 16 GB | RTX 2000 Ada | RTX A4000 | — |
 | 20 GB | RTX 4000 Ada | RTX A4500 | — |
-| 24 GB | L4, RTX 4090 | RTX A5000, RTX 3090 | RTX PRO 4000, PRO 6000 MIG 24GB* |
-| 48 GB | L40, RTX 6000 Ada, L40S | A40, RTX A6000 | PRO 6000 MIG 48GB* |
+| 24 GB | L4, RTX 4090 | RTX A5000, RTX 3090 | RTX PRO 4000 |
+| 48 GB | L40, RTX 6000 Ada, L40S | A40, RTX A6000 | — |
 | 32 GB | — | — | RTX 5090, RTX PRO 4500, RTX PRO 4500 SE |
 
 `48 GB -> 32 GB` is deliberate and must not be “corrected” to numeric ascending order.
@@ -2362,11 +2362,9 @@ Ada (sm89)
 
 Blackwell (sm120)
   RTX PRO 4000
-  PRO 6000 MIG 24GB*
   RTX 5090
   RTX PRO 4500
   RTX PRO 4500 SE
-  PRO 6000 MIG 48GB*
 ```
 
 The control plane first applies the engine-build job's minimum safe VRAM/profile requirement, then chooses an available SKU **inside that family only**. For example, if a future 2160 RIFE builder profile is qualified only at >=24 GB, the scheduler must skip 16/20 GB members of the selected family rather than trying them first.
@@ -2388,37 +2386,47 @@ Provider = Auto
 
 Never satisfy `Ada (sm89)` with an Ampere or Blackwell builder just because it is available. Same rule for the other families.
 
-For `Exact GPU`, no family substitute is allowed: provision that exact SKU or leave the build queued/fail according to admin policy.
+For `Exact GPU`, no family substitute is allowed: provision that exact **full physical non-MIG SKU** or leave the build queued/fail according to admin policy. An exact MIG/partitioned SKU request is rejected as out of policy.
 
 ### 36.5 AMPERE_PLUS builder host
 
-The portable `AMPERE_PLUS` TensorRT set should be generated on an approved **Ampere sm86 RunPod GPU** by default, using the intended TensorRT hardware-compatibility flags, then validated on representative Ada and Blackwell hosts before activation.
+The portable `AMPERE_PLUS` TensorRT set should be generated on an approved **Ampere sm86 RunPod full GPU** by default, using the intended TensorRT hardware-compatibility flags, then validated on representative Ada and Blackwell full GPUs before activation.
 
 The default builder may move among the approved Ampere RunPod SKUs according to minimum build VRAM and availability. Do not require a separate engine artifact per Ampere SKU for the portable set.
 
-### 36.6 Blackwell MIG caveat
+### 36.6 MIG / partitioned GPU hard exclusion
 
-RunPod's `PRO 6000 MIG 24GB` and `PRO 6000 MIG 48GB` are Blackwell / sm120 compute candidates, but MIG media-engine exposure is profile-dependent. They are therefore marked conditional (`*`).
+MIG and other provider-partitioned GPU slices are **not part of the enhancer fleet at all**.
 
-Rules:
+This exclusion applies to every enhancer operation:
 
 ```text
-CUDA/TRT engine build/validation
-  -> allowed after normal boot qualification and sufficient VRAM
-
-normal video enhancement
-  -> require actual NVDEC/NVENC capability smoke before advertising hardware encode/decode
-
-no NVENC exposed
-  -> do not pretend NVENC exists; CPU x265 may remain an allowed codec fallback, but this SKU is not preferred for normal video jobs
-
-benchmarking
-  -> do not use a MIG slice as the canonical full-GPU family performance baseline
+Storyboard image upscale
+Director video upscale
+RIFE
+GIMM-F
+FlashVSR
+TensorRT engine build
+TensorRT engine validation
+TensorRT benchmark
+Exact GPU admin dispatch
+manual/admin pod dispatch
 ```
+
+Examples explicitly excluded from current RunPod inventory include:
+
+```text
+PRO 6000 MIG 24GB
+PRO 6000 MIG 48GB
+```
+
+The provider matcher must reject a candidate when any authoritative provider/runtime signal indicates MIG or partitioning. Do not rely only on display-name matching when provider metadata exposes partition/full-GPU state.
+
+No MIG fallback is permitted when a full GPU of the requested family is unavailable. Continue to the next approved full-GPU candidate/provider while preserving forced provider/family semantics; otherwise queue/fail with capacity-policy status.
 
 ### 36.7 D1/admin representation
 
-The canonical allowlists are code-reviewed policy, while `enhancer_config.gpu_policy_json` stores approved enable/disable/order overrides and operational tuning. Admin UI may reorder or disable known allowed SKUs but may not authorize an unknown/out-of-policy GPU directly from the browser.
+The canonical allowlists are code-reviewed policy, while `enhancer_config.gpu_policy_json` stores approved enable/disable/order overrides and operational tuning. Admin UI may reorder or disable known allowed SKUs but may not authorize an unknown/out-of-policy GPU or any MIG/partitioned GPU directly from the browser.
 
 Persist actual routing decisions in enhancer operational state:
 
@@ -2442,6 +2450,7 @@ The admin panel must display both the requested family/SKU and the actual provis
 Being on this list makes a GPU **schedulable candidate**, not automatically production-qualified. Each SKU still needs the relevant boot/release checks:
 
 ```text
+full physical GPU / non-MIG verification
 CUDA 13.0 compatibility
 correct compute capability
 physical VRAM check
