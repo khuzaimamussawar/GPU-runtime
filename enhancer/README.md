@@ -9,15 +9,25 @@ Both expose the same Pod API: public `/health`, `/ready`, `/capabilities`, and b
 
 ## Hetzner Docker build aliases
 
-The enhancer workflow builds two final runtime images, but does so through reusable parent layers:
+The enhancer workflow builds two separate final runtime images through a shared base and two branches:
 
 ```text
-smoke -> base -> torch -> vfi-models -> esrgan-models -> fast
-                         -> flashvsr-runtime -> flashvsr-models -> quality
+smoke
+-> base
+   -> torch
+      -> vfi-models
+         -> FAST branch: esrgan-models -> fast
+         -> QUALITY branch: flashvsr-runtime -> flashvsr-models -> quality
 ```
 
 Use `.github/workflows/hetzner-enhancer-build.yml` on `cpx32` by default.
 
+- `target=fast` expands to `smoke,base,torch,vfi-models,esrgan-models,fast`.
+- `target=quality` expands to `smoke,base,torch,vfi-models,flashvsr-runtime,flashvsr-models,quality`.
 - `target=all` expands to `smoke,base,torch,vfi-models,esrgan-models,fast,flashvsr-runtime,flashvsr-models,quality`.
 - `target=remaining` checks Docker Hub for already-pushed `scenebuilder-enhancer-<target>:<image_tag>` images and builds only missing layers. Pass `previous_workflow_run_id` for traceability to the failed/partial run you are continuing.
-- `targets_csv` still accepts explicit comma-separated targets and can include `all` or `remaining`.
+- `targets_csv` still accepts explicit comma-separated targets and can include `all`, `remaining`, `fast`, or `quality`. Duplicated shared layers are skipped inside a single run.
+
+Docker builds do not create TensorRT `.engine` files. FAST carries the engine-builder runtime path for video-only ESRGAN/RIFE jobs; generated engines are built later on compatible NVIDIA GPU pods and stored in private R2/D1. QUALITY is a separate runtime image and may consume compatible active RIFE engines, but it is not the engine-builder image.
+
+Current implementation note: `engine_builder.py` looks for trusted ONNX files for `realesr-animevideov3`, `realesr-general-x4v3`, and `rife-4.9`, but the Dockerfiles do not yet create/bake those ONNX artifacts. Missing ONNX must fail the engine-builder job; it must not create dummy engines.

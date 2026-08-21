@@ -1518,7 +1518,6 @@ Runtime/provider controls:
 
 ```text
 Idle timeout seconds
-Priority
 Provider Auto | RunPod | Novita
 GPU Auto | sm86 | sm89 | sm120 | Exact GPU
 Execution Sequential | Parallel
@@ -1760,31 +1759,54 @@ Conceptual layered DAG:
 ```text
 smoke
 -> base (CUDA 13.0.2)
--> torch (PyTorch 2.13 cu130, CuPy cuda13x, TRT 10.14.1.48)
-   -> vfi-models (RIFE + GIMM)
-   -> esrgan-models (4 ESRGAN; ONNX only video TRT targets)
-      -> fast        # final Docker image: scenebuilder-enhancer-fast
-   -> flashvsr-runtime
-      -> flashvsr-models
-         -> quality  # final Docker image: scenebuilder-enhancer-quality
+   -> torch (PyTorch 2.13 cu130, CuPy cuda13x, TRT 10.14.1.48)
+      -> vfi-models (RIFE + GIMM)
+         -> FAST branch
+            -> esrgan-models (image ESRGAN checkpoints + video ESRGAN checkpoint/export source)
+               -> fast        # final Docker image: scenebuilder-enhancer-fast
+         -> QUALITY branch
+            -> flashvsr-runtime
+               -> flashvsr-models
+                  -> quality  # final Docker image: scenebuilder-enhancer-quality
 ```
 
-Model/checkpoint layers precede app code. Remove build/package caches. Generated TRT engines are never Docker layers.
+FAST and QUALITY are siblings after the shared base/VFI layers; `fast` is not a parent of `quality`. Model/checkpoint/export-source layers precede app code. Remove build/package caches. Generated TRT engines are never Docker layers.
 
 H3 root build workflow and `scripts/remote_build.sh` behavior stay untouched. Enhancer has its own Hetzner workflow and `enhancer/scripts/remote_build.sh` with enhancer-only context.
 
-The enhancer workflow defaults to a Hetzner `cpx32` CPU builder. `target=all` expands to every layer in the order above. `target=remaining` is the continuation path after a partial/failed run: pass the same `image_tag` and optional previous workflow run id; the remote script checks Docker Hub for already-pushed layer images and builds only the missing targets.
+The enhancer workflow defaults to a Hetzner `cpx32` CPU builder. Branch aliases expand before build:
+
+```text
+target=fast    -> smoke,base,torch,vfi-models,esrgan-models,fast
+target=quality -> smoke,base,torch,vfi-models,flashvsr-runtime,flashvsr-models,quality
+```
+
+`target=all` expands to the shared layers, then the FAST branch, then the QUALITY branch:
+
+```text
+smoke,base,torch,vfi-models,esrgan-models,fast,flashvsr-runtime,flashvsr-models,quality
+```
+
+`target=remaining` is the continuation path after a partial/failed run: pass the same `image_tag` and optional previous workflow run id; the remote script checks Docker Hub for already-pushed layer images and builds only the missing targets.
 
 Docker build != TensorRT build:
 
 ```text
-Docker -> CPU/Hetzner builder -> runtime/model/ONNX image
-TRT    -> compatible NVIDIA GPU pod -> engine -> private R2 + D1
+Docker -> CPU/Hetzner builder -> shared base + FAST/QUALITY runtime/model/export-source images
+TRT    -> compatible NVIDIA GPU FAST engine-builder pod -> .engine -> private R2 + D1
 ```
+
+FAST is the only engine-builder image. It generates the 15-engine set per selected compatibility target for the exact approved TRT scope: `realesr-animevideov3`, `realesr-general-x4v3`, and `RIFE 4.9`. QUALITY may consume compatible active RIFE engines at runtime, but it does not build engines. Neither image creates TensorRT for Storyboard image ESRGAN, FlashVSR, GIMM or FILM.
 
 Use BuildKit secrets for private model/HF downloads. Runtime credentials are injected only at pod creation. Publish immutable git-SHA image tag/digest; aliases may exist but jobs record exact runtime digest.
 
 Docker success is not GPU qualification. sm86/sm89/sm120/AMPERE_PLUS smoke tests are separate release gates.
+
+Current implementation checkpoint:
+
+- `engine_builder.py` requires `trtexec`; the Docker layer must install/prove that CLI, not only Python `tensorrt` import.
+- The current Dockerfiles fetch checkpoints/source but do not yet create or bake the trusted ONNX artifacts consumed by `engine_builder.py`.
+- The engine-builder jobs must resolve trusted ONNX/export outputs for the two video ESRGAN models and RIFE 4.9 before production activation. If an ONNX path is missing, the job must fail with `ONNX_NOT_FOUND`; it must not generate a dummy engine.
 
 ---
 

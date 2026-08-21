@@ -14,7 +14,10 @@ context_dir="${repo_dir}/enhancer"
 docker_build_attempts="${DOCKER_BUILD_ATTEMPTS:-2}"
 min_free_disk_gb="${MIN_FREE_DISK_GB:-35}"
 previous_workflow_run_id="${PREVIOUS_WORKFLOW_RUN_ID:-}"
-ALL_TARGETS=(smoke base torch vfi-models esrgan-models fast flashvsr-runtime flashvsr-models quality)
+COMMON_TARGETS=(smoke base torch vfi-models)
+FAST_TARGETS=(esrgan-models fast)
+QUALITY_TARGETS=(flashvsr-runtime flashvsr-models quality)
+ALL_TARGETS=("${COMMON_TARGETS[@]}" "${FAST_TARGETS[@]}" "${QUALITY_TARGETS[@]}")
 
 valid_target() {
   case "$1" in
@@ -36,15 +39,23 @@ image_exists() {
 append_target() {
   local target="$1"
   valid_target "$target" || { echo "Unknown enhancer target: $target" >&2; exit 2; }
+  local existing
+  for existing in "${EXPANDED_TARGETS[@]}"; do
+    [ "$existing" = "$target" ] && return
+  done
   EXPANDED_TARGETS+=("$target")
 }
 
-append_all_targets() {
+append_targets() {
   local target
-  for target in "${ALL_TARGETS[@]}"; do
+  for target in "$@"; do
     append_target "$target"
   done
 }
+
+append_all_targets() { append_targets "${ALL_TARGETS[@]}"; }
+append_fast_targets() { append_targets "${COMMON_TARGETS[@]}" "${FAST_TARGETS[@]}"; }
+append_quality_targets() { append_targets "${COMMON_TARGETS[@]}" "${QUALITY_TARGETS[@]}"; }
 
 append_remaining_targets() {
   local target image
@@ -155,6 +166,8 @@ for raw in "${targets[@]}"; do
   case "$target" in
     all) append_all_targets ;;
     remaining) append_remaining_targets ;;
+    fast) append_fast_targets ;;
+    quality) append_quality_targets ;;
     *) append_target "$target" ;;
   esac
 done

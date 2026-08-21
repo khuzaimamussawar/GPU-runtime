@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: "Enhancer Docker layer/image target to build"
+        description: "Enhancer Docker branch alias or layer target to build"
         required: true
         default: "smoke"
         type: choice
@@ -22,7 +22,7 @@ on:
           - flashvsr-models
           - quality
       targets_csv:
-        description: "Optional comma-separated target batch; supports all/remaining aliases; one Hetzner server builds all targets"
+        description: "Optional comma-separated batch; supports all/remaining/fast/quality aliases; one Hetzner server builds all targets"
         required: false
         default: ""
         type: string
