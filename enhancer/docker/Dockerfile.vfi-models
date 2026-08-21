@@ -1,0 +1,38 @@
+# syntax=docker/dockerfile:1.7
+ARG REGISTRY_NAMESPACE
+ARG IMAGE_TAG=latest
+FROM ${REGISTRY_NAMESPACE}/scenebuilder-enhancer-torch:${IMAGE_TAG}
+
+ARG RIFE_COMMIT=17d8c7a1005b37f4c97bfee04e316aaec7fdc536
+ARG GIMM_COMMIT=dbc56449994a3c2e045d46fd46bed570239913f8
+
+LABEL org.opencontainers.image.title="scenebuilder-enhancer-vfi-models"
+LABEL scene_builder.layer="enhancer-vfi-models"
+LABEL scene_builder.rife.commit="${RIFE_COMMIT}"
+LABEL scene_builder.gimm.commit="${GIMM_COMMIT}"
+
+RUN set -eux; \
+    git clone https://github.com/hzwer/Practical-RIFE.git /opt/Practical-RIFE; \
+    cd /opt/Practical-RIFE; \
+    git checkout "${RIFE_COMMIT}"; \
+    git clone https://github.com/GSeanCDAT/GIMM-VFI.git /opt/GIMM-VFI; \
+    cd /opt/GIMM-VFI; \
+    git checkout "${GIMM_COMMIT}"; \
+    python3 -m pip install \
+      scikit-video moviepy omegaconf easydict scikit-image scikit-learn tqdm natsort \
+      msgpack msgpack-numpy simplejpeg ftfy lmdb datadings; \
+    python3 -m compileall -q /opt/Practical-RIFE /opt/GIMM-VFI
+
+COPY scripts/download_model_assets.py /opt/scenebuilder-enhancer-build/download_model_assets.py
+RUN --mount=type=secret,id=hf_token,required=false set -eux; \
+    export HF_TOKEN="$(cat /run/secrets/hf_token 2>/dev/null || true)"; \
+    python3 /opt/scenebuilder-enhancer-build/download_model_assets.py vfi --root /opt/scenebuilder-models; \
+    test -s /opt/scenebuilder-models/rife-4.9/flownet.pkl; \
+    test -d /opt/scenebuilder-models/gimm-vfi
+
+ENV RIFE_ROOT=/opt/Practical-RIFE \
+    RIFE_MODEL_DIR=/opt/scenebuilder-models/rife-4.9 \
+    GIMM_ROOT=/opt/GIMM-VFI \
+    GIMM_MODEL_DIR=/opt/scenebuilder-models/gimm-vfi
+
+CMD ["python3", "-c", "from pathlib import Path; assert Path('/opt/scenebuilder-models/rife-4.9/flownet.pkl').is_file(); print('VFI assets ready')"]
