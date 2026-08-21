@@ -31,7 +31,7 @@ import cupy
 import tensorrt
 assert torch.__version__.split('+')[0] == '2.13.0', torch.__version__
 assert str(torch.version.cuda).startswith('13.0'), torch.version.cuda
-assert tensorrt.__version__ == '10.14.1.48', tensorrt.__version__
+assert tensorrt.__version__ in {'10.14.1.48', '10.14.1.48.post1'}, tensorrt.__version__
 print('torch', torch.__version__)
 print('torch.cuda', torch.version.cuda)
 print('cupy', cupy.__version__)

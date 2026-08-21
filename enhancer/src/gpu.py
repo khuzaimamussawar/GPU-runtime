@@ -11,6 +11,7 @@ from typing import Any
 EXPECTED_CUDA_PREFIX = "13.0"
 EXPECTED_TORCH = "2.13.0"
 EXPECTED_TRT = "10.14.1.48"
+EXPECTED_TRT_PYTHON_VERSIONS = {EXPECTED_TRT, f"{EXPECTED_TRT}.post1"}
 
 
 def _cmd(args: list[str], timeout: int = 20) -> str:
@@ -67,7 +68,7 @@ def qualify_gpu(*, require_nvenc: bool = True) -> dict[str, Any]:
         raise RuntimeError(f"PYTORCH_VERSION_MISMATCH:{torch.__version__}")
     if not str(torch.version.cuda or "").startswith(EXPECTED_CUDA_PREFIX):
         raise RuntimeError(f"PYTORCH_CUDA_MISMATCH:{torch.version.cuda}")
-    if trt.__version__ != EXPECTED_TRT:
+    if trt.__version__ not in EXPECTED_TRT_PYTHON_VERSIONS:
         raise RuntimeError(f"TENSORRT_VERSION_MISMATCH:{trt.__version__}")
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA_UNAVAILABLE")
