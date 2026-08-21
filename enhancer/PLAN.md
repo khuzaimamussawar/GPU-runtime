@@ -2744,6 +2744,11 @@ Video / Image track
   selection    -> Deselect All / Generate Selected / Upscale Selected
   same selectedUnitIds for both operations
 
+Per-clip primary action:
+  Video controls + Generate enabled intent  -> Generate / Regenerate
+  Upscale controls + upscale enabled intent -> Upscale / Re-upscale
+  Upscale controls + upscale disabled       -> leave existing Generate / Regenerate behavior
+
 existing bulk dialog shell
   Generate -> Remaining / All
   Upscale  -> Remaining / Re-upscale All
