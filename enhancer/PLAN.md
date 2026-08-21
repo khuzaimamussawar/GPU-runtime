@@ -1926,3 +1926,286 @@ SLOW-MO
 ```
 
 **No FILM. No Storyboard image ESRGAN TensorRT. No FlashVSR TensorRT. No GIMM TensorRT. No FP8 V1. No neural CPU fallback. No recursive re-upscale from `upscaledVideoUrl`.**
+
+---
+
+## 35. Shared H3 variables/secrets are a hard compatibility contract
+
+This section **supersedes any earlier enhancer wording that proposes `ENHANCER_*` copies of credentials/configuration already used by H3 for the same purpose.** The enhancer must reuse the existing H3/SceneBuilder names exactly wherever the semantic purpose is the same. Do not create a second set of secrets merely because the workload is called enhancer.
+
+### 35.1 Audited existing Worker/control-plane names
+
+SceneBuilder's current H3 pod control plane already resolves and/or uses these names:
+
+```text
+R2_PUBLIC_URL
+R2_ENDPOINT
+R2_BUCKET_NAME
+R2_REGION
+
+H3_POD_R2_ACCESS_KEY
+H3_POD_R2_SECRET_KEY
+H3_POD_AUTH_MASTER_SECRET
+
+RUNPOD_API_KEY
+NOVITA_API_KEY
+
+WORKER_ORIGIN
+ALLOWED_EMAILS
+```
+
+The existing H3 R2 resolver also recognizes these already-established H3-prefixed overrides when present:
+
+```text
+H3_POD_R2_BUCKET_NAME
+H3_POD_R2_ENDPOINT
+H3_POD_R2_REGION
+```
+
+and resolves credentials as the current H3 implementation does, including the existing shared `R2_*` fallback names where applicable. Enhancer control-plane code must call/reproduce this same resolution contract rather than inventing enhancer-specific R2 variables.
+
+There is **no new `R2_ENDPOINT_ID` variable**. The existing endpoint configuration name is exactly:
+
+```text
+R2_ENDPOINT
+```
+
+### 35.2 Pod runtime env names are reused exactly
+
+The H3 control plane currently injects these generic/shared runtime names into a provisioned pod:
+
+```text
+R2_BUCKET_NAME
+R2_ENDPOINT
+R2_ACCESS_KEY
+R2_SECRET_KEY
+R2_REGION
+R2_PUBLIC_URL
+
+SCENEBUILDER_POD_TOKEN
+SCENEBUILDER_WORKER_ID
+SCENEBUILDER_CONTROL_URL
+
+H3_POD_IDLE_TIMEOUT_SECONDS
+H3_POD_PORT
+```
+
+Enhancer FAST/QUALITY pods must read the **same names** for the same concepts. Do not add:
+
+```text
+ENHANCER_R2_BUCKET_NAME
+ENHANCER_R2_ENDPOINT
+ENHANCER_R2_ACCESS_KEY
+ENHANCER_R2_SECRET_KEY
+ENHANCER_R2_PUBLIC_URL
+ENHANCER_POD_TOKEN
+ENHANCER_WORKER_ID
+ENHANCER_CONTROL_URL
+ENHANCER_POD_IDLE_TIMEOUT_SECONDS
+ENHANCER_POD_PORT
+```
+
+The enhancer Docker image is already a different runtime image, so it knows that `SCENEBUILDER_CONTROL_URL` should be combined with the enhancer callback/API path. No extra service-kind secret is required just to rename the same control-plane origin/token concepts.
+
+### 35.3 One auth master secret, domain-separated derived tokens
+
+Use exactly the existing Worker secret:
+
+```text
+H3_POD_AUTH_MASTER_SECRET
+```
+
+for both H3 and enhancer pod-token derivation. **Do not create or read `ENHANCER_POD_AUTH_MASTER_SECRET`.**
+
+Cross-service token confusion is prevented by derivation-domain separation, not by duplicating master secrets:
+
+```text
+H3 derived token      -> existing H3 derivation contract
+enhancer derived token -> HMAC/HKDF message/domain includes `enhancer:${workerId}`
+```
+
+The derived token delivered to either pod remains named:
+
+```text
+SCENEBUILDER_POD_TOKEN
+```
+
+Enhancer callback nonce tables, worker/job binding, replay state and endpoint remain enhancer-specific even though the master secret is shared.
+
+### 35.4 R2 credentials and storage identity are shared, not duplicated
+
+Enhancer uses the same SceneBuilder R2 account/bucket identity already used by H3 and product media. Current audited names remain authoritative:
+
+```text
+Worker/control plane:
+  R2_BUCKET_NAME
+  R2_ENDPOINT
+  R2_REGION
+  R2_PUBLIC_URL
+  H3_POD_R2_ACCESS_KEY
+  H3_POD_R2_SECRET_KEY
+
+Pod runtime:
+  R2_BUCKET_NAME
+  R2_ENDPOINT
+  R2_REGION
+  R2_PUBLIC_URL
+  R2_ACCESS_KEY
+  R2_SECRET_KEY
+```
+
+No enhancer-only R2 access-key pair, bucket-name variable, endpoint variable or public-URL variable is introduced.
+
+Authorization is still least-privilege by request/job/object-key validation. Sharing the credential **name/value source** does not mean allowing arbitrary object access in application logic.
+
+### 35.5 Provider API keys are shared control-plane secrets
+
+Use the existing names exactly:
+
+```text
+RUNPOD_API_KEY
+NOVITA_API_KEY
+```
+
+H3 and enhancer provision different pod images/state tables but use the same provider accounts/credentials. Do not create:
+
+```text
+ENHANCER_RUNPOD_API_KEY
+ENHANCER_NOVITA_API_KEY
+```
+
+Provider API keys remain in the SceneBuilder control plane and are **never injected into GPU pods**.
+
+### 35.6 Build/repository/model-download secrets are reused exactly
+
+The maintained H3 Hetzner Docker workflow already uses:
+
+```text
+HETZNER_TOKEN
+DOCKERHUB_USERNAME
+DOCKERHUB_TOKEN
+HF_TOKEN
+GH_FH_TOKEN_MM_H3_SERVERLESS
+```
+
+These exact GitHub secret names are the enhancer build contract too. Do not add enhancer-prefixed equivalents.
+
+The current enhancer workflow already reuses:
+
+```text
+HETZNER_TOKEN
+DOCKERHUB_USERNAME
+DOCKERHUB_TOKEN
+GH_FH_TOKEN_MM_H3_SERVERLESS
+```
+
+but currently omits `HF_TOKEN`. Before production merge, `.github/workflows/hetzner-enhancer-build.yml` and `enhancer/scripts/remote_build.sh` must pass/use the existing:
+
+```text
+HF_TOKEN
+```
+
+with the **same name** used by the H3 build. Private Hugging Face/model downloads use BuildKit secret mounts or equivalent non-layer secret injection; never bake the token into image layers or logs.
+
+`GH_FH_TOKEN_MM_H3_SERVERLESS` intentionally keeps its existing name even after the approved future repository rename to `GPU-runtime`; do not duplicate/rename the secret solely because the repository name changes.
+
+### 35.7 Existing Cloudflare/bootstrap credential is not duplicated
+
+The audited H3 Worker-secret bootstrap workflow uses the existing GitHub secret:
+
+```text
+SCENEBUILDER2_D1_R2_ACCESS
+```
+
+If enhancer-related bootstrap/deploy automation needs the same Cloudflare permission, reuse this exact existing secret rather than creating an enhancer-specific Cloudflare token. It is not a GPU pod runtime variable.
+
+### 35.8 `ALLOWED_EMAILS` stays shared
+
+Enhancer admin/API authorization uses the existing:
+
+```text
+ALLOWED_EMAILS
+```
+
+Do not introduce `ENHANCER_ALLOWED_EMAILS`. H3 admin controls and enhancer admin controls may expose different operations, but authorization comes from the same server-side allowlist unless the product deliberately changes that policy later.
+
+### 35.9 Build-only vs control-plane-only vs pod-runtime exposure
+
+Reusing a secret name does **not** mean spraying every secret into every environment. Preserve least exposure:
+
+```text
+GitHub/Hetzner build only:
+  HETZNER_TOKEN
+  DOCKERHUB_USERNAME
+  DOCKERHUB_TOKEN
+  HF_TOKEN
+  GH_FH_TOKEN_MM_H3_SERVERLESS
+
+SceneBuilder control plane only:
+  RUNPOD_API_KEY
+  NOVITA_API_KEY
+  H3_POD_AUTH_MASTER_SECRET
+  H3_POD_R2_ACCESS_KEY
+  H3_POD_R2_SECRET_KEY
+  SCENEBUILDER2_D1_R2_ACCESS   # only bootstrap/deploy tooling that needs it
+
+Pod runtime, injected from the existing H3 resolution path:
+  R2_BUCKET_NAME
+  R2_ENDPOINT
+  R2_ACCESS_KEY
+  R2_SECRET_KEY
+  R2_REGION
+  R2_PUBLIC_URL
+  SCENEBUILDER_POD_TOKEN
+  SCENEBUILDER_WORKER_ID
+  SCENEBUILDER_CONTROL_URL
+  H3_POD_IDLE_TIMEOUT_SECONDS
+  H3_POD_PORT
+```
+
+Do not inject DockerHub/GitHub/Hugging Face/provider API/master-auth secrets into customer inference pods merely to satisfy the name-reuse rule.
+
+### 35.10 Names that are intentionally *not* shared because the value/meaning differs
+
+The no-duplication rule applies when the semantic purpose and value are the same. It does **not** force enhancer to point at H3-specific runtime artifacts/settings.
+
+For example:
+
+```text
+H3_POD_IMAGE
+H3_TARGET_OUTPUT_SECONDS_PER_WORKER
+```
+
+remain H3-specific because enhancer uses different Docker images and workload sizing. Enhancer image identity should come from its own fixed/runtime configuration already required by the enhancer architecture, **not** by overloading `H3_POD_IMAGE` with two simultaneous values.
+
+This is the only acceptable reason to introduce enhancer-specific configuration: the value or semantic meaning is genuinely different. Never duplicate a credential/config merely for naming symmetry.
+
+### 35.11 Implementation/review gate
+
+Before merge, CI/static review must fail if new enhancer code introduces same-purpose duplicate names such as:
+
+```text
+ENHANCER_POD_AUTH_MASTER_SECRET
+ENHANCER_R2_*
+ENHANCER_RUNPOD_API_KEY
+ENHANCER_NOVITA_API_KEY
+ENHANCER_HF_TOKEN
+ENHANCER_DOCKERHUB_*
+ENHANCER_GITHUB_TOKEN
+ENHANCER_ALLOWED_EMAILS
+```
+
+Required integration tests must prove:
+
+```text
+H3 jobs still resolve their existing env/secrets unchanged
+enhancer jobs resolve the same shared sources
+enhancer pod receives the same generic runtime R2/token env names
+H3 and enhancer derived pod tokens are domain-separated
+provider keys never reach pods
+build-only credentials never reach runtime pods
+R2 upload/download works for both services
+no secret value is logged
+```
+
+**Hard rule:** same goal + same credential/configuration source = same existing H3/SceneBuilder name. No duplicate enhancer secret namespace.
