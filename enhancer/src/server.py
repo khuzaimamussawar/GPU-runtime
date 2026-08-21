@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 
 from .callbacks import post_event
 from .config import RuntimeConfig
+from .engine_builder import run_engine_build
 from .fast_pipeline import run_fast_video, run_image_upscale
 from .gpu import qualify_gpu, telemetry
 from .quality_pipeline import run_video_upscale as run_quality_video
@@ -125,6 +126,10 @@ def _run_job(record: JobRecord) -> None:
             result = run_image_upscale(record.payload, record.cancel_event, progress)
         elif job_type == "video_upscale":
             result = run_quality_video(record.payload, record.cancel_event, progress) if config().service_kind == "enhancer_quality" else run_fast_video(record.payload, record.cancel_event, progress)
+        elif job_type == "engine_build":
+            if config().service_kind != "enhancer_engine_builder":
+                raise RuntimeError("TRT_BUILD_FAILED:engine_build requires enhancer_engine_builder runtime")
+            result = run_engine_build(record.payload, record.cancel_event, progress)
         else:
             raise ValueError(f"Unsupported jobType: {job_type}")
         with _LOCK:
@@ -164,7 +169,7 @@ def _require_auth(authorization: str | None) -> None:
 def _boot() -> None:
     global _READY, _QUALIFICATION, _STARTUP_ERROR, _IDLE_SINCE
     try:
-        _QUALIFICATION = qualify_gpu(require_nvenc=True)
+        _QUALIFICATION = qualify_gpu(require_nvenc=config().service_kind != "enhancer_engine_builder")
         # Service-specific imports/models are deliberately not CPU-fallbacked.
         if config().service_kind == "enhancer_fast":
             from .models import esrgan
@@ -176,6 +181,10 @@ def _boot() -> None:
             import torch
             if not torch.cuda.is_bf16_supported():
                 raise RuntimeError("GPU_CAPABILITY_MISMATCH:BF16 required for QUALITY")
+        elif config().service_kind == "enhancer_engine_builder":
+            import shutil
+            if not shutil.which("trtexec"):
+                raise RuntimeError("TRT_BUILD_FAILED:trtexec not found")
         _READY = True
         _IDLE_SINCE = time.time()
         _event("worker_ready", qualification=_QUALIFICATION, capabilities=_capabilities())
@@ -203,12 +212,14 @@ def _idle_monitor() -> None:
 
 def _capabilities() -> dict[str, Any]:
     fast = config().service_kind == "enhancer_fast"
+    builder = config().service_kind == "enhancer_engine_builder"
     return {
         "serviceKind": config().service_kind,
         "gpuOnly": True,
         "imageUpscale": fast,
-        "videoUpscale": True,
-        "models": (["RealESRGAN_x4plus_anime_6B", "RealESRGAN_x4plus", "realesr-animevideov3", "realesr-general-x4v3", "rife-4.9"] if fast else ["flashvsr-v1.1", "rife-4.9"]),
+        "videoUpscale": not builder,
+        "engineBuild": builder,
+        "models": (["realesr-animevideov3", "realesr-general-x4v3", "rife-4.9"] if builder else (["RealESRGAN_x4plus_anime_6B", "RealESRGAN_x4plus", "realesr-animevideov3", "realesr-general-x4v3", "rife-4.9"] if fast else ["flashvsr-v1.1", "rife-4.9"])),
         "gimmPackaged": True,
         "gimmProductionEnabled": False,
         "targetFps": [30, 48, 60],

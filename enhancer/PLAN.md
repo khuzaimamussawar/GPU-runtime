@@ -58,6 +58,7 @@ Enhancer state is separate:
 ```text
 enhancer_pod_workers
 pending_upscales
+enhancer_engine_builds
 enhancer_pod_delete_locks
 enhancer_event_nonces
 enhancer_config
@@ -124,6 +125,8 @@ CuPy cupy-cuda13x
 TensorRT 10.14.1.48 builder + runtime
 FFmpeg with NVDEC/NVENC where available
 NVML telemetry
+
+Admin TensorRT engine creator jobs use this FAST image with service kind `enhancer_engine_builder`. They do not run product image/video upscales, do not write Director media, and never fabricate `.engine` files. Missing trusted ONNX/checkpoint/TensorRT tooling fails the engine-build job rather than producing a dummy artifact.
 
 Storyboard IMAGE:
   Anime -> RealESRGAN_x4plus_anime_6B
@@ -516,7 +519,7 @@ Build lifecycle:
 
 ```text
 admin Generate engine
--> pending_upscales job_type=engine_build
+-> enhancer_engine_builds action=generate
 -> validate ALLOWED_EMAILS + allowlists
 -> resolve trusted baked ONNX/checkpoint hash
 -> reuse/provision compatible FAST GPU pod
@@ -587,7 +590,7 @@ models/.engine/.tmp/{engineBuildJobId}/...
 
 Use immutable filenames encoding identity. Never use one mutable shared `engine.plan`.
 
-D1 stores metadata/control state, not engine binary bytes. `pending_upscales` remains the unified V1 job/history/engine-registry source of truth; no parallel product-media table is introduced for engines.
+D1 stores metadata/control state, not engine binary bytes. `pending_upscales` remains the unified V1 product-work job/history table. `enhancer_engine_builds` is the admin engine inventory/source of truth; no parallel product-media table is introduced for engines.
 
 Runtime receives trusted engine identity + exact R2 key + expected SHA + scoped/short-lived access, downloads into disposable local storage, verifies, then deserializes. No provider network volume is required.
 
@@ -861,15 +864,12 @@ timestamps
 
 ### 17.2 `pending_upscales`
 
-One unified operational job table for:
+One unified product-work operational job table for:
 
 ```text
 image_upscale
 video_upscale
 vfi_only
-engine_build
-engine_validate
-benchmark
 ```
 
 Persist project/scene/segment/payer identity, priority, requested/actual provider/GPU/worker, model/version/backend, requested/actual precision, engine metadata, input/settings/execution/output JSON, source shape/timing metadata, status/stage/progress, compact telemetry, attempts/errors/debug and timestamps.
@@ -889,11 +889,14 @@ output URL/object key
 model/backend/precision
 ```
 
-Engine rows additionally store exact R2 key/SHA/size, ONNX/checkpoint hash, TRT/CUDA, FP16, compatibility target, CC/exact GPU, profile, builder identity, validation/benchmark and active state.
+Storyboard image upscale rows persist exact source URL/object key, source width/height, target, model/backend, selection scope, batch id/index/total and output object key. `POST /api/upscale-batch` / Storyboard Upscale All must create these local enhancer rows and must not insert legacy Replicate-shaped `pending_upscales` rows.
+
+Engine builder/admin rows are separate operational admin inventory rows in `enhancer_engine_builds`. They store exact R2 key/SHA/size, ONNX/checkpoint hash, TRT/CUDA, FP16, compatibility target, CC/exact GPU, profile, builder identity, validation/benchmark and active state. They are not product media truth and do not write Storyboard or Director media.
 
 Keep separate:
 
 ```text
+enhancer_engine_builds
 enhancer_pod_delete_locks
 enhancer_event_nonces
 enhancer_config

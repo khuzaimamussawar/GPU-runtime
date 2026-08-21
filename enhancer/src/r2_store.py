@@ -20,3 +20,11 @@ def upload_file(path: str | Path, object_key: str, content_type: str) -> dict:
     _client().upload_file(str(file_path), bucket, object_key, ExtraArgs={'ContentType': content_type})
     base = os.environ.get('R2_PUBLIC_URL', '').rstrip('/')
     return {'objectKey': object_key, 'url': f'{base}/{object_key}' if base else object_key, 'sizeBytes': size, 'contentType': content_type}
+
+
+def download_file(object_key: str, path: str | Path) -> Path:
+    bucket = os.environ.get('R2_BUCKET_NAME', 'scene-builder-images')
+    file_path = Path(path)
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    _client().download_file(bucket, object_key, str(file_path))
+    return file_path
