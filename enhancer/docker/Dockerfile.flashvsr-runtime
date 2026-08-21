@@ -29,7 +29,7 @@ RUN set -eux; \
     git clone https://github.com/mit-han-lab/Block-Sparse-Attention.git /opt/Block-Sparse-Attention; \
     cd /opt/Block-Sparse-Attention; \
     git checkout "${BLOCK_SPARSE_COMMIT}"; \
-    MAX_JOBS=2 python3 -m pip install --no-build-isolation --no-deps .; \
+    MAX_JOBS=1 python3 -m pip install --no-build-isolation --no-deps .; \
     python3 - <<'PY'
 import torch
 assert torch.__version__.split('+')[0] == '2.13.0', torch.__version__

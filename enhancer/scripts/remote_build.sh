@@ -13,6 +13,7 @@ repo_dir="/opt/scenebuilder-gpu-runtime-enhancer"
 context_dir="${repo_dir}/enhancer"
 docker_build_attempts="${DOCKER_BUILD_ATTEMPTS:-2}"
 min_free_disk_gb="${MIN_FREE_DISK_GB:-35}"
+builder_swap_gb="${BUILDER_SWAP_GB:-16}"
 previous_workflow_run_id="${PREVIOUS_WORKFLOW_RUN_ID:-}"
 COMMON_TARGETS=(smoke base torch vfi-models)
 FAST_TARGETS=(esrgan-models fast)
@@ -103,6 +104,25 @@ install_docker() {
   curl -fsSL https://get.docker.com | sh
 }
 
+setup_builder_swap() {
+  [ "${builder_swap_gb:-0}" -gt 0 ] || return 0
+  if swapon --show=NAME --noheadings | grep -q .; then
+    echo "Swap already enabled:"
+    swapon --show || true
+    return 0
+  fi
+  local swapfile="/swapfile"
+  echo "Creating ${builder_swap_gb}G builder swap for CUDA extension builds."
+  if fallocate -l "${builder_swap_gb}G" "$swapfile" 2>/dev/null || dd if=/dev/zero of="$swapfile" bs=1G count="$builder_swap_gb"; then
+    chmod 600 "$swapfile"
+    if mkswap "$swapfile" && swapon "$swapfile"; then
+      swapon --show || true
+      return 0
+    fi
+  fi
+  echo "Warning: could not enable builder swap; continuing without swap." >&2
+}
+
 clone_repo() {
   rm -rf "$repo_dir"
   if [ -n "${GH_FH_TOKEN_MM_H3_SERVERLESS:-}" ]; then
@@ -151,6 +171,7 @@ build_one_target() {
 }
 
 install_docker
+setup_builder_swap
 clone_repo
 
 echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
