@@ -2209,3 +2209,249 @@ no secret value is logged
 ```
 
 **Hard rule:** same goal + same credential/configuration source = same existing H3/SceneBuilder name. No duplicate enhancer secret namespace.
+
+---
+
+## 36. Exact provider GPU allowlists, family mapping and routing priority
+
+This section supersedes the representative examples in Section 5 wherever a concrete provider allowlist or priority is needed. Provider inventory is still queried live, but the scheduler may only choose a SKU on these allowlists and only after boot-time CUDA/VRAM/runtime qualification succeeds.
+
+### 36.1 Canonical family mapping
+
+The V1 compute-family identities used by runtime routing and TensorRT engine administration are:
+
+```text
+Ampere    -> sm_86
+Ada       -> sm_89
+Blackwell -> sm_120
+```
+
+For the RunPod SKU labels seen in the current provider inventory, use the following canonical mapping.
+
+**Ampere / sm86:**
+
+```text
+RTX A4000      16 GB
+RTX A4500      20 GB
+RTX A5000      24 GB
+RTX 3090       24 GB
+A40            48 GB
+RTX A6000      48 GB
+```
+
+**Ada / sm89:**
+
+```text
+RTX 2000 Ada   16 GB
+RTX 4000 Ada   20 GB
+L4             24 GB
+RTX 4090       24 GB
+L40            48 GB
+RTX 6000 Ada   48 GB
+L40S           48 GB
+```
+
+**Blackwell / sm120:**
+
+```text
+RTX PRO 4000 / RTX PRO 4000 Blackwell                  24 GB
+PRO 6000 MIG 24GB / RTX PRO 6000 Blackwell MIG 24 GB  24 GB
+RTX 5090                                                32 GB
+RTX PRO 4500 / RTX PRO 4500 Blackwell                  32 GB
+RTX PRO 4500 SE / RTX PRO 4500 Blackwell Server Ed.    32 GB
+PRO 6000 MIG 48GB / RTX PRO 6000 Blackwell MIG 48 GB  48 GB
+```
+
+The provider-facing matcher must tolerate RunPod display-name variations while normalizing to one canonical internal SKU/family.
+
+Do not include GPUs above the global 48 GB cap. In particular, screenshots may expose A100/H100 and other 80+ GB products; they remain ineligible for enhancer V1 even if technically compatible.
+
+### 36.2 RunPod FAST / Real-ESRGAN automatic priority
+
+For FAST Real-ESRGAN jobs, the requested traversal order is intentionally **not simple ascending VRAM**. The locked VRAM-tier order is:
+
+```text
+16 GB
+20 GB
+24 GB
+48 GB
+32 GB
+```
+
+Within every VRAM tier, family priority is:
+
+```text
+Ada
+Ampere
+Blackwell
+```
+
+Therefore the routing matrix is:
+
+| Tier | Ada first | Ampere second | Blackwell third |
+|---|---|---|---|
+| 16 GB | RTX 2000 Ada | RTX A4000 | — |
+| 20 GB | RTX 4000 Ada | RTX A4500 | — |
+| 24 GB | L4, RTX 4090 | RTX A5000, RTX 3090 | RTX PRO 4000, PRO 6000 MIG 24GB* |
+| 48 GB | L40, RTX 6000 Ada, L40S | A40, RTX A6000 | PRO 6000 MIG 48GB* |
+| 32 GB | — | — | RTX 5090, RTX PRO 4500, RTX PRO 4500 SE |
+
+`48 GB -> 32 GB` is deliberate and must not be “corrected” to numeric ascending order.
+
+Within one exact tier + family cell, the scheduler may use live provider availability/capacity and price to choose among the listed SKUs. It must not silently jump to a later tier/family while an earlier eligible candidate is available and qualified.
+
+Before applying this traversal, filter by the job's real minimum requirements. Examples:
+
+```text
+FAST ESRGAN ordinary job -> may start at 16 GB when the exact model/resolution/concurrency tuple is qualified
+FAST + GIMM-F            -> remove 16/20 GB; physical VRAM >=24 GB is mandatory
+QUALITY / FlashVSR       -> apply the separate 4090-class-or-better quality floor and benchmarked VRAM rules
+known unsafe/OOM tuple   -> start at the next known-safe VRAM tier instead of deliberately repeating a known failure
+```
+
+OOM escalation continues to use the existing xN backoff first, then moves to a larger eligible GPU according to the allowed routing policy.
+
+### 36.3 Novita enhancer allowlist and exact priority
+
+For enhancer V1, Novita is intentionally restricted to these four SKUs only, in this exact priority order:
+
+```text
+1. RTX 4090       24 GB  Ada / sm89
+2. RTX 6000 Ada   48 GB  Ada / sm89
+3. L40S           48 GB  Ada / sm89
+4. RTX 5090       32 GB  Blackwell / sm120
+```
+
+Do not add other Novita GPU products merely because the provider exposes them. This list is separate from RunPod's broader allowlist.
+
+A forced Novita request never crosses to RunPod. `Auto` may fall back to RunPod after Novita candidates are exhausted, subject to the requested compute-family constraint.
+
+### 36.4 Admin TensorRT engine-family selection provisions the requested family
+
+Enhancer Admin TensorRT controls must show clear family labels:
+
+```text
+AMPERE_PLUS portable
+Ampere (sm86)
+Ada (sm89)
+Blackwell (sm120)
+Exact GPU
+```
+
+When the admin clicks a same-compute-family target, that selection is a **hard architecture constraint**, not a suggestion.
+
+RunPod family candidates are:
+
+```text
+Ampere (sm86)
+  RTX A4000
+  RTX A4500
+  RTX A5000
+  RTX 3090
+  A40
+  RTX A6000
+
+Ada (sm89)
+  RTX 2000 Ada
+  RTX 4000 Ada
+  L4
+  RTX 4090
+  L40
+  RTX 6000 Ada
+  L40S
+
+Blackwell (sm120)
+  RTX PRO 4000
+  PRO 6000 MIG 24GB*
+  RTX 5090
+  RTX PRO 4500
+  RTX PRO 4500 SE
+  PRO 6000 MIG 48GB*
+```
+
+The control plane first applies the engine-build job's minimum safe VRAM/profile requirement, then chooses an available SKU **inside that family only**. For example, if a future 2160 RIFE builder profile is qualified only at >=24 GB, the scheduler must skip 16/20 GB members of the selected family rather than trying them first.
+
+Provider behavior for family builds:
+
+```text
+Provider = RunPod
+  -> choose only from the RunPod list for the selected family
+
+Provider = Novita
+  Ada       -> RTX 4090 -> RTX 6000 Ada -> L40S
+  Blackwell -> RTX 5090 only
+  Ampere    -> no eligible Novita SKU in V1; return provider/family capacity-policy failure
+
+Provider = Auto
+  -> may move between providers only while preserving the selected family
+```
+
+Never satisfy `Ada (sm89)` with an Ampere or Blackwell builder just because it is available. Same rule for the other families.
+
+For `Exact GPU`, no family substitute is allowed: provision that exact SKU or leave the build queued/fail according to admin policy.
+
+### 36.5 AMPERE_PLUS builder host
+
+The portable `AMPERE_PLUS` TensorRT set should be generated on an approved **Ampere sm86 RunPod GPU** by default, using the intended TensorRT hardware-compatibility flags, then validated on representative Ada and Blackwell hosts before activation.
+
+The default builder may move among the approved Ampere RunPod SKUs according to minimum build VRAM and availability. Do not require a separate engine artifact per Ampere SKU for the portable set.
+
+### 36.6 Blackwell MIG caveat
+
+RunPod's `PRO 6000 MIG 24GB` and `PRO 6000 MIG 48GB` are Blackwell / sm120 compute candidates, but MIG media-engine exposure is profile-dependent. They are therefore marked conditional (`*`).
+
+Rules:
+
+```text
+CUDA/TRT engine build/validation
+  -> allowed after normal boot qualification and sufficient VRAM
+
+normal video enhancement
+  -> require actual NVDEC/NVENC capability smoke before advertising hardware encode/decode
+
+no NVENC exposed
+  -> do not pretend NVENC exists; CPU x265 may remain an allowed codec fallback, but this SKU is not preferred for normal video jobs
+
+benchmarking
+  -> do not use a MIG slice as the canonical full-GPU family performance baseline
+```
+
+### 36.7 D1/admin representation
+
+The canonical allowlists are code-reviewed policy, while `enhancer_config.gpu_policy_json` stores approved enable/disable/order overrides and operational tuning. Admin UI may reorder or disable known allowed SKUs but may not authorize an unknown/out-of-policy GPU directly from the browser.
+
+Persist actual routing decisions in enhancer operational state:
+
+```text
+pending_upscales.requested_provider
+pending_upscales.actual_provider
+pending_upscales.requested_gpu
+pending_upscales.actual_gpu
+pending_upscales.settings_json       # requested family / admin routing snapshot
+
+enhancer_pod_workers.gpu_class
+enhancer_pod_workers.provider_gpu_name
+enhancer_pod_workers.compute_capability
+enhancer_pod_workers.vram_mb
+```
+
+The admin panel must display both the requested family/SKU and the actual provisioned provider GPU so a fallback is never invisible.
+
+### 36.8 Release gate for every allowlisted SKU
+
+Being on this list makes a GPU **schedulable candidate**, not automatically production-qualified. Each SKU still needs the relevant boot/release checks:
+
+```text
+CUDA 13.0 compatibility
+correct compute capability
+physical VRAM check
+PyTorch/CuPy smoke
+TensorRT load/build where applicable
+model smoke/parity
+GIMM >=24 GB rule
+FlashVSR capability/VRAM rule
+NVDEC/NVENC capability where video hardware codec is expected
+OOM/concurrency safe tuple data
+```
+
+Failed qualification marks that SKU/runtime tuple unhealthy and the control plane tries the next candidate allowed by the same job/provider/family policy.
