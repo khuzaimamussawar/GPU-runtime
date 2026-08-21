@@ -1,0 +1,29 @@
+# syntax=docker/dockerfile:1.7
+ARG REGISTRY_NAMESPACE
+ARG IMAGE_TAG=latest
+FROM ${REGISTRY_NAMESPACE}/scenebuilder-enhancer-flashvsr-models:${IMAGE_TAG}
+
+LABEL org.opencontainers.image.title="scenebuilder-enhancer-quality"
+LABEL scene_builder.service="enhancer_quality"
+LABEL scene_builder.layer="enhancer-quality-runtime"
+LABEL scene_builder.cuda="13.0.2/cu130"
+LABEL scene_builder.pytorch="2.13.0"
+LABEL scene_builder.tensorrt="10.14.1.48"
+LABEL scene_builder.model="flashvsr-v1.1"
+
+WORKDIR /opt/scenebuilder-enhancer
+COPY src /opt/scenebuilder-enhancer/src
+RUN python3 -m compileall -q /opt/scenebuilder-enhancer/src
+
+ENV H3_POD_PORT=8000 \
+    H3_POD_IDLE_TIMEOUT_SECONDS=60 \
+    SCENEBUILDER_SERVICE_KIND=enhancer_quality \
+    FLASHVSR_ROOT=/opt/FlashVSR \
+    FLASHVSR_MODEL_DIR=/opt/scenebuilder-models/flashvsr-v1.1 \
+    RIFE_ROOT=/opt/Practical-RIFE \
+    RIFE_MODEL_DIR=/opt/scenebuilder-models/rife-4.9 \
+    GIMM_ROOT=/opt/GIMM-VFI \
+    GIMM_MODEL_DIR=/opt/scenebuilder-models/gimm-vfi
+
+EXPOSE 8000
+CMD ["python3", "-m", "src.server"]

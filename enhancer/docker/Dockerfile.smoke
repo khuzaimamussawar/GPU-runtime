@@ -1,0 +1,16 @@
+# syntax=docker/dockerfile:1.7
+ARG CUDA_IMAGE=nvidia/cuda:13.0.2-base-ubuntu24.04
+FROM ${CUDA_IMAGE}
+
+ARG DEBIAN_FRONTEND=noninteractive
+LABEL org.opencontainers.image.title="scenebuilder-enhancer-smoke"
+LABEL scene_builder.layer="enhancer-smoke"
+LABEL scene_builder.cuda="13.0.2"
+
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates bash; \
+    rm -rf /var/lib/apt/lists/*; \
+    test -e /usr/local/cuda/version.json || test -d /usr/local/cuda
+
+CMD ["bash", "-lc", "echo SceneBuilder enhancer CUDA 13.0.2 smoke image"]

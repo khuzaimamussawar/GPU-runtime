@@ -1,0 +1,8 @@
+**
+!.dockerignore
+!docker/
+!docker/**
+!src/
+!src/**
+!scripts/
+!scripts/download_model_assets.py

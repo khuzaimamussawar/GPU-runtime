@@ -1,0 +1,42 @@
+# syntax=docker/dockerfile:1.7
+ARG REGISTRY_NAMESPACE
+ARG IMAGE_TAG=latest
+FROM ${REGISTRY_NAMESPACE}/scenebuilder-enhancer-vfi-models:${IMAGE_TAG}
+
+ARG FLASHVSR_COMMIT=6dd38e57203af4efca97df82c659f5d5a2dcf51a
+ARG BLOCK_SPARSE_COMMIT=49d6c39e4dc0303442cda3bb758b3925d4399c49
+
+LABEL org.opencontainers.image.title="scenebuilder-enhancer-flashvsr-runtime"
+LABEL scene_builder.layer="enhancer-flashvsr-runtime"
+LABEL scene_builder.flashvsr.commit="${FLASHVSR_COMMIT}"
+LABEL scene_builder.block_sparse.commit="${BLOCK_SPARSE_COMMIT}"
+
+# FlashVSR upstream pins torch 2.6/cu124 in requirements.txt. Do not install that
+# file directly: the enhancer runtime contract is torch 2.13/cu130. Install the
+# non-framework dependencies explicitly, then install FlashVSR itself --no-deps.
+RUN set -eux; \
+    git clone https://github.com/OpenImagingLab/FlashVSR.git /opt/FlashVSR; \
+    cd /opt/FlashVSR; \
+    git checkout "${FLASHVSR_COMMIT}"; \
+    python3 -m pip install \
+      torchmetrics==1.7.3 torchsde==0.2.6 accelerate==1.8.1 einops==0.8.1 \
+      matplotlib==3.10.3 'numpy>=1.26.4' peft==0.16.0 pillow==11.0.0 \
+      safetensors==0.5.3 sentencepiece==0.2.0 transformers==4.46.2 \
+      pytorch-lightning==2.5.2 imageio==2.37.0 imageio-ffmpeg==0.6.0 \
+      protobuf==3.20.3 ftfy==6.3.1 pandas==2.3.0 tqdm datasets; \
+    python3 -m pip install --no-deps -e /opt/FlashVSR; \
+    git clone https://github.com/mit-han-lab/Block-Sparse-Attention.git /opt/Block-Sparse-Attention; \
+    cd /opt/Block-Sparse-Attention; \
+    git checkout "${BLOCK_SPARSE_COMMIT}"; \
+    MAX_JOBS=2 python3 -m pip install --no-build-isolation --no-deps .; \
+    python3 - <<'PY'
+import torch
+assert torch.__version__.split('+')[0] == '2.13.0', torch.__version__
+assert str(torch.version.cuda).startswith('13.0'), torch.version.cuda
+import diffsynth
+import block_sparse_attn
+print('FlashVSR runtime imports OK', torch.__version__, torch.version.cuda)
+PY
+
+ENV FLASHVSR_ROOT=/opt/FlashVSR
+CMD ["python3", "-c", "import diffsynth, block_sparse_attn; print('FlashVSR runtime ready')"]

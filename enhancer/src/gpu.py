@@ -1,0 +1,136 @@
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import tempfile
+import time
+from pathlib import Path
+from typing import Any
+
+EXPECTED_CUDA_PREFIX = "13.0"
+EXPECTED_TORCH = "2.13.0"
+EXPECTED_TRT = "10.14.1.48"
+
+
+def _cmd(args: list[str], timeout: int = 20) -> str:
+    result = subprocess.run(args, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
+    return result.stdout.strip()
+
+
+def _nvidia_query() -> dict[str, Any]:
+    query = _cmd([
+        "nvidia-smi",
+        "--query-gpu=name,driver_version,memory.total,compute_cap",
+        "--format=csv,noheader,nounits",
+    ])
+    row = query.splitlines()[0]
+    parts = [item.strip() for item in row.split(",")]
+    if len(parts) < 4:
+        raise RuntimeError(f"Unexpected nvidia-smi result: {row}")
+    name, driver, memory_mb, compute_capability = parts[:4]
+    detail = _cmd(["nvidia-smi", "-q"], timeout=20)
+    lowered = f"{name}\n{detail}".lower()
+    # The enhancer fleet is full-GPU only. Provider/runtime signals mentioning
+    # MIG/partitioning cause boot qualification to fail before /ready.
+    mig_enabled = "mig mode" in lowered and "current" in lowered and "enabled" in lowered
+    if " mig " in f" {name.lower()} " or "mig device" in lowered or mig_enabled:
+        raise RuntimeError("GPU_PARTITIONED_MIG_FORBIDDEN")
+    return {
+        "name": name,
+        "driverVersion": driver,
+        "vramMb": int(float(memory_mb)),
+        "computeCapability": compute_capability,
+    }
+
+
+def _nvenc_smoke() -> None:
+    encoders = _cmd(["ffmpeg", "-hide_banner", "-encoders"], timeout=20)
+    if "hevc_nvenc" not in encoders:
+        raise RuntimeError("NVENC_HEVC_ENCODER_MISSING")
+    with tempfile.TemporaryDirectory(prefix="sb-nvenc-") as tmp:
+        output = Path(tmp) / "smoke.mp4"
+        _cmd([
+            "ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=128x128:r=1",
+            "-frames:v", "1", "-c:v", "hevc_nvenc", "-pix_fmt", "p010le", "-y", str(output),
+        ], timeout=30)
+        if not output.is_file() or output.stat().st_size <= 0:
+            raise RuntimeError("NVENC_SMOKE_EMPTY")
+
+
+def qualify_gpu(*, require_nvenc: bool = True) -> dict[str, Any]:
+    import torch
+    import cupy as cp
+    import tensorrt as trt
+
+    if torch.__version__.split("+")[0] != EXPECTED_TORCH:
+        raise RuntimeError(f"PYTORCH_VERSION_MISMATCH:{torch.__version__}")
+    if not str(torch.version.cuda or "").startswith(EXPECTED_CUDA_PREFIX):
+        raise RuntimeError(f"PYTORCH_CUDA_MISMATCH:{torch.version.cuda}")
+    if trt.__version__ != EXPECTED_TRT:
+        raise RuntimeError(f"TENSORRT_VERSION_MISMATCH:{trt.__version__}")
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA_UNAVAILABLE")
+
+    details = _nvidia_query()
+    device = torch.device("cuda:0")
+    a = torch.arange(32, device=device, dtype=torch.float32)
+    torch_value = float((a * a).sum().item())
+    if torch_value <= 0:
+        raise RuntimeError("CUDA_TORCH_OP_FAILED")
+
+    # Real CuPy device kernel, not merely import/version inspection.
+    x = cp.arange(32, dtype=cp.float32)
+    cp_value = float(cp.asnumpy((x * x).sum()))
+    if cp_value <= 0:
+        raise RuntimeError("CUDA_CUPY_OP_FAILED")
+
+    if require_nvenc:
+        _nvenc_smoke()
+
+    props = torch.cuda.get_device_properties(0)
+    details.update({
+        "torchVersion": torch.__version__,
+        "torchCudaVersion": torch.version.cuda,
+        "cupyVersion": cp.__version__,
+        "tensorrtVersion": trt.__version__,
+        "torchDeviceName": props.name,
+        "torchVramMb": int(props.total_memory // (1024 * 1024)),
+        "qualifiedAt": int(time.time() * 1000),
+        "gpuOnly": True,
+        "nvenc": require_nvenc,
+    })
+    return details
+
+
+def telemetry(current_job: dict[str, Any] | None = None) -> dict[str, Any]:
+    import torch
+
+    payload: dict[str, Any] = {
+        "at": int(time.time() * 1000),
+        "currentJob": current_job or None,
+    }
+    if not torch.cuda.is_available():
+        payload["cudaAvailable"] = False
+        return payload
+    payload["cudaAvailable"] = True
+    payload["allocatedMb"] = int(torch.cuda.memory_allocated(0) // (1024 * 1024))
+    payload["reservedMb"] = int(torch.cuda.memory_reserved(0) // (1024 * 1024))
+    payload["maxAllocatedMb"] = int(torch.cuda.max_memory_allocated(0) // (1024 * 1024))
+    try:
+        raw = _cmd([
+            "nvidia-smi",
+            "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw",
+            "--format=csv,noheader,nounits",
+        ], timeout=5)
+        parts = [item.strip() for item in raw.splitlines()[0].split(",")]
+        payload.update({
+            "gpuUtilPercent": float(parts[0]),
+            "memoryUsedMb": float(parts[1]),
+            "memoryTotalMb": float(parts[2]),
+            "temperatureC": float(parts[3]),
+            "powerW": float(parts[4]),
+        })
+    except Exception as error:
+        payload["nvidiaSmiError"] = str(error)
+    return payload
