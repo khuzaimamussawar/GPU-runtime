@@ -2464,3 +2464,350 @@ OOM/concurrency safe tuple data
 ```
 
 Failed qualification marks that SKU/runtime tuple unhealthy and the control plane tries the next candidate allowed by the same job/provider/family policy.
+
+---
+
+## 37. Director D1/media-selection hard contract
+
+This section is the final tie-breaker for Director media naming, active selection, re-upscale input, Undo Upscale and TimelineRender handoff. It **does not rename existing SceneBuilder2 D1/product fields** and does not introduce a second Director media table.
+
+### 37.1 Keep existing D1/product field names exactly
+
+`project_video_timeline` remains physically unchanged:
+
+```text
+id
+project_id
+batch_index
+data_json
+revision
+created_at
+updated_at
+```
+
+All Director media state remains inside each segment in revisioned `data_json`. Do **not** rename existing media keys just to make enhancer terminology cleaner.
+
+Keep the established keys and their object-key partners:
+
+```text
+imageUrl
+sourceVideoUrl
+sourceVideoObjectKey
+videoUrl
+videoObjectKey
+renderVideoUrl
+renderVideoObjectKey
+upscaledVideoUrl
+upscaledVideoObjectKey
+activeVisualView
+```
+
+Do not add a duplicate `activeVideoUrl`, `currentVideoUrl`, `originalVideoUrl`, `previewVideoUrl`, or another top-level D1 media pointer. A duplicated active URL can drift away from the real source/generated/upscaled pointers. `activeVisualView` is the selector; the existing URL/object-key fields are the assets.
+
+`upscaledVideoUrl` / `upscaledVideoObjectKey` are populated only after a valid upscale successfully uploads and authoritative writeback succeeds. If no successful upscale exists, those fields may be absent and `activeVisualView='upscaled'` is invalid.
+
+### 37.2 Existing URL/object-key roles
+
+Use the existing names with these semantics:
+
+```text
+imageUrl
+  -> source image when the Director segment is image-based
+
+sourceVideoUrl / sourceVideoObjectKey
+  -> uploaded/original source video retained independently of generation/upscale
+
+videoUrl / videoObjectKey
+  -> existing generated browser-playable/generated asset under the current Director/provider contract
+     (for H3 this can be the lightweight H.264 preview)
+
+renderVideoUrl / renderVideoObjectKey
+  -> authoritative generated/render master when present
+     (for H3 this is the H.265/master side of the existing preview/master contract)
+
+upscaledVideoUrl / upscaledVideoObjectKey
+  -> enhancer derivative only; never the definition of "generated"
+```
+
+Do not blindly assume field names prove codec/master quality for every legacy row. Current Director master-resolution logic already has to protect against legacy rows where `renderVideoUrl` can point at an H.264 preview while `renderVideoObjectKey` identifies the true master. `baseGeneratedMediaForSegment()` must preserve that existing canonical preview->master protection.
+
+The important invariant is not "always use renderVideoUrl". It is:
+
+```text
+generated selection / enhancer generated input
+-> resolve the authoritative pre-upscale generated master using existing canonical Director logic
+-> NEVER resolve through upscaledVideoUrl
+```
+
+### 37.3 Mixed uploaded + generated projects are per-segment, not project-wide
+
+One Director project may contain any mixture of:
+
+```text
+uploaded-video segments
+generated-video segments
+segments that retain both uploaded source + generated result
+segments with a successful upscale
+image segments
+```
+
+Do not introduce a project-wide "uploaded" or "generated" mode. Resolve every visual segment independently.
+
+For a segment that has both uploaded and generated video:
+
+```text
+activeVisualView = source
+  -> use sourceVideoUrl/sourceVideoObjectKey
+
+activeVisualView = generated
+  -> use authoritative generated pre-upscale master
+
+activeVisualView = upscaled
+  -> use upscaledVideoUrl only when it exists and is valid
+```
+
+Selecting one variant never deletes the other variants.
+
+### 37.4 `activeVisualView` is the only active-asset selector
+
+Allowed values:
+
+```ts
+activeVisualView?: 'source' | 'generated' | 'upscaled';
+```
+
+Validity rules:
+
+```text
+source
+  valid when a source image/uploaded source video exists
+
+generated
+  valid when a base generated/render video exists
+
+upscaled
+  valid only when a successful upscaledVideoUrl exists
+```
+
+When loading data, if `activeVisualView='upscaled'` but no valid upscale exists, normalize back to the best existing pre-upscale variant rather than inventing an active URL.
+
+Do not auto-switch to `upscaled` merely because an old/possibly stale upscale URL exists when the user has explicitly selected Source or Generated.
+
+### 37.5 Re-upscale truth table: never upscale an upscale
+
+This is a hard neural-input invariant:
+
+| Current active view | Recorded upscale origin | Re-upscale neural input |
+|---|---|---|
+| `source` | any | uploaded/source video |
+| `generated` | any | authoritative generated pre-upscale master |
+| `upscaled` | `source` | uploaded/source video recorded by `upscaledFromView` + source identity |
+| `upscaled` | `generated` | authoritative generated pre-upscale master recorded by `upscaledFromView` + source identity |
+
+Forbidden:
+
+```text
+upscaledVideoUrl -> ESRGAN / FlashVSR -> another upscale
+```
+
+This remains forbidden for:
+
+```text
+Re-upscale one clip
+Upscale Selected -> Re-upscale all selected
+Upscale All -> including already-upscaled
+retry after failed replacement
+stale-upscale replacement
+admin/manual dispatch
+```
+
+For legacy upscales without explicit `upscaledFromView`, infer the base once from the retained pre-upscale assets:
+
+```text
+valid generated master exists -> generated
+else valid uploaded source video exists -> source
+else do not queue recursive upscale
+```
+
+The enhancer request must persist `source_view`, exact source URL/object key and source timing in `pending_upscales`, so the job itself proves that its input was pre-upscale media.
+
+### 37.6 Undo Upscale is selection, not deletion
+
+After an upscale succeeds, retain all original pointers:
+
+```text
+sourceVideoUrl / imageUrl         retained
+generated videoUrl/renderVideoUrl retained
+upscaledVideoUrl                  added
+```
+
+Normal Undo Upscale does exactly:
+
+```text
+activeVisualView = upscaledFromView
+```
+
+It does **not**:
+
+```text
+clear upscaledVideoUrl
+delete the R2 upscale
+replace sourceVideoUrl
+replace renderVideoUrl/videoUrl
+refund the upscale
+```
+
+Therefore the user can move among the variants whenever they exist:
+
+```text
+Source
+Generated
+Upscaled
+```
+
+When Upscaled is inactive but still stored, expose `Use Upscaled`. When Upscaled is active, expose `Undo Upscale` and `Re-upscale`.
+
+### 37.7 Successful upscale writeback and replacement behavior
+
+First successful upscale:
+
+```text
+write upscaledVideoUrl/upscaledVideoObjectKey
+record upscaledFromView = source | generated
+record exact pre-upscale source identity/timing fields
+set activeVisualView = upscaled
+```
+
+Do not set `activeVisualView='upscaled'` before the new output exists and authoritative D1 writeback succeeds.
+
+Re-upscale is replacement-from-base, not chaining:
+
+```text
+old successful upscale remains active
+-> queue new job from source/generated pre-upscale master
+-> new job uploads/verifies
+-> atomically replace upscaledVideoUrl + provenance
+-> keep activeVisualView=upscaled
+```
+
+If replacement fails or is cancelled, the previous successful upscale remains intact and selectable.
+
+### 37.8 Video Generation Timeline owns selection; TimelineRender consumes the resolved DTO
+
+The product flow remains:
+
+```text
+project_video_timeline data_json
+        ↓
+VideoGenerationTimeline.tsx
+  resolves Source / Generated / Upscaled
+  resolves authoritative generated master vs preview
+  resolves trim + effective speed
+        ↓
+TimelineRender
+```
+
+Do not change this ownership.
+
+`TimelineRender` must not query D1, reinterpret `sourceVideoUrl`/`videoUrl`/`renderVideoUrl`/`upscaledVideoUrl`, or automatically prefer an upscale. `VideoGenerationTimeline.tsx` hands it the already resolved clip DTO:
+
+```text
+url
+sceneDuration
+startTimeOffset
+speed
+```
+
+This is especially important for mixed projects containing uploaded and generated clips in the same render timeline. Each clip arrives already resolved from its own Director segment state.
+
+### 37.9 Existing Director UI shell is the required enhancer shell
+
+Do not add another normal-user enhancer page, timeline track, toolbar, clip-selection list, settings-card design or modal design.
+
+Reuse exactly:
+
+```text
+Controls row
+  [Video] [Upscale]
+
+Upscale controls
+  existing per-unit card
+  Model
+  Output
+  VFI
+  FPS
+  Smooth slow motion
+  existing per-control Apply all behavior
+
+Video / Image track
+  no selection -> Generate All / Upscale All
+  selection    -> Deselect All / Generate Selected / Upscale Selected
+  same selectedUnitIds for both operations
+
+existing bulk dialog shell
+  Generate -> Remaining / All
+  Upscale  -> Remaining / Re-upscale All
+```
+
+Current implementation audit requirement before enhancer UI completion:
+
+- `vite.director-video-remaining-fix.ts` contains the intended tightened Generate Remaining semantics but is not currently registered by `vite.config.ts`; register it or fold the same logic into the canonical Timeline implementation before copying that behavior to Upscale.
+- current `upscaleSelected()` queues immediately; extend the existing bulk-dialog state with `upscale` rather than creating a second modal.
+- current standalone Director upscale still routes Topaz/KIE only; local Real-ESRGAN/FlashVSR/RIFE/GIMM choices must route to `/api/projects/v2/enhancer/jobs`, while existing Topaz choices remain on their external backend.
+- migrate legacy `interpolateTo60Fps` UI/storage into VFI + target FPS + Smooth slow motion normalization without showing both systems at once.
+
+### 37.10 Bulk Upscale semantics
+
+`Upscale remaining`:
+
+```text
+eligible video base exists
+AND no current valid upscale
+AND no active upscale job
+-> queue
+
+current valid upscale -> skip
+active upscale job    -> skip
+still image           -> skipped_image
+failed/cancelled job with no valid upscale -> eligible
+```
+
+`Re-upscale all`:
+
+```text
+eligible source/generated base exists
+-> queue even when a current valid upscale exists
+-> neural input is still the pre-upscale base according to Section 37.5
+```
+
+Never use the current upscale as an input merely because the action says "all including already-upscaled".
+
+### 37.11 Release tests for this contract
+
+Before rollout, integration tests must include one project containing all of these simultaneously:
+
+```text
+uploaded source video only
+generated video only
+uploaded + generated video on one segment
+successful upscale from uploaded source
+successful upscale from generated master
+stale upscale after source replacement
+failed replacement upscale with previous upscale retained
+image segment mixed into the same Director timeline
+```
+
+Prove:
+
+```text
+Source selection feeds uploaded/source media
+Generated selection feeds pre-upscale generated master
+Upscaled selection feeds only the successful derivative
+Re-upscale never sends upscaledVideoUrl to neural inference
+Undo Upscale restores source/generated selection without deleting the upscale
+Use Upscaled reactivates the stored derivative
+TimelineRender receives exactly the selected per-segment URL
+mixed uploaded/generated projects render correctly in one timeline
+no existing D1 media field is renamed
+no duplicate activeVideoUrl/currentVideoUrl field is introduced
+```
