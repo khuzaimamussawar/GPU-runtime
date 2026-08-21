@@ -7,6 +7,7 @@ ARG PYTORCH_VERSION=2.13.0
 ARG TORCHVISION_VERSION=0.28.0
 ARG PYTORCH_CUDA_INDEX=https://download.pytorch.org/whl/cu130
 ARG TENSORRT_VERSION=10.14.1.48
+ARG TENSORRT_PIP_VERSION=10.14.1.48.post1
 
 LABEL org.opencontainers.image.title="scenebuilder-enhancer-torch"
 LABEL scene_builder.layer="enhancer-torch-cupy-trt"
@@ -20,7 +21,7 @@ RUN set -eux; \
       --index-url ${PYTORCH_CUDA_INDEX}; \
     python3 -m pip install \
       cupy-cuda13x \
-      tensorrt==${TENSORRT_VERSION} \
+      tensorrt==${TENSORRT_PIP_VERSION} \
       boto3 fastapi 'uvicorn[standard]' pydantic pillow numpy scipy \
       opencv-python-headless pynvml huggingface_hub safetensors einops timm yacs loguru imageio imageio-ffmpeg av; \
     python3 - <<'PY'

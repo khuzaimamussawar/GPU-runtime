@@ -185,7 +185,7 @@ CuPy:                    cupy-cuda13x
 TensorRT:                10.14.1.48
 ```
 
-The enhancer torch layer installs pinned `torch` + `torchvision` only. Do not add `torchaudio` unless runtime code starts importing it and a matching cu130 wheel exists; enhancer audio preservation/remux uses ffmpeg/AV tooling, not TorchAudio.
+The enhancer torch layer installs pinned `torch` + `torchvision` only. Do not add `torchaudio` unless runtime code starts importing it and a matching cu130 wheel exists; enhancer audio preservation/remux uses ffmpeg/AV tooling, not TorchAudio. The TensorRT Python package install uses NVIDIA's `10.14.1.48.post1` pip publication because that is the matching Linux cu13 binding publish for the TensorRT `10.14.1.48` runtime line.
 
 Do not install CUDA 11/12/13.1 side-by-side. Do not allow third-party installers to add another CuPy CUDA family.
 
