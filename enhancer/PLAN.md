@@ -2811,3 +2811,241 @@ mixed uploaded/generated projects render correctly in one timeline
 no existing D1 media field is renamed
 no duplicate activeVideoUrl/currentVideoUrl field is introduced
 ```
+
+### 37.12 Production Director row audit: current field behavior, not guessed naming
+
+A real production export of `project_video_timeline` for `proj_1786739412370` was inspected before locking this contract. The row is `timelineVersion=video_director_v6`, revision 1507, with 91 segments. This is evidence for legacy/current compatibility; it is not a special-case project rule.
+
+Observed media facts:
+
+```text
+91/91 segment.videoUrl values
+  -> canonical H3 /video/previews/...-h264-preview.mp4
+
+91/91 segment.renderVideoObjectKey values
+  -> canonical H3 /video/generated/...-h265.mp4 master objects
+
+64/91 segment.renderVideoUrl values
+  -> H3 generated/master URL
+
+27/91 segment.renderVideoUrl values
+  -> H3 H.264 preview URL even though renderVideoObjectKey points at the H.265 master
+```
+
+Therefore legacy rows can be internally inconsistent in the URL fields while still retaining the correct master object key. Do not migrate or reinterpret the whole schema from field names alone.
+
+The same production export also confirms:
+
+```text
+imageUrl
+  -> actual current image asset when persisted
+
+thumbnailUrl / videoThumbnailUrl / originalThumbnailUrl
+  -> UI thumbnail/preview metadata only
+
+sourceVideoUrl
+  -> actual uploaded source video when one exists
+
+originalImageUrl
+  -> retained storyboard/original restore image, not necessarily the current selected image
+```
+
+A source resolver must use the actual populated media pointers plus current Director state. In particular, do not assume `mediaSource='video-uploaded'` proves that `sourceVideoUrl` exists on every historical row.
+
+### 37.13 Provider-aware generated-media contract: H.264 is not synonymous with preview
+
+The canonical concept is **authoritative original generated asset**, not "always H.265".
+
+Provider behavior:
+
+| Generator | Browser/editor generated media | Authoritative original generated media | Final TimelineRender / enhancer generated input |
+|---|---|---|---|
+| H3 | H.264 lightweight preview | H.265 master | H.265 master |
+| Grok Imagine | H.264 result | the same H.264 result | the same H.264 result |
+| Seedance | H.264 result | the same H.264 result | the same H.264 result |
+
+Never classify a video as preview merely because its codec is H.264.
+
+Preview detection is provider/contract-aware. For H3 V1 the canonical preview pattern is specifically:
+
+```text
+/video/previews/...-h264-preview.mp4
+```
+
+and the corresponding H3 generated master pattern is:
+
+```text
+/video/generated/...-h265.mp4
+```
+
+Arbitrary H.264 media from Grok, Seedance, uploaded sources, Topaz or future providers must not be rewritten to H.265 or rejected as a preview solely because it is H.264.
+
+### 37.14 New-generation writeback must make future rows unambiguous
+
+For new H3 generation completion, write both sides of the preview/master contract correctly:
+
+```text
+videoUrl             = H3 H.264 preview URL
+videoObjectKey       = H3 H.264 preview object key
+renderVideoUrl       = H3 H.265 master URL
+renderVideoObjectKey = H3 H.265 master object key
+```
+
+For Grok Imagine and Seedance, there is only one generated result asset. It is valid and preferred for the same H.264 result to occupy both browser-playable and authoritative-render roles:
+
+```text
+videoUrl             = provider H.264 result URL
+videoObjectKey       = provider H.264 result object key
+renderVideoUrl       = SAME provider H.264 result URL
+renderVideoObjectKey = SAME provider H.264 result object key
+```
+
+Do not manufacture a second H.265 asset just to make field names look symmetrical. `renderVideo*` means authoritative generated media for rendering/upscale; it does not mean "must be HEVC".
+
+Future providers follow the same rule:
+
+```text
+one generated deliverable
+  -> video* and renderVideo* may point at the same object
+
+separate preview + master deliverables
+  -> video* points at preview/browser asset
+  -> renderVideo* points at authoritative original generated master
+```
+
+### 37.15 Legacy H3 preview rows: keep D1 as-is; resolve the master safely
+
+Do **not** mass-edit the existing 27 audited H3 segments merely because `renderVideoUrl` contains the preview URL. They already retain the correct H.265 master identity in `renderVideoObjectKey`.
+
+Canonical base-generated resolution for an H3/legacy segment is:
+
+```text
+1. valid renderVideoObjectKey
+   -> resolve to the public/playable URL for that exact object
+
+2. otherwise a renderVideoUrl that is NOT a canonical H3 preview
+   -> use it
+
+3. otherwise a canonical H3 preview URL/key
+   -> derive /video/generated/...-h265.mp4
+   -> verify that expected master object exists before use
+
+4. provider single-result fallback
+   -> use videoUrl only when it is not a canonical H3 preview, or when provider metadata says it is the authoritative single generated result
+```
+
+For the canonical H3 naming contract, this transformation is valid:
+
+```text
+/video/previews/NAME-h264-preview.mp4
+        ↓
+/video/generated/NAME-h265.mp4
+```
+
+So yes: for a confirmed H3 preview following that exact naming contract, replacing the preview path/suffix with the generated H.265 path/suffix points at the intended master **if that master object actually exists**. But this mapping belongs in the resolver as a fallback/compatibility rule, not as a blind global D1 string rewrite.
+
+The existing production row already gives a stronger signal than string replacement because `renderVideoObjectKey` points at the master on all 91 audited segments. Prefer that object key first.
+
+No one-time D1 migration is required before enhancer rollout. A later optional cleanup/backfill may normalize legacy `renderVideoUrl` values after the resolver is proven, but it is not required for correctness and must never be a prerequisite for Upscale All or TimelineRender.
+
+### 37.16 Upscale All on current H3 projects must use master resolution before queueing
+
+The old project may remain stored exactly as it is.
+
+Before queueing any generated-video enhancer job:
+
+```text
+segment active/generated base
+        ↓
+baseGeneratedMediaForSegment()
+        ↓
+H3 legacy row with preview renderVideoUrl
+        ↓
+renderVideoObjectKey / verified canonical H3 master
+        ↓
+H.265 original generated master
+        ↓
+ESRGAN / FlashVSR / VFI
+```
+
+Therefore Upscale All on `proj_1786739412370` must send the H.265 H3 masters for the audited legacy/current H3 segments, including the 27 whose `renderVideoUrl` is stale/preview-shaped. It must not send `videoUrl` or the preview-shaped `renderVideoUrl` merely because they are truthy.
+
+If the expected H3 master cannot be resolved or verified, do not silently upscale the H.264 preview. Mark that clip ineligible/failed with a clear master-missing error so the data problem is visible.
+
+After successful upscale writeback, the old preview/master fields remain intact and `upscaledVideoUrl/upscaledVideoObjectKey` become the optional derivative. This means existing projects do not need destructive media-field repair just because they are being upscaled.
+
+### 37.17 `pending_upscales` is short-lived operational evidence, not durable product truth
+
+Completed/failed `pending_upscales` rows are expected to be deleted after roughly one hour. Therefore Section 17/37 references to exact `source_view`, source URL/object key and timing in `pending_upscales` mean **execution-time and short-term audit evidence only**.
+
+Never depend on `pending_upscales` for long-term behavior such as:
+
+```text
+Undo Upscale days/weeks later
+Re-upscale months later
+which base variant produced the stored upscale
+source-change staleness detection after job cleanup
+TimelineRender media selection
+```
+
+Durable product truth stays in the existing Director segment JSON:
+
+```text
+activeVisualView
+upscaledVideoUrl
+upscaledVideoObjectKey
+upscaledFromView
+upscaledSourceUrl
+upscaledSourceObjectKey
+upscaledSourceTrimInMs
+upscaledSourceTrimOutMs
+upscaledSourceSpeed
+upscaledTimingBaked
+upscaledTargetFps
+upscaledOutputDurationMs
+```
+
+`pending_upscales` duplicates the necessary source identity/timing while a job is alive so the backend can validate the no-recursive-upscale invariant and perform correct writeback. After retention cleanup, the segment remains sufficient by itself.
+
+### 37.18 Provider/legacy release tests added by production audit
+
+Add explicit tests for all of these generated-media shapes:
+
+```text
+new H3
+  videoUrl = H.264 preview
+  renderVideoUrl/ObjectKey = H.265 master
+  -> editor may use preview
+  -> enhancer + TimelineRender use H.265 master
+
+legacy H3
+  videoUrl = H.264 preview
+  renderVideoUrl = H.264 preview
+  renderVideoObjectKey = H.265 master
+  -> no D1 migration required
+  -> enhancer + TimelineRender still use H.265 master
+
+Grok Imagine
+  videoUrl/renderVideoUrl = same H.264 result
+  -> editor + enhancer + TimelineRender all use that same authoritative H.264 file
+
+Seedance
+  videoUrl/renderVideoUrl = same H.264 result
+  -> editor + enhancer + TimelineRender all use that same authoritative H.264 file
+
+uploaded source video
+  sourceVideoUrl = H.264 or other supported codec
+  -> codec alone never makes it a preview
+```
+
+Assertions:
+
+```text
+H.264 codec alone never triggers H3 preview rewrite
+only canonical H3 preview identity triggers preview->master compatibility mapping
+renderVideoObjectKey wins over a preview-shaped legacy renderVideoUrl when it identifies the master
+Upscale All never submits an H3 preview when the H3 master exists
+Grok/Seedance H.264 originals are accepted as authoritative generated inputs
+future H3 writes store preview and master fields cleanly
+future Grok/Seedance writes may deliberately point video* and renderVideo* at the same H.264 object
+```
