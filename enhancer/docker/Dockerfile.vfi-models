@@ -30,6 +30,13 @@ RUN --mount=type=secret,id=hf_token,required=false set -eux; \
     test -s /opt/scenebuilder-models/rife-4.9/flownet.pkl; \
     test -d /opt/scenebuilder-models/gimm-vfi
 
+RUN set -eux; \
+    mkdir -p /opt/scenebuilder-models/onnx; \
+    curl -fL https://huggingface.co/yuvraj108c/rife-onnx/resolve/262262c8699b9c6ce21bd05956a7b982ecc869c7/rife49_ensemble_True_scale_1_sim.onnx \
+      -o /opt/scenebuilder-models/onnx/rife-4.9.onnx; \
+    echo "76e4cef9ab42fa7dd4e8f6e4aba47462051e3faa969e4bca6479784fbab0ac6f  /opt/scenebuilder-models/onnx/rife-4.9.onnx" | sha256sum -c -; \
+    test -s /opt/scenebuilder-models/onnx/rife-4.9.onnx
+
 ENV RIFE_ROOT=/opt/Practical-RIFE \
     RIFE_MODEL_DIR=/opt/scenebuilder-models/rife-4.9 \
     GIMM_ROOT=/opt/GIMM-VFI \

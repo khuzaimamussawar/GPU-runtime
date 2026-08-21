@@ -1805,8 +1805,9 @@ Docker success is not GPU qualification. sm86/sm89/sm120/AMPERE_PLUS smoke tests
 Current implementation checkpoint:
 
 - `engine_builder.py` requires `trtexec`; the Docker layer must install/prove that CLI, not only Python `tensorrt` import.
-- The current Dockerfiles fetch checkpoints/source but do not yet create or bake the trusted ONNX artifacts consumed by `engine_builder.py`.
-- The engine-builder jobs must resolve trusted ONNX/export outputs for the two video ESRGAN models and RIFE 4.9 before production activation. If an ONNX path is missing, the job must fail with `ONNX_NOT_FOUND`; it must not generate a dummy engine.
+- The Docker model layers bake SHA-256-verified ONNX artifacts for `realesr-animevideov3`, `realesr-general-x4v3`, and `rife-4.9` under `/opt/scenebuilder-models/onnx/`.
+- Baked ONNX artifacts are not proof of activation. The engine-builder/admin flow must still record provenance and pass PyTorch/native-vs-ONNX-vs-TRT parity before activating generated engines.
+- If an ONNX path is missing or hash verification fails, the image build or engine-build job must fail; it must not generate a dummy engine.
 
 ---
 

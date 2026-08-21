@@ -94,7 +94,7 @@ def _shape_args(model: str, profile: str, trusted: dict[str, Any]) -> list[str]:
     height, width = PROFILE_SHAPES.get(profile, PROFILE_SHAPES["1080 class"])
     names = trusted.get("inputNames") or trusted.get("input_names")
     if not names:
-        names = ["I0", "I1"] if model == "rife-4.9" else ["input"]
+        names = ["img0", "img1"] if model == "rife-4.9" else ["input"]
     shape = f"1x3x{height}x{width}"
     return ["--shapes=" + ",".join(f"{name}:{shape}" for name in names)]
 

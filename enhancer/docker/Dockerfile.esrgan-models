@@ -45,5 +45,16 @@ RUN set -eux; \
     test -s /opt/Real-ESRGAN/weights/realesr-animevideov3.pth; \
     test -s /opt/Real-ESRGAN/weights/realesr-general-x4v3.pth
 
+RUN set -eux; \
+    mkdir -p /opt/scenebuilder-models/onnx; \
+    curl -fL https://huggingface.co/tidus2102/Real-ESRGAN/resolve/702b70a0ad2e5053cf3a3ec72c25fce2a9d9b630/RealESR-AnimeVideo-v3_x4.onnx \
+      -o /opt/scenebuilder-models/onnx/realesr-animevideov3.onnx; \
+    curl -fL https://huggingface.co/CoderViking/realesr-general-x4v3-onnx/resolve/main/realesr-general-x4v3.onnx \
+      -o /opt/scenebuilder-models/onnx/realesr-general-x4v3.onnx; \
+    echo "00ece3ac21c43ee31459216b5174b2cea0c5325044c5142aeb840f4890e175ff  /opt/scenebuilder-models/onnx/realesr-animevideov3.onnx" | sha256sum -c -; \
+    echo "1940a93ee08283a0a7286183186357b1688fe9fa8ede74604b424586aaddf112  /opt/scenebuilder-models/onnx/realesr-general-x4v3.onnx" | sha256sum -c -; \
+    test -s /opt/scenebuilder-models/onnx/realesr-animevideov3.onnx; \
+    test -s /opt/scenebuilder-models/onnx/realesr-general-x4v3.onnx
+
 ENV REAL_ESRGAN_ROOT=/opt/Real-ESRGAN
 CMD ["python3", "-c", "import realesrgan; print('Real-ESRGAN layer ready')"]

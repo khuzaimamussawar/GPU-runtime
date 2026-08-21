@@ -30,4 +30,10 @@ Use `.github/workflows/hetzner-enhancer-build.yml` on `cpx32` by default.
 
 Docker builds do not create TensorRT `.engine` files. FAST carries the engine-builder runtime path for video-only ESRGAN/RIFE jobs; generated engines are built later on compatible NVIDIA GPU pods and stored in private R2/D1. QUALITY is a separate runtime image and may consume compatible active RIFE engines, but it is not the engine-builder image.
 
-Current implementation note: `engine_builder.py` looks for trusted ONNX files for `realesr-animevideov3`, `realesr-general-x4v3`, and `rife-4.9`, but the Dockerfiles do not yet create/bake those ONNX artifacts. Missing ONNX must fail the engine-builder job; it must not create dummy engines.
+The model layers bake the three approved ONNX builder inputs with SHA-256 verification:
+
+- `realesr-animevideov3.onnx` from `tidus2102/Real-ESRGAN`, SHA-256 `00ece3ac21c43ee31459216b5174b2cea0c5325044c5142aeb840f4890e175ff`.
+- `realesr-general-x4v3.onnx` from `CoderViking/realesr-general-x4v3-onnx`, SHA-256 `1940a93ee08283a0a7286183186357b1688fe9fa8ede74604b424586aaddf112`.
+- `rife-4.9.onnx` from `yuvraj108c/rife-onnx`, SHA-256 `76e4cef9ab42fa7dd4e8f6e4aba47462051e3faa969e4bca6479784fbab0ac6f`.
+
+These ONNX files are build inputs only. Product inference uses active `.engine` files when available; ONNX is needed only to build/rebuild engines or to validate provenance.
