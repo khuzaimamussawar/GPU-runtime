@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import threading
 import time
 import traceback
@@ -28,6 +29,7 @@ _LOCK = threading.RLock()
 _CURRENT_JOB_ID: str | None = None
 _IDLE_SINCE: float | None = None
 _IDLE_TIMEOUT_SENT = False
+_DRAINING = False
 
 
 def config() -> RuntimeConfig:
@@ -75,6 +77,10 @@ class JobRecord:
 
 def _event(event_type: str, **extra: Any) -> None:
     payload = {"eventType": event_type, "workerId": config().worker_id, "serviceKind": config().service_kind, **extra}
+    threading.Thread(target=_post_event_background, args=(event_type, payload), daemon=True, name=f"enhancer-callback-{event_type}").start()
+
+
+def _post_event_background(event_type: str, payload: dict[str, Any]) -> None:
     try:
         post_event(config(), payload)
     except Exception as error:
@@ -112,10 +118,10 @@ def _error_code(error: BaseException) -> str:
 
 
 def _run_job(record: JobRecord) -> None:
-    global _CURRENT_JOB_ID, _IDLE_SINCE, _IDLE_TIMEOUT_SENT
+    global _CURRENT_JOB_ID, _IDLE_SINCE, _IDLE_TIMEOUT_SENT, _DRAINING
     with _LOCK:
         record.status = "processing"; record.stage = "starting"; record.started_at = int(time.time() * 1000)
-        record.updated_at = record.started_at; _CURRENT_JOB_ID = record.id; _IDLE_SINCE = None; _IDLE_TIMEOUT_SENT = False
+        record.updated_at = record.started_at; _CURRENT_JOB_ID = record.id; _IDLE_SINCE = None; _IDLE_TIMEOUT_SENT = False; _DRAINING = False
     _event("job_started", jobId=record.id, status=record.status, stage=record.stage)
     try:
         job_type = str(record.payload.get("jobType") or record.payload.get("job_type") or "").strip()
@@ -155,7 +161,7 @@ def _run_job(record: JobRecord) -> None:
                errorCode=record.error_code, error=record.error, debug=record.debug[-40:], telemetry=telemetry(record.public()))
     finally:
         with _LOCK:
-            _CURRENT_JOB_ID = None; _IDLE_SINCE = time.time(); _IDLE_TIMEOUT_SENT = False
+            _CURRENT_JOB_ID = None; _IDLE_SINCE = time.time(); _IDLE_TIMEOUT_SENT = False; _DRAINING = False
         # Ready was emitted before the server ever accepts jobs; idle cannot clear
         # a provisioning job before worker_ready.
         _event("worker_idle", idleSince=int(_IDLE_SINCE * 1000), idleTimeoutSeconds=config().idle_timeout_seconds)
@@ -203,7 +209,7 @@ def _boot() -> None:
 
 
 def _idle_monitor() -> None:
-    global _IDLE_TIMEOUT_SENT
+    global _IDLE_TIMEOUT_SENT, _DRAINING
     while True:
         time.sleep(2)
         with _LOCK:
@@ -212,7 +218,9 @@ def _idle_monitor() -> None:
             continue
         if time.time() - idle_since >= config().idle_timeout_seconds:
             _event("worker_idle_timeout", idleSince=int(idle_since * 1000), idleTimeoutSeconds=config().idle_timeout_seconds)
-            with _LOCK: _IDLE_TIMEOUT_SENT = True
+            with _LOCK:
+                _IDLE_TIMEOUT_SENT = True
+                _DRAINING = True
 
 
 def _capabilities() -> dict[str, Any]:
@@ -243,7 +251,7 @@ def on_startup() -> None:
 @app.get("/health")
 def health() -> dict[str, Any]:
     return {"ok": True, "ready": _READY, "workerId": config().worker_id, "serviceKind": config().service_kind,
-            "busy": _CURRENT_JOB_ID is not None, "startupError": _STARTUP_ERROR or None}
+            "busy": _CURRENT_JOB_ID is not None, "draining": _DRAINING, "startupError": _STARTUP_ERROR or None}
 
 
 @app.get("/ready")
@@ -264,6 +272,45 @@ def get_telemetry() -> dict[str, Any]:
     return telemetry(current.public() if current else None)
 
 
+def _disk_summary() -> dict[str, Any]:
+    try:
+        completed = subprocess.run(["df", "-Pk", "/"], capture_output=True, text=True, timeout=5, check=False)
+        return {"ok": completed.returncode == 0, "stdout": completed.stdout[-2000:], "stderr": completed.stderr[-1000:]}
+    except Exception as error:
+        return {"ok": False, "error": f"{type(error).__name__}: {error}"}
+
+
+def _diagnostics() -> dict[str, Any]:
+    with _LOCK:
+        current = _JOBS.get(_CURRENT_JOB_ID) if _CURRENT_JOB_ID else None
+        jobs = [job.public() for job in _JOBS.values()]
+        worker = {
+            "workerId": config().worker_id,
+            "serviceKind": config().service_kind,
+            "ready": _READY,
+            "busy": _CURRENT_JOB_ID is not None,
+            "currentJobId": _CURRENT_JOB_ID,
+            "idleSince": int(_IDLE_SINCE * 1000) if _IDLE_SINCE else None,
+            "idleTimeoutSent": _IDLE_TIMEOUT_SENT,
+            "draining": _DRAINING,
+            "startupError": _STARTUP_ERROR or None,
+        }
+    return {"ok": True, "worker": worker, "qualification": _QUALIFICATION, "capabilities": _capabilities(),
+            "telemetry": telemetry(current.public() if current else None), "jobs": jobs[-20:], "disk": _disk_summary()}
+
+
+@app.get("/diagnostics")
+def diagnostics(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    _require_auth(authorization)
+    return _diagnostics()
+
+
+@app.get("/diagnostics/gpu")
+def diagnostics_gpu(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    _require_auth(authorization)
+    return {"ok": True, "qualification": _QUALIFICATION, "telemetry": telemetry(None)}
+
+
 @app.post("/jobs")
 async def create_job(request: Request, authorization: str | None = Header(default=None)):
     _require_auth(authorization)
@@ -274,6 +321,8 @@ async def create_job(request: Request, authorization: str | None = Header(defaul
     if not job_id:
         raise HTTPException(status_code=400, detail="job id is required")
     with _LOCK:
+        if _DRAINING:
+            raise HTTPException(status_code=410, detail="Worker is draining after idle timeout")
         existing = _JOBS.get(job_id)
         if existing:
             return existing.public()
