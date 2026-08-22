@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -32,7 +33,7 @@ def _nvidia_query(*, allow_partitioned: bool = False) -> dict[str, Any]:
     name, driver, memory_mb, compute_capability = parts[:4]
     detail = _cmd(["nvidia-smi", "-q"], timeout=20)
     lowered = f"{name}\n{detail}".lower()
-    mig_enabled = "mig mode" in lowered and "current" in lowered and "enabled" in lowered
+    mig_enabled = re.search(r"mig mode\s*:\s*current\s*:\s*enabled", lowered) is not None
     partitioned = (
         " mig " in f" {name.lower()} "
         or "mig device" in lowered
