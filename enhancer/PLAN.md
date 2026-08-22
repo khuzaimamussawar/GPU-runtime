@@ -309,6 +309,8 @@ CuPy/custom op compatibility
 
 FlashVSR v1.1 QUALITY uses BF16 by default. Official v1.1 full inference initializes the model manager and input tensors in `torch.bfloat16`. Our BF16 path must still qualify its sparse-attention implementation on sm86/sm89/sm120.
 
+FlashVSR Block-Sparse-Attention Docker builds are specialized for the approved 24-48 GB SceneBuilder enhancer fleet. Do not compile the upstream broad `80;90;100;110;120` target set: sm90/Hopper, sm100/datacenter Blackwell and sm110/Thor are excluded by the provider allowlist and waste builder time/RAM. Until the pinned Block-Sparse setup supports native sm86/sm89 entries, build `BLOCK_SPARSE_ATTN_CUDA_ARCHS=80;120` with one PTX target from upstream setup behavior: sm80 covers the Ampere/Ada fleet path and sm120 covers Blackwell RTX.
+
 FP16 may exist only as a measured fallback for a GPU/kernel combination that cannot run the approved BF16 path while retaining parity. FP32 is debug/reference only because of VRAM/throughput cost.
 
 ### 6.6 Precision observability
