@@ -20,7 +20,7 @@ def _cmd(args: list[str], timeout: int = 20) -> str:
     return result.stdout.strip()
 
 
-def _nvidia_query(*, allow_partitioned: bool = False) -> dict[str, Any]:
+def _nvidia_query(*, allow_partitioned: bool = True) -> dict[str, Any]:
     query = _cmd([
         "nvidia-smi",
         "--query-gpu=name,driver_version,memory.total,compute_cap",
@@ -67,7 +67,7 @@ def _nvenc_smoke() -> None:
             raise RuntimeError("NVENC_SMOKE_EMPTY")
 
 
-def qualify_gpu(*, require_nvenc: bool = True, allow_partitioned: bool = False) -> dict[str, Any]:
+def qualify_gpu(*, require_nvenc: bool = True, allow_partitioned: bool = True) -> dict[str, Any]:
     import torch
     import cupy as cp
     import tensorrt as trt
