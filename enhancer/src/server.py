@@ -302,3 +302,9 @@ def cancel_job(job_id: str, authorization: str | None = Header(default=None)):
     record.cancel_event.set(); record.stage = "cancelling"; record.updated_at = int(time.time() * 1000)
     _event("job_cancelling", jobId=record.id, status=record.status, stage=record.stage)
     return record.public()
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("H3_POD_PORT", "8000")))
