@@ -205,7 +205,9 @@ def _boot() -> None:
             if trt.Builder(trt.Logger(trt.Logger.WARNING)) is None:
                 raise RuntimeError("TRT_BUILD_FAILED:TensorRT builder unavailable")
         _READY = True
-        _IDLE_SINCE = time.time()
+        # H3 does not start the post-work idle termination clock merely because
+        # a worker became ready. Start it only after a real job finishes.
+        _IDLE_SINCE = None
         # Match H3: boot emits worker_ready once. The control plane immediately
         # dispatches the assigned/waiting job; worker_idle is only a post-job
         # lifecycle event.
