@@ -29,7 +29,34 @@ RUN set -eux; \
     git clone https://github.com/mit-han-lab/Block-Sparse-Attention.git /opt/Block-Sparse-Attention; \
     cd /opt/Block-Sparse-Attention; \
     git checkout "${BLOCK_SPARSE_COMMIT}"; \
-    BLOCK_SPARSE_ATTN_FORCE_BUILD=TRUE BLOCK_SPARSE_ATTN_CUDA_ARCHS='80;120' NVCC_THREADS=1 MAX_JOBS=1 \
+    python3 - <<'PY'
+from pathlib import Path
+
+path = Path("setup.py")
+text = path.read_text()
+old = '''    # Always-regular 80
+    if "80" in archs:
+        cc_flag += ["-gencode", "arch=compute_80,code=sm_80"]
+    # Hopper 9.0 needs >= 11.8
+    if bare_metal_version >= Version("11.8") and "90" in archs:
+        cc_flag += ["-gencode", "arch=compute_90,code=sm_90"]
+'''
+new = '''    # SceneBuilder approved 24-48 GB fleet: Ampere sm86, Ada sm89, Blackwell RTX sm120.
+    if "80" in archs:
+        cc_flag += ["-gencode", "arch=compute_80,code=sm_80"]
+    if bare_metal_version >= Version("11.1") and "86" in archs:
+        cc_flag += ["-gencode", "arch=compute_86,code=sm_86"]
+    if bare_metal_version >= Version("11.8") and "89" in archs:
+        cc_flag += ["-gencode", "arch=compute_89,code=sm_89"]
+    # Hopper 9.0 needs >= 11.8
+    if bare_metal_version >= Version("11.8") and "90" in archs:
+        cc_flag += ["-gencode", "arch=compute_90,code=sm_90"]
+'''
+if old not in text:
+    raise SystemExit("Block-Sparse setup.py gencode anchor missing")
+path.write_text(text.replace(old, new))
+PY
+    BLOCK_SPARSE_ATTN_FORCE_BUILD=TRUE BLOCK_SPARSE_ATTN_CUDA_ARCHS='86;89;120' NVCC_THREADS=1 MAX_JOBS=1 \
       python3 -m pip install --no-build-isolation --no-deps .; \
     python3 - <<'PY'
 import torch
