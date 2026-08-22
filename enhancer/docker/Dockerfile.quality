@@ -16,7 +16,12 @@ COPY src /opt/scenebuilder-enhancer/src
 RUN set -eux; \
     python3 -m compileall -q /opt/scenebuilder-enhancer/src; \
     ffmpeg -hide_banner -encoders 2>&1 | grep -q 'hevc_nvenc'; \
-    ffmpeg -hide_banner -encoders 2>&1 | grep -q 'libx265'
+    ffmpeg -hide_banner -encoders 2>&1 | grep -q 'libx265'; \
+    ffmpeg -v error -f lavfi -i 'color=c=black:s=256x256:r=1' -frames:v 1 \
+      -c:v libx265 -profile:v main10 -pix_fmt yuv420p10le -preset ultrafast -crf 18 \
+      -y /tmp/sb-x265-smoke.mp4; \
+    test -s /tmp/sb-x265-smoke.mp4; \
+    rm -f /tmp/sb-x265-smoke.mp4
 
 ENV H3_POD_PORT=8000 \
     H3_POD_IDLE_TIMEOUT_SECONDS=60 \
