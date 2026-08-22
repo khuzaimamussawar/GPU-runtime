@@ -35,7 +35,12 @@ jobs:
             enhancer/tests/test_h3_lifecycle_parity.py
       - name: Run lightweight lifecycle and NVENC qualification tests
         run: |
-          python -m pytest -q \
-            enhancer/tests/test_callbacks.py \
-            enhancer/tests/test_gpu_qualification.py \
-            enhancer/tests/test_h3_lifecycle_parity.py
+          python - <<'PY'
+          from enhancer.tests import test_callbacks, test_gpu_qualification, test_h3_lifecycle_parity
+
+          for module in (test_callbacks, test_gpu_qualification, test_h3_lifecycle_parity):
+              for name in sorted(dir(module)):
+                  if name.startswith('test_'):
+                      getattr(module, name)()
+                      print(f'PASS {module.__name__}.{name}')
+          PY
