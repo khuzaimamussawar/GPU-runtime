@@ -76,7 +76,14 @@ class JobRecord:
 
 
 def _event(event_type: str, **extra: Any) -> None:
-    payload = {"eventType": event_type, "event": event_type, "workerId": config().worker_id, "serviceKind": config().service_kind, **extra}
+    payload = {
+        "eventType": event_type,
+        "event": event_type,
+        "workerId": config().worker_id,
+        "serviceKind": config().service_kind,
+        "timestamp": time.time(),
+        **extra,
+    }
     threading.Thread(target=_post_event_background, args=(event_type, payload), daemon=True, name=f"enhancer-callback-{event_type}").start()
 
 
@@ -162,9 +169,10 @@ def _run_job(record: JobRecord) -> None:
     finally:
         with _LOCK:
             _CURRENT_JOB_ID = None; _IDLE_SINCE = time.time(); _IDLE_TIMEOUT_SENT = False; _DRAINING = False
-        # Ready was emitted before the server ever accepts jobs; idle cannot clear
-        # a provisioning job before worker_ready.
-        _event("worker_idle", idleSince=int(_IDLE_SINCE * 1000), idleTimeoutSeconds=config().idle_timeout_seconds)
+            idle_since = _IDLE_SINCE
+            timeout = config().idle_timeout_seconds
+        _event("worker_idle", idleSince=idle_since, idleTimeoutSeconds=timeout,
+               terminateAfter=(idle_since + timeout) if timeout > 0 else None)
 
 
 def _require_auth(authorization: str | None) -> None:
@@ -198,8 +206,10 @@ def _boot() -> None:
                 raise RuntimeError("TRT_BUILD_FAILED:TensorRT builder unavailable")
         _READY = True
         _IDLE_SINCE = time.time()
-        _event("worker_ready", qualification=_QUALIFICATION, capabilities=_capabilities())
-        _event("worker_idle", idleSince=int(_IDLE_SINCE * 1000), idleTimeoutSeconds=config().idle_timeout_seconds)
+        # Match H3: boot emits worker_ready once. The control plane immediately
+        # dispatches the assigned/waiting job; worker_idle is only a post-job
+        # lifecycle event.
+        _event("worker_ready", readyAt=time.time(), qualification=_QUALIFICATION, capabilities=_capabilities())
     except Exception as error:
         _STARTUP_ERROR = str(error)
         _READY = False
@@ -217,8 +227,9 @@ def _idle_monitor() -> None:
         if busy or idle_since is None or already or config().idle_timeout_seconds <= 0:
             continue
         if time.time() - idle_since >= config().idle_timeout_seconds:
-            _event("idle_expired", idleSince=int(idle_since * 1000), idleTimeoutSeconds=config().idle_timeout_seconds,
-                   terminateAfter=int((idle_since + config().idle_timeout_seconds) * 1000))
+            timeout = config().idle_timeout_seconds
+            _event("idle_expired", idleSince=idle_since, idleTimeoutSeconds=timeout,
+                   terminateAfter=idle_since + timeout)
             with _LOCK:
                 _IDLE_TIMEOUT_SENT = True
                 _DRAINING = True
