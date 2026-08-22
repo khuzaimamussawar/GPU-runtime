@@ -20,7 +20,7 @@ def _cmd(args: list[str], timeout: int = 20) -> str:
     return result.stdout.strip()
 
 
-def _nvidia_query(*, allow_partitioned: bool = True) -> dict[str, Any]:
+def _nvidia_query() -> dict[str, Any]:
     query = _cmd([
         "nvidia-smi",
         "--query-gpu=name,driver_version,memory.total,compute_cap",
@@ -42,8 +42,6 @@ def _nvidia_query(*, allow_partitioned: bool = True) -> dict[str, Any]:
         or "high-frequency" in lowered
         or "high_frequency" in lowered
     )
-    if partitioned and not allow_partitioned:
-        raise RuntimeError("GPU_PARTITIONED_MIG_FORBIDDEN")
     return {
         "name": name,
         "driverVersion": driver,
@@ -67,7 +65,7 @@ def _nvenc_smoke() -> None:
             raise RuntimeError("NVENC_SMOKE_EMPTY")
 
 
-def qualify_gpu(*, require_nvenc: bool = True, allow_partitioned: bool = True) -> dict[str, Any]:
+def qualify_gpu(*, require_nvenc: bool = True) -> dict[str, Any]:
     import torch
     import cupy as cp
     import tensorrt as trt
@@ -81,7 +79,7 @@ def qualify_gpu(*, require_nvenc: bool = True, allow_partitioned: bool = True) -
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA_UNAVAILABLE")
 
-    details = _nvidia_query(allow_partitioned=allow_partitioned)
+    details = _nvidia_query()
     device = torch.device("cuda:0")
     a = torch.arange(32, device=device, dtype=torch.float32)
     torch_value = float((a * a).sum().item())

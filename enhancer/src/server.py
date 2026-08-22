@@ -97,7 +97,7 @@ def _progress(record: JobRecord, stage: str, value: float, detail: dict[str, Any
 def _error_code(error: BaseException) -> str:
     text = str(error)
     known = [
-        "CUDA_UNAVAILABLE", "CUDA_DRIVER_TOO_OLD", "CUDA_OOM", "GPU_PARTITIONED_MIG_FORBIDDEN",
+        "CUDA_UNAVAILABLE", "CUDA_DRIVER_TOO_OLD", "CUDA_OOM",
         "GPU_CAPABILITY_MISMATCH", "GPU_VRAM_BELOW_POLICY", "TRT_ENGINE_NOT_FOUND",
         "TRT_DESERIALIZE_FAILED", "TRT_BUILD_FAILED", "MODEL_LOAD_FAILED", "RIFE_RUNTIME_FAILED",
         "GIMM_LICENSE_NOT_CLEARED", "FLASHVSR_SELF_TEST_FAILED", "FFMPEG_DECODE_FAILED",
@@ -174,7 +174,7 @@ def _boot() -> None:
     global _READY, _QUALIFICATION, _STARTUP_ERROR, _IDLE_SINCE
     try:
         builder = config().service_kind == "enhancer_engine_builder"
-        _QUALIFICATION = qualify_gpu(require_nvenc=not builder, allow_partitioned=True)
+        _QUALIFICATION = qualify_gpu(require_nvenc=not builder)
         # Service-specific imports/models are deliberately not CPU-fallbacked.
         if config().service_kind == "enhancer_fast":
             from .models import esrgan
