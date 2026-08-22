@@ -10,6 +10,8 @@ on:
       - 'enhancer/src/video_pipeline.py'
       - 'enhancer/src/quality_pipeline.py'
       - 'enhancer/src/vfi_postprocess.py'
+      - 'enhancer/docker/Dockerfile.fast'
+      - 'enhancer/docker/Dockerfile.quality'
       - 'enhancer/tests/test_callbacks.py'
       - 'enhancer/tests/test_gpu_qualification.py'
       - 'enhancer/tests/test_h3_lifecycle_parity.py'
@@ -43,6 +45,12 @@ jobs:
             enhancer/tests/test_gpu_qualification.py \
             enhancer/tests/test_h3_lifecycle_parity.py \
             enhancer/tests/test_video_encoder.py
+      - name: Verify both final images require NVENC and x265 support
+        run: |
+          grep -q "hevc_nvenc" enhancer/docker/Dockerfile.fast
+          grep -q "libx265" enhancer/docker/Dockerfile.fast
+          grep -q "hevc_nvenc" enhancer/docker/Dockerfile.quality
+          grep -q "libx265" enhancer/docker/Dockerfile.quality
       - name: Run lightweight lifecycle and encoder qualification tests
         run: |
           python - <<'PY'
