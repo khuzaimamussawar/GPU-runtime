@@ -52,7 +52,7 @@ def post_event(config: RuntimeConfig, payload: dict[str, Any], timeout: float = 
 
 def _should_try_fallback(error: Exception) -> bool:
     text = str(error)
-    return text.startswith("HTTP 401 ") or text.startswith("HTTP 403 ")
+    return text.startswith("HTTP 401 ") or text.startswith("HTTP 403 ") or text.startswith("HTTP 200 NON_JSON ")
 
 
 def _post_event_once(
@@ -83,7 +83,11 @@ def _post_event_once(
             raw = response.read()
             if not raw:
                 return None
-            return json.loads(raw)
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError as error:
+                text = raw.decode("utf-8", "replace")[:1000]
+                raise RuntimeError(f"HTTP 200 NON_JSON from {control_url}: {text}") from error
     except urllib.error.HTTPError as error:
         body = error.read().decode("utf-8", "replace")[:1000]
         raise RuntimeError(f"HTTP {error.code} {error.reason} from {control_url}: {body}") from error
