@@ -19,6 +19,10 @@ COMMON_TARGETS=(smoke base torch vfi-models)
 FAST_TARGETS=(esrgan-models fast)
 QUALITY_TARGETS=(flashvsr-runtime flashvsr-models quality)
 ALL_TARGETS=("${COMMON_TARGETS[@]}" "${FAST_TARGETS[@]}" "${QUALITY_TARGETS[@]}")
+if [ "${docker_build_attempts:-0}" -lt 1 ]; then
+  echo "DOCKER_BUILD_ATTEMPTS=${docker_build_attempts} is below 1; using 1."
+  docker_build_attempts=1
+fi
 
 valid_target() {
   case "$1" in
@@ -178,19 +182,31 @@ echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
 docker buildx create --name enhancerbuilder --use 2>/dev/null || docker buildx use enhancerbuilder
 
 targets_csv="${BUILD_TARGETS:-}"
-if [ -z "${targets_csv// }" ]; then targets_csv="$BUILD_TARGET"; fi
+csv_mode=1
+if [ -z "${targets_csv// }" ]; then
+  targets_csv="$BUILD_TARGET"
+  csv_mode=0
+fi
 EXPANDED_TARGETS=()
 IFS=',' read -ra targets <<< "$targets_csv"
 for raw in "${targets[@]}"; do
   target="$(echo "$raw" | xargs)"
   [ -z "$target" ] && continue
-  case "$target" in
-    all) append_all_targets ;;
-    remaining) append_remaining_targets ;;
-    fast) append_fast_targets ;;
-    quality) append_quality_targets ;;
-    *) append_target "$target" ;;
-  esac
+  if [ "$csv_mode" -eq 1 ]; then
+    case "$target" in
+      all) append_all_targets ;;
+      remaining) append_remaining_targets ;;
+      *) append_target "$target" ;;
+    esac
+  else
+    case "$target" in
+      all) append_all_targets ;;
+      remaining) append_remaining_targets ;;
+      fast) append_fast_targets ;;
+      quality) append_quality_targets ;;
+      *) append_target "$target" ;;
+    esac
+  fi
 done
 
 if [ "${#EXPANDED_TARGETS[@]}" -eq 0 ]; then
