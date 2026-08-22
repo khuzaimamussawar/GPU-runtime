@@ -33,7 +33,14 @@ def _nvidia_query(*, allow_partitioned: bool = False) -> dict[str, Any]:
     detail = _cmd(["nvidia-smi", "-q"], timeout=20)
     lowered = f"{name}\n{detail}".lower()
     mig_enabled = "mig mode" in lowered and "current" in lowered and "enabled" in lowered
-    partitioned = " mig " in f" {name.lower()} " or "mig device" in lowered or mig_enabled
+    partitioned = (
+        " mig " in f" {name.lower()} "
+        or "mig device" in lowered
+        or mig_enabled
+        or "high frequency" in lowered
+        or "high-frequency" in lowered
+        or "high_frequency" in lowered
+    )
     if partitioned and not allow_partitioned:
         raise RuntimeError("GPU_PARTITIONED_MIG_FORBIDDEN")
     return {
