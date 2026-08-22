@@ -1,0 +1,43 @@
+name: Temporary Patch Enhancer Production Fix
+
+on:
+  push:
+    branches: ['fix/enhancer-ui-provider-nvenc']
+    paths:
+      - '.github/enhancer-production-fix-trigger'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Align Enhancer boot idle lifecycle with H3
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('enhancer/src/server.py')
+          text = path.read_text()
+          old = '''        _READY = True\n        _IDLE_SINCE = time.time()\n        # Match H3: boot emits worker_ready once. The control plane immediately\n'''
+          new = '''        _READY = True\n        # H3 does not start the post-work idle termination clock merely because\n        # a worker became ready. Start it only after a real job finishes.\n        _IDLE_SINCE = None\n        # Match H3: boot emits worker_ready once. The control plane immediately\n'''
+          count = text.count(old)
+          if count != 1:
+              raise SystemExit(f'expected one Enhancer boot idle anchor, found {count}')
+          text = text.replace(old, new, 1)
+          path.write_text(text)
+          PY
+          python3 -m py_compile enhancer/src/server.py enhancer/src/callbacks.py enhancer/src/gpu.py
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add enhancer/src/server.py
+          if ! git diff --cached --quiet; then
+            git commit -m 'Start Enhancer idle expiry only after work'
+            git push origin HEAD:fix/enhancer-ui-provider-nvenc
+          fi
