@@ -23,6 +23,7 @@ class RuntimeConfig:
     worker_id: str
     pod_token: str
     control_url: str
+    fallback_control_url: str
     r2_bucket: str
     r2_endpoint: str
     r2_access_key: str
@@ -42,6 +43,7 @@ class RuntimeConfig:
             worker_id=_required("SCENEBUILDER_WORKER_ID"),
             pod_token=_required("SCENEBUILDER_POD_TOKEN"),
             control_url=_required("SCENEBUILDER_CONTROL_URL").rstrip("/"),
+            fallback_control_url=os.environ.get("SCENEBUILDER_CONTROL_URL_FALLBACK", "").strip().rstrip("/"),
             r2_bucket=_required("R2_BUCKET_NAME"),
             r2_endpoint=_required("R2_ENDPOINT"),
             r2_access_key=_required("R2_ACCESS_KEY"),
