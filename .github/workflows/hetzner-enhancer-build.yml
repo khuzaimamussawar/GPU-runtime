@@ -71,6 +71,11 @@ on:
         required: true
         default: "2"
         type: string
+      builder_swap_gb:
+        description: "Optional builder swap in GB; 0 fails fast on RAM pressure"
+        required: true
+        default: "0"
+        type: string
 
 permissions:
   contents: read
@@ -126,6 +131,7 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           GH_FH_TOKEN_MM_H3_SERVERLESS: ${{ secrets.GH_FH_TOKEN_MM_H3_SERVERLESS }}
           DOCKER_BUILD_ATTEMPTS: ${{ inputs.docker_build_attempts }}
+          BUILDER_SWAP_GB: ${{ inputs.builder_swap_gb }}
         run: |
           set -Eeuo pipefail
           ssh -i "${SSH_KEY_PATH}" \
@@ -144,6 +150,7 @@ jobs:
              HF_TOKEN='${HF_TOKEN}' \
              GH_FH_TOKEN_MM_H3_SERVERLESS='${GH_FH_TOKEN_MM_H3_SERVERLESS}' \
              DOCKER_BUILD_ATTEMPTS='${DOCKER_BUILD_ATTEMPTS}' \
+             BUILDER_SWAP_GB='${BUILDER_SWAP_GB}' \
              GITHUB_REPOSITORY='${GITHUB_REPOSITORY}' \
              GITHUB_REF_NAME='${GITHUB_REF_NAME}' \
              bash -s" < enhancer/scripts/remote_build.sh
