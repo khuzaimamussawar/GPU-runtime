@@ -173,7 +173,8 @@ def _require_auth(authorization: str | None) -> None:
 def _boot() -> None:
     global _READY, _QUALIFICATION, _STARTUP_ERROR, _IDLE_SINCE
     try:
-        _QUALIFICATION = qualify_gpu(require_nvenc=config().service_kind != "enhancer_engine_builder")
+        builder = config().service_kind == "enhancer_engine_builder"
+        _QUALIFICATION = qualify_gpu(require_nvenc=not builder, allow_partitioned=not builder)
         # Service-specific imports/models are deliberately not CPU-fallbacked.
         if config().service_kind == "enhancer_fast":
             from .models import esrgan

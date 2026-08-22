@@ -19,7 +19,7 @@ def _cmd(args: list[str], timeout: int = 20) -> str:
     return result.stdout.strip()
 
 
-def _nvidia_query() -> dict[str, Any]:
+def _nvidia_query(*, allow_partitioned: bool = False) -> dict[str, Any]:
     query = _cmd([
         "nvidia-smi",
         "--query-gpu=name,driver_version,memory.total,compute_cap",
@@ -32,16 +32,16 @@ def _nvidia_query() -> dict[str, Any]:
     name, driver, memory_mb, compute_capability = parts[:4]
     detail = _cmd(["nvidia-smi", "-q"], timeout=20)
     lowered = f"{name}\n{detail}".lower()
-    # The enhancer fleet is full-GPU only. Provider/runtime signals mentioning
-    # MIG/partitioning cause boot qualification to fail before /ready.
     mig_enabled = "mig mode" in lowered and "current" in lowered and "enabled" in lowered
-    if " mig " in f" {name.lower()} " or "mig device" in lowered or mig_enabled:
+    partitioned = " mig " in f" {name.lower()} " or "mig device" in lowered or mig_enabled
+    if partitioned and not allow_partitioned:
         raise RuntimeError("GPU_PARTITIONED_MIG_FORBIDDEN")
     return {
         "name": name,
         "driverVersion": driver,
         "vramMb": int(float(memory_mb)),
         "computeCapability": compute_capability,
+        "partitioned": partitioned,
     }
 
 
@@ -59,7 +59,7 @@ def _nvenc_smoke() -> None:
             raise RuntimeError("NVENC_SMOKE_EMPTY")
 
 
-def qualify_gpu(*, require_nvenc: bool = True) -> dict[str, Any]:
+def qualify_gpu(*, require_nvenc: bool = True, allow_partitioned: bool = False) -> dict[str, Any]:
     import torch
     import cupy as cp
     import tensorrt as trt
@@ -73,7 +73,7 @@ def qualify_gpu(*, require_nvenc: bool = True) -> dict[str, Any]:
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA_UNAVAILABLE")
 
-    details = _nvidia_query()
+    details = _nvidia_query(allow_partitioned=allow_partitioned)
     device = torch.device("cuda:0")
     a = torch.arange(32, device=device, dtype=torch.float32)
     torch_value = float((a * a).sum().item())
