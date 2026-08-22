@@ -4,6 +4,9 @@ import functools
 import subprocess
 from typing import Any
 
+QUALITY_MIN = 12
+QUALITY_MAX = 25
+
 
 def normalize_video_encoder(settings: dict[str, Any] | None = None) -> str:
     raw = str((settings or {}).get("videoEncoder") or (settings or {}).get("video_encoder") or "nvenc").strip().lower()
@@ -19,7 +22,7 @@ def _clamp_quality(value: Any, default: int) -> int:
         parsed = int(value)
     except (TypeError, ValueError):
         parsed = default
-    return max(0, min(51, parsed))
+    return max(QUALITY_MIN, min(QUALITY_MAX, parsed))
 
 
 @functools.lru_cache(maxsize=2)
@@ -67,4 +70,4 @@ def video_encoder_failure_code(settings: dict[str, Any] | None = None) -> str:
     return "X265_ENCODE_FAILED" if normalize_video_encoder(settings) == "x265" else "NVENC_ENCODE_FAILED"
 
 
-__all__ = ["normalize_video_encoder", "video_encoder_args", "video_encoder_failure_code"]
+__all__ = ["normalize_video_encoder", "video_encoder_args", "video_encoder_failure_code", "QUALITY_MIN", "QUALITY_MAX"]
