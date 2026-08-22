@@ -70,6 +70,7 @@ def _post_event_once(
         method="POST",
         headers={
             "Content-Type": "application/json",
+            "User-Agent": "SceneBuilder-Enhancer-Pod/1.0",
             "X-SceneBuilder-Worker-Id": config.worker_id,
             "X-SceneBuilder-Timestamp": str(timestamp_ms),
             "X-SceneBuilder-Nonce": nonce,
