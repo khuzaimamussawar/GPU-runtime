@@ -5,7 +5,7 @@ from unittest.mock import patch
 from enhancer.src import gpu
 
 
-def test_nvenc_smoke_uses_valid_hevc_main10_geometry():
+def test_nvenc_smoke_uses_valid_hevc_main10_geometry_and_production_flags():
     calls: list[list[str]] = []
 
     def fake_cmd(args: list[str], timeout: int = 20) -> str:
@@ -21,9 +21,12 @@ def test_nvenc_smoke_uses_valid_hevc_main10_geometry():
 
     encode = next(args for args in calls if "hevc_nvenc" in args and "-encoders" not in args)
     assert "color=c=black:s=256x256:r=1" in encode
-    assert "-profile:v" in encode
-    assert "main10" in encode
-    assert "p010le" in encode
+    assert encode[encode.index("-profile:v") + 1] == "main10"
+    assert encode[encode.index("-pix_fmt") + 1] == "p010le"
+    assert encode[encode.index("-preset") + 1] == "p6"
+    assert encode[encode.index("-rc") + 1] == "vbr"
+    assert encode[encode.index("-cq") + 1] == "17"
+    assert encode[encode.index("-tag:v") + 1] == "hvc1"
     assert "128x128" not in " ".join(encode)
 
 
