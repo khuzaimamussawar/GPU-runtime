@@ -49,6 +49,7 @@ def video_encoder_args(settings: dict[str, Any] | None = None) -> list[str]:
         crf = _clamp_quality(cfg.get("x265Crf"), 15)
         return [
             "-c:v", "libx265",
+            "-profile:v", "main10",
             "-preset", "medium",
             "-crf", str(crf),
             "-pix_fmt", "yuv420p10le",
