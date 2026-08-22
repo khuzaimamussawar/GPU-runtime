@@ -72,14 +72,13 @@ def _nvenc_smoke() -> None:
         raise RuntimeError("NVENC_HEVC_ENCODER_MISSING")
     with tempfile.TemporaryDirectory(prefix="sb-nvenc-") as tmp:
         output = Path(tmp) / "smoke.mp4"
-        # Do not use a 128px-wide HEVC qualification frame. NVENC on newer
-        # generations rejects that tiny HEVC width before the real Enhancer job
-        # ever starts. Exercise the same HEVC Main10/p010 path as production with
-        # a small but valid 256x256 frame instead.
+        # Exercise the same HEVC Main10/CQ encoder contract used by production.
+        # 128px-wide HEVC is rejected by NVENC on relevant GPUs, so use 256x256.
         _cmd([
             "ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=256x256:r=1",
             "-frames:v", "1", "-c:v", "hevc_nvenc", "-profile:v", "main10",
-            "-pix_fmt", "p010le", "-y", str(output),
+            "-pix_fmt", "p010le", "-preset", "p6", "-rc", "vbr", "-cq", "17",
+            "-tag:v", "hvc1", "-y", str(output),
         ], timeout=30)
         if not output.is_file() or output.stat().st_size <= 0:
             raise RuntimeError("NVENC_SMOKE_EMPTY")
