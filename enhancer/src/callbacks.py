@@ -71,6 +71,7 @@ def _post_event_once(
         headers={
             "Content-Type": "application/json",
             "User-Agent": "SceneBuilder-Enhancer-Pod/1.0",
+            "Authorization": f"Bearer {config.pod_token}",
             "X-SceneBuilder-Worker-Id": config.worker_id,
             "X-SceneBuilder-Timestamp": str(timestamp_ms),
             "X-SceneBuilder-Nonce": nonce,

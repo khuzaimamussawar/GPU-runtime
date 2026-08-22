@@ -76,7 +76,7 @@ class JobRecord:
 
 
 def _event(event_type: str, **extra: Any) -> None:
-    payload = {"eventType": event_type, "workerId": config().worker_id, "serviceKind": config().service_kind, **extra}
+    payload = {"eventType": event_type, "event": event_type, "workerId": config().worker_id, "serviceKind": config().service_kind, **extra}
     threading.Thread(target=_post_event_background, args=(event_type, payload), daemon=True, name=f"enhancer-callback-{event_type}").start()
 
 
@@ -217,7 +217,8 @@ def _idle_monitor() -> None:
         if busy or idle_since is None or already or config().idle_timeout_seconds <= 0:
             continue
         if time.time() - idle_since >= config().idle_timeout_seconds:
-            _event("worker_idle_timeout", idleSince=int(idle_since * 1000), idleTimeoutSeconds=config().idle_timeout_seconds)
+            _event("idle_expired", idleSince=int(idle_since * 1000), idleTimeoutSeconds=config().idle_timeout_seconds,
+                   terminateAfter=int((idle_since + config().idle_timeout_seconds) * 1000))
             with _LOCK:
                 _IDLE_TIMEOUT_SENT = True
                 _DRAINING = True
@@ -258,6 +259,8 @@ def health() -> dict[str, Any]:
 def ready():
     if not _READY:
         return JSONResponse({"ready": False, "error": _STARTUP_ERROR or "qualifying"}, status_code=503)
+    if _DRAINING:
+        return JSONResponse({"ready": False, "status": "draining", "qualification": _QUALIFICATION}, status_code=503)
     return {"ready": True, "qualification": _QUALIFICATION}
 
 
@@ -280,6 +283,28 @@ def _disk_summary() -> dict[str, Any]:
         return {"ok": False, "error": f"{type(error).__name__}: {error}"}
 
 
+def _nvidia_smi_summary() -> dict[str, Any]:
+    command = [
+        "nvidia-smi",
+        "--query-gpu=name,uuid,driver_version,memory.total,memory.used,memory.free,utilization.gpu,temperature.gpu,power.draw",
+        "--format=csv,noheader,nounits",
+    ]
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=10, check=True)
+        rows = []
+        for line in completed.stdout.splitlines():
+            parts = [part.strip() for part in line.split(",")]
+            if len(parts) >= 9:
+                rows.append({
+                    "name": parts[0], "uuid": parts[1], "driverVersion": parts[2],
+                    "memoryTotalMiB": parts[3], "memoryUsedMiB": parts[4], "memoryFreeMiB": parts[5],
+                    "utilizationGpuPercent": parts[6], "temperatureGpuC": parts[7], "powerDrawW": parts[8],
+                })
+        return {"ok": True, "gpus": rows}
+    except Exception as error:
+        return {"ok": False, "error": f"{type(error).__name__}: {error}", "gpus": []}
+
+
 def _diagnostics() -> dict[str, Any]:
     with _LOCK:
         current = _JOBS.get(_CURRENT_JOB_ID) if _CURRENT_JOB_ID else None
@@ -296,7 +321,8 @@ def _diagnostics() -> dict[str, Any]:
             "startupError": _STARTUP_ERROR or None,
         }
     return {"ok": True, "worker": worker, "qualification": _QUALIFICATION, "capabilities": _capabilities(),
-            "telemetry": telemetry(current.public() if current else None), "jobs": jobs[-20:], "disk": _disk_summary()}
+            "telemetry": telemetry(current.public() if current else None), "jobs": jobs[-20:],
+            "disk": _disk_summary(), "nvidiaSmi": _nvidia_smi_summary()}
 
 
 @app.get("/diagnostics")
@@ -308,7 +334,7 @@ def diagnostics(authorization: str | None = Header(default=None)) -> dict[str, A
 @app.get("/diagnostics/gpu")
 def diagnostics_gpu(authorization: str | None = Header(default=None)) -> dict[str, Any]:
     _require_auth(authorization)
-    return {"ok": True, "qualification": _QUALIFICATION, "telemetry": telemetry(None)}
+    return {"ok": True, "qualification": _QUALIFICATION, "telemetry": telemetry(None), "nvidiaSmi": _nvidia_smi_summary()}
 
 
 @app.post("/jobs")
@@ -322,7 +348,7 @@ async def create_job(request: Request, authorization: str | None = Header(defaul
         raise HTTPException(status_code=400, detail="job id is required")
     with _LOCK:
         if _DRAINING:
-            raise HTTPException(status_code=410, detail="Worker is draining after idle timeout")
+            raise HTTPException(status_code=409, detail="Worker is draining after idle timeout")
         existing = _JOBS.get(job_id)
         if existing:
             return existing.public()
