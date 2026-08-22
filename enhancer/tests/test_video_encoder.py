@@ -8,6 +8,7 @@ def test_nvenc_is_default_and_keeps_cq_control():
         args = video_encoder.video_encoder_args({"nvencCq": 19})
     assert video_encoder.normalize_video_encoder({}) == "nvenc"
     assert args[args.index("-c:v") + 1] == "hevc_nvenc"
+    assert args[args.index("-profile:v") + 1] == "main10"
     assert args[args.index("-cq") + 1] == "19"
     assert "libx265" not in args
 
@@ -17,7 +18,9 @@ def test_x265_is_exclusive_and_keeps_crf_control():
         args = video_encoder.video_encoder_args({"videoEncoder": "x265", "x265Crf": 14, "nvencCq": 20})
     assert video_encoder.normalize_video_encoder({"videoEncoder": "x265"}) == "x265"
     assert args[args.index("-c:v") + 1] == "libx265"
+    assert args[args.index("-profile:v") + 1] == "main10"
     assert args[args.index("-crf") + 1] == "14"
+    assert args[args.index("-pix_fmt") + 1] == "yuv420p10le"
     assert "hevc_nvenc" not in args
     assert "-cq" not in args
 
