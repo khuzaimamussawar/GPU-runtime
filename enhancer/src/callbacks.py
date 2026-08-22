@@ -14,10 +14,10 @@ H3_EVENT_PATH = "/api/projects/v2/h3/pod/events"
 def event_url(control_url: str) -> str:
     url = control_url.rstrip("/")
     if url.endswith(H3_EVENT_PATH):
-        return url
+        return f"{url[:-len(H3_EVENT_PATH)]}{EVENT_PATH}"
     if url.endswith(EVENT_PATH):
-        return f"{url[:-len(EVENT_PATH)]}{H3_EVENT_PATH}"
-    return f"{url}{H3_EVENT_PATH}"
+        return url
+    return f"{url}{EVENT_PATH}"
 
 
 def post_event(config: RuntimeConfig, payload: dict[str, Any], timeout: float = 15.0) -> dict[str, Any] | None:
