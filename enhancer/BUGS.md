@@ -1,109 +1,39 @@
-# Enhancer production checklist
+# Enhancer production handoff
 
-This is the handoff/checklist for SceneBuilder2 + GPU-runtime Enhancer work. H3 generation logic is working and must not be modified to solve Enhancer issues.
+H3 video generation is the parity reference. Do not change H3 implementation logic to solve Enhancer issues.
 
-## Current state
+## Baseline
+- SceneBuilder2 PR #99 merged.
+- GPU-runtime PR #12 merged.
+- SceneBuilder2 PR #100 is the coordinated final repo-level parity pass.
+- GPU-runtime PR #13 pins the same runtime boundary and CI contract.
+- SceneBuilder PR #97 was not merged with stale ancestry; its two-file `AMPERE_PLUS` routing fix was cleanly carried onto current SceneBuilder `main` in PR #100.
 
-- SceneBuilder2 PR #99 is merged.
-- GPU-runtime PR #12 is merged.
-- No H3 implementation files were intentionally changed by those Enhancer fixes.
+## Repo-level items closed in PR #100 / #13
+- Admin visibility/defaults: Enhancer Admin and H3 advanced text-encoder/Sage/Spectrum controls are allowlisted-admin only. Normal users use safe defaults. Enhancer normal-user output encoder remains NVENC CQ 17.
+- Encoder contract: NVENC CQ and x265 CRF are clamped to 12-25 through SceneBuilder and GPU runtime. Defaults are NVENC CQ 17 and x265 CRF 15. One encoder is active per job.
+- Encoder-aware derivative identity: SceneBuilder persists the active encoder + quality signature (`nvenc:cq=N` or `x265:crf=N`) and compares it for `Upscale remaining`, while original-source grouping continues to ignore trim/linkage.
+- Warm-pod parity: SceneBuilder can lend compatible FAST/QUALITY idle workers across Director projects/users with target-project duration-derived cap accounting and hard max 8; engine builders remain globally reusable and prioritized.
+- Idle retention/reaping considers compatible queued Director work globally; busy workers are not idle-reaper candidates.
+- Provider parity remains: RunPod normal tag refs + digest identity, SECURE -> COMMUNITY fallback; Novita H3-compatible create/status/delete paths and transient-read tolerance.
+- FAST and QUALITY Dockerfiles already verify FFmpeg exposes both `hevc_nvenc` and `libx265`; real NVENC hardware qualification is job-specific.
+- `enhancer/runtime-contract.json` is mirrored in SceneBuilder and GPU-runtime for port 8000, H3 callback path, service kinds, 60s idle default, max-8 video pool, and encoder names/defaults/ranges. GPU parity CI now watches and executes the contract test.
 
-## Admin / user behavior
+## Intentionally unchanged in this pass
+- Do not change `enhancer/src/callbacks.py` callback transport/parsing yet.
+- Do not change H3 runtime implementation files.
+- Keep pod API port **8000**. It is the inbound HTTP service used for `/health`, `/ready`, `/jobs`, and provider proxy mapping; it is unrelated to Cloudflare Access intercepting the pod's outbound HTTPS callback.
 
-- Enhancer Admin and H3 Admin controls must only be visible to the existing allowed admin emails, same policy as H3.
-- Normal users do not see admin controls and use saved/default settings.
-- Enhancer video encoder default for normal users: `NVENC`, `CQ 17`.
-- Admin may override encoder to exactly one of:
-  - `NVENC` -> `CQ` only, range `12-25`.
-  - `x265/libx265` -> `CRF` only, range `12-25`.
-- Keep both saved values when switching encoder; only the selected encoder is active for a job.
-- Every video job must carry `videoEncoder`, `nvencCq`, and `x265Crf`; pod runtime must use job settings, not hidden Docker/env overrides.
-- **Known remaining SceneBuilder bug:** `updateEnhancerConfig()` still clamps `default_nvenc_cq` and `default_x265_crf` to `0-51`; change backend enforcement to `12-25` so UI limits are not the only guard.
-- When Director Controls tab is `Upscale`, per-clip/timeline primary actions must say `Upscale/Re-upscale`, not `Generate/Regenerate`.
-- Bulk Upscale Selected/All must use a proper modal like Generate Selected/All with explicit `remaining` vs `re-upscale all` choice.
+## Callback / Access state
+- The observed production callback response is Cloudflare Access HTTP 200 sign-in HTML on pod -> SceneBuilder callbacks.
+- The FAST image that logged `HTTP 200 NON_JSON` was not rebuilt after the last GPU-runtime callback parity changes, so it is running older callback code. Rebuild the final Docker layers before diagnosing callback-client behavior again.
+- Direct pod polling/reconciliation remains authoritative recovery.
+- Production still needs a live Access check and, if desired, a narrow machine-to-machine policy for `/api/projects/v2/h3/pod/events` rather than making the Worker public.
 
-## Encoder/runtime
-
-- FAST and QUALITY images must contain FFmpeg with both `hevc_nvenc` and `libx265`.
-- Add/keep a build or smoke assertion that both encoders are exposed by FFmpeg in the final FAST/QUALITY image.
-- Pod boot performs base GPU/CUDA qualification only.
-- NVENC hardware smoke runs only for a job that selected NVENC; x265 jobs must not fail because NVENC is unavailable.
-- NVENC uses HEVC Main10/p010 + CQ; x265 uses HEVC 10-bit + CRF.
-- Keep GPU enhancement (ESRGAN/RIFE/FlashVSR/TensorRT) on GPU regardless of final encoder choice.
-- Previous failure fixed: invalid 128x128 NVENC HEVC smoke caused FFmpeg exit status 234. Use a valid 256x256 probe and include FFmpeg stderr/stdout in errors.
-
-## Idle / warm-pod behavior — NEXT REQUIRED PARITY ITEM
-
-- A worker must not start its 60s termination timer merely because one job finished if compatible queued work still exists.
-- Before entering idle countdown, SceneBuilder should try to hand the worker another compatible queued job.
-- This should include compatible FAST/QUALITY work from another user/project when safe, matching H3 warm-pool/lending behavior rather than permanently project-scoping an otherwise usable GPU.
-- Engine-builder workers should likewise take the next compatible queued engine build before idle countdown.
-- The 60s termination timer starts only after the worker is actually idle: no compatible queued job remains for that image/service/GPU capability.
-- Do not delete a busy worker. Provider deletion retry is separate from GPU-job retry.
-- Re-check current SceneBuilder warm-worker ownership/accounting before implementing cross-project lending so per-project max-8 accounting is not corrupted.
-
-## Engine builder
-
-- `.engine` builder uses FAST image.
-- One healthy compatible builder should process the engine queue sequentially.
-- Without Force rebuild: completed/active matching profiles are reused; failed/cancelled/missing profiles may be created again.
-- With Force rebuild: intentionally rebuild requested profiles.
-- Keep one resolved Docker image digest across a running engine batch so `latest` changing mid-batch does not switch builders.
-- D1 idempotency unique index must not reserve failed/cancelled builds.
-
-## Fresh image behavior
-
-- Keep provider image reference as normal Docker tag (for example `:latest`) because RunPod/Novita expect tag-style image fields.
-- Resolve Docker Hub `latest` manifest digest separately and store/compare it for warm-worker freshness.
-- Force Fresh ON: reuse only a warm worker whose recorded runtime digest equals current Docker Hub digest; otherwise retire stale idle worker and start a new tagged pod.
-- Public Docker Hub repos use anonymous short-lived registry pull token; no long-lived Cloudflare DockerHub secret required for digest lookup.
-- Previous symptom: Fresh ON could create no pod when provider was given `repo@sha256:...`; Fresh OFF with `:latest` started correctly.
-
-## Provider parity
-
-- RunPod: follow H3 availability fallback `SECURE -> COMMUNITY`.
-- Novita create payload should use H3-compatible fields (`kind`, `billingMode`, `autoRenew`, etc.).
-- Novita instance status/delete verification must use `GET /gpu/instance?instanceId=...`; never the broken `/gpu/instance/{id}` path.
-- Do not treat a transient Novita read failure/404 as proof the instance is gone.
-- Previous errors: `PROVIDER_HTTP_404: 404 page not found`, `startup_queue_aborted`, `provider_not_found`, followed by immediate deletion.
-
-## Callback / recovery behavior
-
-- Pod callback auth shape matches H3: JSON + `Authorization: Bearer <pod token>`.
-- Cloudflare Access has returned HTTP 200 sign-in HTML on `/api/projects/v2/h3/pod/events`; Enhancer exposed this as `HTTP 200 NON_JSON` while H3 treats any 2xx as callback success.
-- Do not depend on callbacks as the sole source of truth. Keep H3-style direct pod polling/reconciliation (`/jobs/{id}` for Enhancer) to recover progress/completion.
-- Callback/recovery events must be order-safe: duplicate `worker_ready`, stale `worker_idle`, late progress, duplicate terminal callbacks must not move state backward or clear an active assignment.
-- GPU/job failures are terminal; do not rerun the same failed GPU job automatically. Provider deletion retry is allowed separately.
-
-## D1 / control-plane invariants
-
-- Enhancer schema bootstrap/compatibility must create/repair required tables, columns, indexes, dispatch locks, and config rows on Worker request/maintenance path even if a migration was missed.
-- Known historical error fixed: `UNIQUE constraint failed: enhancer_engine_builds.idempotency_key` on Force rebuild.
-- Normal job dispatch and engine dispatch must be serialized/leased to avoid duplicate pod provisioning.
-- GPU-success + SceneBuilder writeback failure must leave job as `writeback_failed` but release the worker for more work; do not rerun GPU work.
-- Original-video dedupe must remain based on full source identity + derivative settings, never clip trim/link state. GPU pipelines process the full original source file.
-- **Known remaining SceneBuilder bug:** `videoDedupeKey()` currently uses source/model/mode/target/fps/interpolation but not encoder/CQ/CRF. Add `videoEncoder` plus the active quality value so switching NVENC/x265 or quality cannot incorrectly collapse/reuse a different derivative.
-
-## Scaling
-
-- Target roughly 30 seconds of unique original-video work per active pod, max 8 live pods per project, matching H3 intent.
-- Cross-project warm-pod lending must not break project accounting or the per-project cap.
-- Do not reintroduce MIG/partition rejection.
-
-## Errors encountered
-
-- D1 `SQLITE_CONSTRAINT_UNIQUE` on engine Force rebuild.
-- RunPod Fresh ON: no pod when digest-form provider image was used.
-- Novita `PROVIDER_HTTP_404: 404 page not found` -> `startup_queue_aborted` -> `provider_not_found` -> immediate delete.
-- Cloudflare Access callback response: HTTP 200 sign-in HTML / `NON_JSON`.
-- NVENC qualification failure: FFmpeg exit status 234 from 128x128 HEVC probe.
-- Enhancer callbacks could be lost/out-of-order; recovery polling must remain authoritative backup.
-
-## Deploy / build / smoke checklist
-
-1. Confirm SceneBuilder main containing PR #99 is deployed by Cloudflare.
-2. Rebuild and push Enhancer FAST + QUALITY `latest` from GPU-runtime main. Engine builder uses FAST.
-3. Confirm Docker Hub digest changed and new pods report the new digest.
-4. Smoke test RunPod and Novita separately.
-5. Smoke test FAST ESRGAN, RIFE interpolation, QUALITY/FlashVSR, NVENC CQ, x265 CRF, engine resume without Force, and Force rebuild.
-6. Next work pass: implement/verify admin-email visibility, backend 12-25 enforcement, encoder-aware dedupe, and H3-style cross-project warm-pod lending/idle timing before calling Enhancer fully complete.
+## Deployment-only work remaining
+1. Merge SceneBuilder2 PR #100 and GPU-runtime PR #13 after green parity checks.
+2. Deploy SceneBuilder `main` and verify production D1 compatibility/bootstrap, especially engine idempotency partial index, dispatch locks, worker digest fields, config JSON, and pending-upscale columns.
+3. Rebuild/push **FAST** and **QUALITY** Docker `latest` from merged GPU-runtime `main` (engine builder uses FAST).
+4. Verify Docker Hub digest changed and new workers report the expected digest.
+5. Smoke RunPod + Novita, Fresh Image ON/OFF, FAST ESRGAN, RIFE, QUALITY/FlashVSR, NVENC CQ, x265 CRF, engine resume, Force Rebuild, encoder-aware `Upscale remaining`, and cross-project warm-worker reuse.
+6. Re-check callback logs only after rebuilt images are running; separately verify whether Cloudflare Access is allowing the machine-to-machine callback to reach the Worker.
