@@ -9,7 +9,7 @@ import av
 import cv2
 import numpy as np
 
-from .engine_runtime import try_interpolate_rife_trt
+from .engine_runtime import is_fatal_cuda_error, try_interpolate_rife_trt
 from .models import interpolate_rife
 from .video_encoder import normalize_video_encoder, video_encoder_args, video_encoder_failure_code
 
@@ -95,7 +95,7 @@ def interpolate_file(
                 try:
                     rgb = try_interpolate_rife_trt(prev_rgb, current_rgb, alpha, settings or {})
                 except Exception as error:
-                    if settings and not settings.get("allowNativeFallback", True):
+                    if is_fatal_cuda_error(error) or (settings and not settings.get("allowNativeFallback", True)):
                         raise
                     print(f"[enhancer] TensorRT RIFE fallback to native PyTorch: {error}", flush=True)
                     rgb = None
