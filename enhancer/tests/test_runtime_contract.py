@@ -1,5 +1,7 @@
 import json
+import os
 from pathlib import Path
+from unittest.mock import patch
 
 from enhancer.src import callbacks, video_encoder
 from enhancer.src.config import RuntimeConfig
@@ -8,7 +10,7 @@ from enhancer.src.config import RuntimeConfig
 CONTRACT = json.loads((Path(__file__).parents[1] / "runtime-contract.json").read_text())
 
 
-def _runtime_env(monkeypatch):
+def test_shared_transport_and_runtime_defaults_match_contract():
     values = {
         "SCENEBUILDER_WORKER_ID": "worker-test",
         "SCENEBUILDER_POD_TOKEN": "token-test",
@@ -18,15 +20,8 @@ def _runtime_env(monkeypatch):
         "R2_ACCESS_KEY": "access",
         "R2_SECRET_KEY": "secret",
     }
-    for key, value in values.items():
-        monkeypatch.setenv(key, value)
-    monkeypatch.delenv("H3_POD_PORT", raising=False)
-    monkeypatch.delenv("H3_POD_IDLE_TIMEOUT_SECONDS", raising=False)
-
-
-def test_shared_transport_and_runtime_defaults_match_contract(monkeypatch):
-    _runtime_env(monkeypatch)
-    cfg = RuntimeConfig.from_env()
+    with patch.dict(os.environ, values, clear=True):
+        cfg = RuntimeConfig.from_env()
     assert cfg.port == CONTRACT["podPort"] == 8000
     assert cfg.idle_timeout_seconds == CONTRACT["idleTimeoutSeconds"] == 60
     assert callbacks.H3_EVENT_PATH == CONTRACT["callbackPath"]
