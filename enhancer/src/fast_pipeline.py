@@ -8,12 +8,12 @@ from typing import Any, Callable
 
 import cv2
 
+from .gpu import current_gpu_vram_mb, image_batch_max_for_vram_mb, image_vram_class_gb
 from .models import upscale_bgr
 from .r2_store import upload_file
 from .video_pipeline import run_fast_video
 
 Progress = Callable[[str, float, dict[str, Any] | None], None]
-IMAGE_BATCH_MAX = 20
 
 IMAGE_MODELS = {
     "realesrgan-anime": "RealESRGAN_x4plus_anime_6B",
@@ -119,8 +119,14 @@ def run_image_upscale_batch(job: dict[str, Any], cancel_event, progress: Progres
     images = (job.get("input") or {}).get("images") or []
     if not isinstance(images, list) or not images:
         raise ValueError("image_upscale_batch input.images is required")
-    if len(images) > IMAGE_BATCH_MAX:
-        raise ValueError(f"image_upscale_batch may contain at most {IMAGE_BATCH_MAX} images")
+
+    vram_mb = current_gpu_vram_mb()
+    vram_gb = image_vram_class_gb(vram_mb)
+    batch_max = image_batch_max_for_vram_mb(vram_mb)
+    if len(images) > batch_max:
+        raise ValueError(
+            f"image_upscale_batch may contain at most {batch_max} images on a {vram_gb or 'unknown'} GB VRAM GPU"
+        )
 
     declared_sizes: set[tuple[int, int]] = set()
     for index, item in enumerate(images):
@@ -161,7 +167,7 @@ def run_image_upscale_batch(job: dict[str, Any], cancel_event, progress: Progres
             for index, item in enumerate(images):
                 if outputs[index] is not None:
                     continue
-                progress("upscaling", 5 + (completed / max(1, total)) * 85, {"model": model_name, "precision": "fp16", "tile": 0, "index": index + 1, "total": total, "xN": 1})
+                progress("upscaling", 5 + (completed / max(1, total)) * 85, {"model": model_name, "precision": "fp16", "tile": 0, "index": index + 1, "total": total, "xN": 1, "batchMax": batch_max, "vramGb": vram_gb})
                 outputs[index] = one(index, item)
                 completed += 1
 
@@ -176,17 +182,17 @@ def run_image_upscale_batch(job: dict[str, Any], cancel_event, progress: Progres
                         index = futures[future]
                         outputs[index] = future.result()
                         completed += 1
-                        progress("upscaling", 5 + (completed / max(1, total)) * 85, {"model": model_name, "precision": "fp16", "tile": 0, "index": index + 1, "total": total, "xN": workers})
+                        progress("upscaling", 5 + (completed / max(1, total)) * 85, {"model": model_name, "precision": "fp16", "tile": 0, "index": index + 1, "total": total, "xN": workers, "batchMax": batch_max, "vramGb": vram_gb})
             except Exception as error:
                 if "out of memory" not in str(error).lower() and "CUDA_OOM" not in str(error):
                     raise
                 if not settings.get("oomAutoBackoff", True):
                     raise
-                progress("upscaling", 5 + (completed / max(1, total)) * 85, {"model": model_name, "oomBackoff": True, "xN": 1})
+                progress("upscaling", 5 + (completed / max(1, total)) * 85, {"model": model_name, "oomBackoff": True, "xN": 1, "batchMax": batch_max, "vramGb": vram_gb})
                 run_sequential(completed)
 
         compact_outputs = [item for item in outputs if item is not None]
-        progress("completed", 100, {"count": len(outputs)})
+        progress("completed", 100, {"count": len(outputs), "batchMax": batch_max, "vramGb": vram_gb})
         return {
             "runtime": "scenebuilder-enhancer-fast",
             "modelFamily": model_name,
@@ -194,6 +200,8 @@ def run_image_upscale_batch(job: dict[str, Any], cancel_event, progress: Progres
             "targetResolution": settings.get("targetResolution") or "2k",
             "items": compact_outputs,
             "count": len(compact_outputs),
+            "batchMax": batch_max,
+            "vramGb": vram_gb,
         }
 
 
