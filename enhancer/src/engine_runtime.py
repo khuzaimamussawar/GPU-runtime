@@ -11,6 +11,18 @@ import numpy as np
 from .r2_store import download_file
 
 _ENGINE_CACHE: dict[str, Any] = {}
+_FATAL_CUDA_MARKERS = (
+    "illegal memory access",
+    "cudaerrorillegaladdress",
+    "misaligned address",
+    "launch failed",
+    "unspecified launch failure",
+)
+
+
+def is_fatal_cuda_error(error: BaseException) -> bool:
+    text = str(error).lower()
+    return "trt_cuda_fatal" in text or any(marker in text for marker in _FATAL_CUDA_MARKERS)
 
 
 def _sha256(path: Path) -> str:
@@ -63,30 +75,38 @@ def _execute(engine, inputs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     device_inputs: dict[str, Any] = {}
     device_outputs: dict[str, Any] = {}
 
-    for name, array in inputs.items():
-        if not engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT:
-            continue
-        context.set_input_shape(name, tuple(array.shape))
-        device_inputs[name] = cp.asarray(array)
+    try:
+        for name, array in inputs.items():
+            if not engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT:
+                continue
+            if not context.set_input_shape(name, tuple(array.shape)):
+                raise RuntimeError(f"TRT_DESERIALIZE_FAILED:input shape rejected for {name}: {tuple(array.shape)}")
+            device_inputs[name] = cp.asarray(array)
 
-    for name in _tensor_names(engine):
-        mode = engine.get_tensor_mode(name)
-        if mode == trt.TensorIOMode.INPUT:
-            tensor = device_inputs.get(name)
-            if tensor is None:
-                raise RuntimeError(f"TRT_DESERIALIZE_FAILED:missing input tensor {name}")
-        else:
-            shape = tuple(int(dim) for dim in context.get_tensor_shape(name))
-            dtype = trt.nptype(engine.get_tensor_dtype(name))
-            tensor = cp.empty(shape, dtype=dtype)
-            device_outputs[name] = tensor
-        context.set_tensor_address(name, int(tensor.data.ptr))
+        for name in _tensor_names(engine):
+            mode = engine.get_tensor_mode(name)
+            if mode == trt.TensorIOMode.INPUT:
+                tensor = device_inputs.get(name)
+                if tensor is None:
+                    raise RuntimeError(f"TRT_DESERIALIZE_FAILED:missing input tensor {name}")
+            else:
+                shape = tuple(int(dim) for dim in context.get_tensor_shape(name))
+                if not shape or any(dim <= 0 for dim in shape):
+                    raise RuntimeError(f"TRT_DESERIALIZE_FAILED:invalid output shape for {name}: {shape}")
+                dtype = trt.nptype(engine.get_tensor_dtype(name))
+                tensor = cp.empty(shape, dtype=dtype)
+                device_outputs[name] = tensor
+            context.set_tensor_address(name, int(tensor.data.ptr))
 
-    ok = context.execute_async_v3(stream.ptr)
-    if not ok:
-        raise RuntimeError("TRT_DESERIALIZE_FAILED:execute_async_v3 failed")
-    stream.synchronize()
-    return {name: cp.asnumpy(tensor) for name, tensor in device_outputs.items()}
+        ok = context.execute_async_v3(stream.ptr)
+        if not ok:
+            raise RuntimeError("TRT_DESERIALIZE_FAILED:execute_async_v3 failed")
+        stream.synchronize()
+        return {name: cp.asnumpy(tensor) for name, tensor in device_outputs.items()}
+    except Exception as error:
+        if is_fatal_cuda_error(error):
+            raise RuntimeError(f"TRT_CUDA_FATAL:{error}") from error
+        raise
 
 
 def _first_output(outputs: dict[str, np.ndarray]) -> np.ndarray:
@@ -137,4 +157,3 @@ def try_interpolate_rife_trt(frame0_rgb: np.ndarray, frame1_rgb: np.ndarray, tim
     if output.shape[0] == 3:
         output = np.transpose(output, (1, 2, 0))
     return np.rint(np.clip(output.astype(np.float32), 0.0, 1.0) * 255.0).astype(np.uint8)
-

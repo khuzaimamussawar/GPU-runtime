@@ -6,6 +6,8 @@ on:
       - 'enhancer/runtime-contract.json'
       - 'enhancer/src/callbacks.py'
       - 'enhancer/src/server.py'
+      - 'enhancer/src/server_guard.py'
+      - 'enhancer/src/engine_runtime.py'
       - 'enhancer/src/gpu.py'
       - 'enhancer/src/models.py'
       - 'enhancer/src/fast_pipeline.py'
@@ -16,6 +18,7 @@ on:
       - 'enhancer/docker/Dockerfile.fast'
       - 'enhancer/docker/Dockerfile.quality'
       - 'enhancer/tests/test_callbacks.py'
+      - 'enhancer/tests/test_cuda_fatal_guard.py'
       - 'enhancer/tests/test_gpu_qualification.py'
       - 'enhancer/tests/test_h3_lifecycle_parity.py'
       - 'enhancer/tests/test_image_batch_contract.py'
@@ -42,6 +45,8 @@ jobs:
           python -m py_compile \
             enhancer/src/callbacks.py \
             enhancer/src/server.py \
+            enhancer/src/server_guard.py \
+            enhancer/src/engine_runtime.py \
             enhancer/src/gpu.py \
             enhancer/src/models.py \
             enhancer/src/fast_pipeline.py \
@@ -50,6 +55,7 @@ jobs:
             enhancer/src/quality_pipeline.py \
             enhancer/src/vfi_postprocess.py \
             enhancer/tests/test_callbacks.py \
+            enhancer/tests/test_cuda_fatal_guard.py \
             enhancer/tests/test_gpu_qualification.py \
             enhancer/tests/test_h3_lifecycle_parity.py \
             enhancer/tests/test_image_batch_contract.py \
@@ -62,11 +68,14 @@ jobs:
           grep -q "libx265" enhancer/docker/Dockerfile.fast
           grep -q "hevc_nvenc" enhancer/docker/Dockerfile.quality
           grep -q "libx265" enhancer/docker/Dockerfile.quality
+          grep -q 'src.server_guard' enhancer/docker/Dockerfile.fast
+          grep -q 'src.server_guard' enhancer/docker/Dockerfile.quality
       - name: Run lightweight lifecycle and encoder qualification tests
         run: |
           python - <<'PY'
           from enhancer.tests import (
               test_callbacks,
+              test_cuda_fatal_guard,
               test_gpu_qualification,
               test_h3_lifecycle_parity,
               test_image_batch_contract,
@@ -77,6 +86,7 @@ jobs:
 
           for module in (
               test_callbacks,
+              test_cuda_fatal_guard,
               test_gpu_qualification,
               test_h3_lifecycle_parity,
               test_image_batch_contract,

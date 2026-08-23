@@ -34,4 +34,4 @@ ENV H3_POD_PORT=8000 \
     GIMM_MODEL_DIR=/opt/scenebuilder-models/gimm-vfi
 
 EXPOSE 8000
-CMD ["python3", "-m", "src.server"]
+CMD ["python3", "-m", "src.server_guard"]
