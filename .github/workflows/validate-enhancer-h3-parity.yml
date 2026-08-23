@@ -7,6 +7,7 @@ on:
       - 'enhancer/src/callbacks.py'
       - 'enhancer/src/server.py'
       - 'enhancer/src/gpu.py'
+      - 'enhancer/src/models.py'
       - 'enhancer/src/fast_pipeline.py'
       - 'enhancer/src/video_encoder.py'
       - 'enhancer/src/video_pipeline.py'
@@ -18,6 +19,7 @@ on:
       - 'enhancer/tests/test_gpu_qualification.py'
       - 'enhancer/tests/test_h3_lifecycle_parity.py'
       - 'enhancer/tests/test_image_batch_contract.py'
+      - 'enhancer/tests/test_rife_import_root.py'
       - 'enhancer/tests/test_runtime_contract.py'
       - 'enhancer/tests/test_video_encoder.py'
       - '.github/workflows/validate-enhancer-h3-parity.yml'
@@ -41,6 +43,7 @@ jobs:
             enhancer/src/callbacks.py \
             enhancer/src/server.py \
             enhancer/src/gpu.py \
+            enhancer/src/models.py \
             enhancer/src/fast_pipeline.py \
             enhancer/src/video_encoder.py \
             enhancer/src/video_pipeline.py \
@@ -50,6 +53,7 @@ jobs:
             enhancer/tests/test_gpu_qualification.py \
             enhancer/tests/test_h3_lifecycle_parity.py \
             enhancer/tests/test_image_batch_contract.py \
+            enhancer/tests/test_rife_import_root.py \
             enhancer/tests/test_runtime_contract.py \
             enhancer/tests/test_video_encoder.py
       - name: Verify both final images require NVENC and x265 support
@@ -66,6 +70,7 @@ jobs:
               test_gpu_qualification,
               test_h3_lifecycle_parity,
               test_image_batch_contract,
+              test_rife_import_root,
               test_runtime_contract,
               test_video_encoder,
           )
@@ -75,6 +80,7 @@ jobs:
               test_gpu_qualification,
               test_h3_lifecycle_parity,
               test_image_batch_contract,
+              test_rife_import_root,
               test_runtime_contract,
               test_video_encoder,
           ):
