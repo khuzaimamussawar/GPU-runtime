@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 
 REAL_ESRGAN_ROOT = Path(os.environ.get("REAL_ESRGAN_ROOT", "/opt/Real-ESRGAN"))
+RIFE_ROOT = Path(os.environ.get("RIFE_ROOT", "/opt/Practical-RIFE"))
 RIFE_MODEL_DIR = Path(os.environ.get("RIFE_MODEL_DIR", "/opt/scenebuilder-models/rife-4.9"))
 
 _ESRGAN: dict[str, Any] = {}
@@ -83,7 +84,7 @@ def _load_rife_module():
     candidates = [
         RIFE_MODEL_DIR / "RIFE_HDv3.py",
         RIFE_MODEL_DIR / "train_log" / "RIFE_HDv3.py",
-        Path(os.environ.get("RIFE_ROOT", "/opt/Practical-RIFE")) / "train_log" / "RIFE_HDv3.py",
+        RIFE_ROOT / "train_log" / "RIFE_HDv3.py",
     ]
     module_path = next((path for path in candidates if path.is_file()), None)
     if module_path is None:
@@ -91,10 +92,20 @@ def _load_rife_module():
     spec = importlib.util.spec_from_file_location("scenebuilder_rife_hd", module_path)
     if spec is None or spec.loader is None:
         raise RuntimeError("RIFE_RUNTIME_FAILED:module spec")
+
+    # Practical-RIFE's train_log/RIFE_HDv3.py imports siblings through the
+    # repository-level `model` package. Adding only train_log makes
+    # `from model...` fail at runtime with ModuleNotFoundError. Keep both the
+    # configured Practical-RIFE root and the module directory importable.
+    import_roots = [RIFE_ROOT, module_path.parent]
+    if module_path.parent.name == "train_log":
+        import_roots.append(module_path.parent.parent)
+    for root in import_roots:
+        value = str(root)
+        if value and value not in sys.path:
+            sys.path.insert(0, value)
+
     module = importlib.util.module_from_spec(spec)
-    module_dir = str(module_path.parent)
-    if module_dir not in sys.path:
-        sys.path.insert(0, module_dir)
     spec.loader.exec_module(module)
     return module
 
