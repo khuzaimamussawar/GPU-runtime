@@ -18,12 +18,14 @@ This is the handoff/checklist for SceneBuilder2 + GPU-runtime Enhancer work. H3 
   - `x265/libx265` -> `CRF` only, range `12-25`.
 - Keep both saved values when switching encoder; only the selected encoder is active for a job.
 - Every video job must carry `videoEncoder`, `nvencCq`, and `x265Crf`; pod runtime must use job settings, not hidden Docker/env overrides.
+- **Known remaining SceneBuilder bug:** `updateEnhancerConfig()` still clamps `default_nvenc_cq` and `default_x265_crf` to `0-51`; change backend enforcement to `12-25` so UI limits are not the only guard.
 - When Director Controls tab is `Upscale`, per-clip/timeline primary actions must say `Upscale/Re-upscale`, not `Generate/Regenerate`.
 - Bulk Upscale Selected/All must use a proper modal like Generate Selected/All with explicit `remaining` vs `re-upscale all` choice.
 
 ## Encoder/runtime
 
 - FAST and QUALITY images must contain FFmpeg with both `hevc_nvenc` and `libx265`.
+- Add/keep a build or smoke assertion that both encoders are exposed by FFmpeg in the final FAST/QUALITY image.
 - Pod boot performs base GPU/CUDA qualification only.
 - NVENC hardware smoke runs only for a job that selected NVENC; x265 jobs must not fail because NVENC is unavailable.
 - NVENC uses HEVC Main10/p010 + CQ; x265 uses HEVC 10-bit + CRF.
@@ -80,7 +82,7 @@ This is the handoff/checklist for SceneBuilder2 + GPU-runtime Enhancer work. H3 
 - Normal job dispatch and engine dispatch must be serialized/leased to avoid duplicate pod provisioning.
 - GPU-success + SceneBuilder writeback failure must leave job as `writeback_failed` but release the worker for more work; do not rerun GPU work.
 - Original-video dedupe must remain based on full source identity + derivative settings, never clip trim/link state. GPU pipelines process the full original source file.
-- Encoder choice and active CQ/CRF should be part of video derivative/dedupe identity so switching NVENC/x265 or quality cannot incorrectly reuse an old encode.
+- **Known remaining SceneBuilder bug:** `videoDedupeKey()` currently uses source/model/mode/target/fps/interpolation but not encoder/CQ/CRF. Add `videoEncoder` plus the active quality value so switching NVENC/x265 or quality cannot incorrectly collapse/reuse a different derivative.
 
 ## Scaling
 
@@ -104,4 +106,4 @@ This is the handoff/checklist for SceneBuilder2 + GPU-runtime Enhancer work. H3 
 3. Confirm Docker Hub digest changed and new pods report the new digest.
 4. Smoke test RunPod and Novita separately.
 5. Smoke test FAST ESRGAN, RIFE interpolation, QUALITY/FlashVSR, NVENC CQ, x265 CRF, engine resume without Force, and Force rebuild.
-6. Next work pass: implement/verify admin-email visibility and H3-style cross-project warm-pod lending/idle timing above before calling Enhancer fully complete.
+6. Next work pass: implement/verify admin-email visibility, backend 12-25 enforcement, encoder-aware dedupe, and H3-style cross-project warm-pod lending/idle timing before calling Enhancer fully complete.
