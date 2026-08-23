@@ -1,39 +1,39 @@
 # Enhancer production handoff
 
-## Goal
-Make Enhancer behave like the working H3 pod system without changing H3 generation logic: durable D1 state, immediate dispatch, polling/reconciliation as recovery, safe provider lifecycle, reusable warm pods, and terminal GPU job failures.
+H3 video generation is the parity reference. Do not change H3 implementation logic to solve Enhancer issues.
 
-## Included in current PRs
-- Upscale Selected/All uses a real Remaining vs Re-upscale All modal; Upscale controls make per-clip Generate/Regenerate become Upscale/Re-upscale.
-- FAST/QUALITY support one explicit video encoder per job: `nvenc` (HEVC NVENC + CQ) or `x265` (`libx265` + CRF). Defaults: NVENC CQ 17, x265 CRF 15. Runtime clamps 12-25.
-- NVENC qualification is job-specific and uses a valid 256x256 HEVC Main10 probe; x265 jobs do not require NVENC.
-- Fresh Image keeps provider image refs as normal tags, resolves Docker Hub `latest` digest for identity, and retires stale warm pods.
-- RunPod provider fallback matches H3 SECURE -> COMMUNITY.
-- Novita create/status/delete API shapes are aligned to H3 and transient status reads must not delete a healthy instance.
-- New pods do not start the idle-expiry clock at `worker_ready`.
-- Callback HTTP 2xx/non-JSON handling matches H3; direct pod polling remains recovery.
+## Baseline
+- SceneBuilder2 PR #99 merged.
+- GPU-runtime PR #12 merged.
+- SceneBuilder2 PR #100 is the coordinated final repo-level parity pass.
+- GPU-runtime PR #13 pins the same runtime boundary and CI contract.
+- SceneBuilder PR #97 was not merged with stale ancestry; its two-file `AMPERE_PLUS` routing fix was cleanly carried onto current SceneBuilder `main` in PR #100.
 
-## Follow-up bugs / requirements after these PRs merge
-1. **Admin visibility:** Enhancer Admin and H3 video-generation Admin UI must only render for allowed admin emails. Normal users use defaults only. Do not expose provider/GPU/encoder/engine controls to normal users.
-2. **Encoder config contract:** SceneBuilder backend must clamp Admin NVENC CQ and x265 CRF to 12-25 too (not only UI/runtime). Keep defaults NVENC + CQ 17 and x265 CRF 15. Admin can override. Persist selected encoder in `enhancer_config.runtime_policy_json`.
-3. **Encoder-aware dedupe:** video source dedupe/idempotency must include encoder and active quality value (NVENC CQ or x265 CRF), so switching encoder/quality cannot incorrectly reuse an older upscale. Preserve original-source dedupe: trims/link state must still not create duplicate GPU enhancement jobs.
-4. **True H3-style idle retention:** 60-second termination countdown starts only after the GPU is truly idle. Before arming/deleting an idle FAST/QUALITY/builder pod, check D1 for compatible queued work across projects/users and lend/reuse the pod like H3. Consider both `pending_upscales` and `enhancer_engine_builds`. Do not kill a compatible pod while queued work exists.
-5. **Build validation:** FAST and QUALITY Docker builds should fail if FFmpeg lacks `libx265`; NVENC capability is runtime/GPU-specific, so verify `hevc_nvenc` is compiled into FFmpeg but keep the real NVENC hardware smoke job-specific.
-6. **Callback/Access:** Cloudflare Access currently returns HTTP 200 sign-in HTML to pod callbacks. H3 hides this because it accepts any 2xx; Enhancer polling recovers. Keep polling authoritative/reliable and, if possible, add a narrow machine-to-machine Access path for `/api/projects/v2/h3/pod/events` rather than making the Worker public.
-7. **D1 schema:** keep runtime compatibility/bootstrap plus migrations for all Enhancer tables/columns/indexes. Verify production schema after deploy, especially engine idempotency partial index, dispatch locks, worker digest fields, config JSON, and pending-upscale columns.
+## Repo-level items closed in PR #100 / #13
+- Admin visibility/defaults: Enhancer Admin and H3 advanced text-encoder/Sage/Spectrum controls are allowlisted-admin only. Normal users use safe defaults. Enhancer normal-user output encoder remains NVENC CQ 17.
+- Encoder contract: NVENC CQ and x265 CRF are clamped to 12-25 through SceneBuilder and GPU runtime. Defaults are NVENC CQ 17 and x265 CRF 15. One encoder is active per job.
+- Encoder-aware derivative identity: SceneBuilder persists the active encoder + quality signature (`nvenc:cq=N` or `x265:crf=N`) and compares it for `Upscale remaining`, while original-source grouping continues to ignore trim/linkage.
+- Warm-pod parity: SceneBuilder can lend compatible FAST/QUALITY idle workers across Director projects/users with target-project duration-derived cap accounting and hard max 8; engine builders remain globally reusable and prioritized.
+- Idle retention/reaping considers compatible queued Director work globally; busy workers are not idle-reaper candidates.
+- Provider parity remains: RunPod normal tag refs + digest identity, SECURE -> COMMUNITY fallback; Novita H3-compatible create/status/delete paths and transient-read tolerance.
+- FAST and QUALITY Dockerfiles already verify FFmpeg exposes both `hevc_nvenc` and `libx265`; real NVENC hardware qualification is job-specific.
+- `enhancer/runtime-contract.json` is mirrored in SceneBuilder and GPU-runtime for port 8000, H3 callback path, service kinds, 60s idle default, max-8 video pool, and encoder names/defaults/ranges. GPU parity CI now watches and executes the contract test.
 
-## Production errors encountered
-- `D1_ERROR: UNIQUE constraint failed: enhancer_engine_builds.idempotency_key` on repeated/forced engine builds.
-- Novita `PROVIDER_HTTP_404: 404 page not found` -> false `provider_not_found` -> pod deleted immediately.
-- Pod callbacks returned `HTTP 200 NON_JSON` with Cloudflare Access sign-in HTML instead of Worker JSON.
-- Fresh Image ON could fail to provision when a digest-form image ref was sent to the provider; Fresh Image OFF with normal `:latest` started correctly.
-- FFmpeg NVENC qualification failed with exit status 234 because the smoke test used 128x128 HEVC; TensorRT/ESRGAN/RIFE work itself was not the cause.
-- Engine builder could continue only through recovery polling when callbacks were intercepted.
-- Upscale Selected/All initially showed a tiny menu instead of the expected Generate-style modal; clip actions still showed Generate/Regenerate while Upscale controls were selected.
+## Intentionally unchanged in this pass
+- Do not change `enhancer/src/callbacks.py` callback transport/parsing yet.
+- Do not change H3 runtime implementation files.
+- Keep pod API port **8000**. It is the inbound HTTP service used for `/health`, `/ready`, `/jobs`, and provider proxy mapping; it is unrelated to Cloudflare Access intercepting the pod's outbound HTTPS callback.
 
-## Release order
-1. Merge SceneBuilder PR #99 and GPU-runtime PR #12 only with green CI and no H3 implementation-file changes.
-2. Deploy SceneBuilder Worker/main and verify D1 compatibility/bootstrap runs successfully.
-3. Rebuild/push **FAST** and **QUALITY** Docker `latest` images from merged GPU-runtime main (engine builder uses FAST).
-4. Smoke test: engine builder resume without Force Rebuild; RunPod + Novita; Fresh Image ON/OFF; NVENC CQ and x265 CRF; original-video dedupe; idle reuse across queued work; writeback and deletion.
-5. Implement the follow-up items above in one controlled parity pass, not isolated production hotfixes.
+## Callback / Access state
+- The observed production callback response is Cloudflare Access HTTP 200 sign-in HTML on pod -> SceneBuilder callbacks.
+- The FAST image that logged `HTTP 200 NON_JSON` was not rebuilt after the last GPU-runtime callback parity changes, so it is running older callback code. Rebuild the final Docker layers before diagnosing callback-client behavior again.
+- Direct pod polling/reconciliation remains authoritative recovery.
+- Production still needs a live Access check and, if desired, a narrow machine-to-machine policy for `/api/projects/v2/h3/pod/events` rather than making the Worker public.
+
+## Deployment-only work remaining
+1. Merge SceneBuilder2 PR #100 and GPU-runtime PR #13 after green parity checks.
+2. Deploy SceneBuilder `main` and verify production D1 compatibility/bootstrap, especially engine idempotency partial index, dispatch locks, worker digest fields, config JSON, and pending-upscale columns.
+3. Rebuild/push **FAST** and **QUALITY** Docker `latest` from merged GPU-runtime `main` (engine builder uses FAST).
+4. Verify Docker Hub digest changed and new workers report the expected digest.
+5. Smoke RunPod + Novita, Fresh Image ON/OFF, FAST ESRGAN, RIFE, QUALITY/FlashVSR, NVENC CQ, x265 CRF, engine resume, Force Rebuild, encoder-aware `Upscale remaining`, and cross-project warm-worker reuse.
+6. Re-check callback logs only after rebuilt images are running; separately verify whether Cloudflare Access is allowing the machine-to-machine callback to reach the Worker.
