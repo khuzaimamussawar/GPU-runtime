@@ -3,6 +3,7 @@ name: Validate Enhancer H3 parity
 on:
   pull_request:
     paths:
+      - 'enhancer/runtime-contract.json'
       - 'enhancer/src/callbacks.py'
       - 'enhancer/src/server.py'
       - 'enhancer/src/gpu.py'
@@ -15,6 +16,7 @@ on:
       - 'enhancer/tests/test_callbacks.py'
       - 'enhancer/tests/test_gpu_qualification.py'
       - 'enhancer/tests/test_h3_lifecycle_parity.py'
+      - 'enhancer/tests/test_runtime_contract.py'
       - 'enhancer/tests/test_video_encoder.py'
       - '.github/workflows/validate-enhancer-h3-parity.yml'
   workflow_dispatch:
@@ -44,6 +46,7 @@ jobs:
             enhancer/tests/test_callbacks.py \
             enhancer/tests/test_gpu_qualification.py \
             enhancer/tests/test_h3_lifecycle_parity.py \
+            enhancer/tests/test_runtime_contract.py \
             enhancer/tests/test_video_encoder.py
       - name: Verify both final images require NVENC and x265 support
         run: |
@@ -54,9 +57,9 @@ jobs:
       - name: Run lightweight lifecycle and encoder qualification tests
         run: |
           python - <<'PY'
-          from enhancer.tests import test_callbacks, test_gpu_qualification, test_h3_lifecycle_parity, test_video_encoder
+          from enhancer.tests import test_callbacks, test_gpu_qualification, test_h3_lifecycle_parity, test_runtime_contract, test_video_encoder
 
-          for module in (test_callbacks, test_gpu_qualification, test_h3_lifecycle_parity, test_video_encoder):
+          for module in (test_callbacks, test_gpu_qualification, test_h3_lifecycle_parity, test_runtime_contract, test_video_encoder):
               for name in sorted(dir(module)):
                   if name.startswith('test_'):
                       getattr(module, name)()
