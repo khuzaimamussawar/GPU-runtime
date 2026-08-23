@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "podPort": 8000,
+  "callbackPath": "/api/projects/v2/h3/pod/events",
+  "idleTimeoutSeconds": 60,
+  "videoMaxProjectPods": 8,
+  "serviceKinds": [
+    "enhancer_fast",
+    "enhancer_quality",
+    "enhancer_engine_builder"
+  ],
+  "videoEncoder": {
+    "default": "nvenc",
+    "qualityMin": 12,
+    "qualityMax": 25,
+    "nvenc": {
+      "codec": "hevc_nvenc",
+      "qualityField": "nvencCq",
+      "defaultQuality": 17
+    },
+    "x265": {
+      "codec": "libx265",
+      "qualityField": "x265Crf",
+      "defaultQuality": 15
+    }
+  }
+}
