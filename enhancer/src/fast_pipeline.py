@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 import cv2
 
+from .gpu import current_gpu_vram_mb, image_batch_max_for_vram_mb, image_vram_class_gb
 from .models import upscale_bgr
 from .r2_store import upload_file
 from .video_pipeline import run_fast_video
@@ -54,7 +55,15 @@ def _resolve_image_model(job: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     return model_name, settings
 
 
-def _upscale_one(source: str, output_key: str, model_name: str, settings: dict[str, Any], root: Path) -> dict[str, Any]:
+def _upscale_one(
+    source: str,
+    output_key: str,
+    model_name: str,
+    settings: dict[str, Any],
+    root: Path,
+    expected_width: int | None = None,
+    expected_height: int | None = None,
+) -> dict[str, Any]:
     if not source.startswith(("http://", "https://")):
         raise ValueError("image_upscale input.url must be HTTP(S)")
     if not output_key:
@@ -65,8 +74,12 @@ def _upscale_one(source: str, output_key: str, model_name: str, settings: dict[s
     frame = cv2.imread(str(input_path), cv2.IMREAD_COLOR)
     if frame is None:
         raise RuntimeError("FFMPEG_DECODE_FAILED:image decode")
-    target = _target_long_side(settings.get("targetResolution") or "2k")
     h, w = frame.shape[:2]
+    if expected_width and expected_height and (w != expected_width or h != expected_height):
+        raise RuntimeError(
+            f"SOURCE_DIMENSIONS_MISMATCH:declared={expected_width}x{expected_height}:actual={w}x{h}"
+        )
+    target = _target_long_side(settings.get("targetResolution") or "2k")
     scale = min(4.0, max(1.0, target / max(w, h)))
     enhanced = frame if scale <= 1.0 else upscale_bgr(frame, model_name, outscale=scale)
     h2, w2 = enhanced.shape[:2]
@@ -106,6 +119,25 @@ def run_image_upscale_batch(job: dict[str, Any], cancel_event, progress: Progres
     images = (job.get("input") or {}).get("images") or []
     if not isinstance(images, list) or not images:
         raise ValueError("image_upscale_batch input.images is required")
+
+    vram_mb = current_gpu_vram_mb()
+    vram_gb = image_vram_class_gb(vram_mb)
+    batch_max = image_batch_max_for_vram_mb(vram_mb)
+    if len(images) > batch_max:
+        raise ValueError(
+            f"image_upscale_batch may contain at most {batch_max} images on a {vram_gb or 'unknown'} GB VRAM GPU"
+        )
+
+    declared_sizes: set[tuple[int, int]] = set()
+    for index, item in enumerate(images):
+        width = int(item.get("width") or 0)
+        height = int(item.get("height") or 0)
+        if width <= 0 or height <= 0:
+            raise ValueError(f"image_upscale_batch item {index + 1} is missing original width/height")
+        declared_sizes.add((width, height))
+    if len(declared_sizes) != 1:
+        raise ValueError("image_upscale_batch requires every image to have identical original width/height")
+
     with tempfile.TemporaryDirectory(prefix="sb-enhancer-image-batch-") as tmp:
         root = Path(tmp)
         outputs: list[dict[str, Any] | None] = [None] * len(images)
@@ -117,7 +149,17 @@ def run_image_upscale_batch(job: dict[str, Any], cancel_event, progress: Progres
                 raise RuntimeError("CANCELLED")
             source = str(item.get("url") or "").strip()
             output_key = str(item.get("objectKey") or "").strip()
-            stored = _upscale_one(source, output_key, model_name, settings, root)
+            expected_width = int(item.get("width") or 0)
+            expected_height = int(item.get("height") or 0)
+            stored = _upscale_one(
+                source,
+                output_key,
+                model_name,
+                settings,
+                root,
+                expected_width=expected_width,
+                expected_height=expected_height,
+            )
             return {**stored, "sceneId": item.get("sceneId"), "index": index}
 
         def run_sequential(start_count: int = 0) -> None:
@@ -125,7 +167,7 @@ def run_image_upscale_batch(job: dict[str, Any], cancel_event, progress: Progres
             for index, item in enumerate(images):
                 if outputs[index] is not None:
                     continue
-                progress("upscaling", 5 + (completed / max(1, total)) * 85, {"model": model_name, "precision": "fp16", "tile": 0, "index": index + 1, "total": total, "xN": 1})
+                progress("upscaling", 5 + (completed / max(1, total)) * 85, {"model": model_name, "precision": "fp16", "tile": 0, "index": index + 1, "total": total, "xN": 1, "batchMax": batch_max, "vramGb": vram_gb})
                 outputs[index] = one(index, item)
                 completed += 1
 
@@ -140,17 +182,17 @@ def run_image_upscale_batch(job: dict[str, Any], cancel_event, progress: Progres
                         index = futures[future]
                         outputs[index] = future.result()
                         completed += 1
-                        progress("upscaling", 5 + (completed / max(1, total)) * 85, {"model": model_name, "precision": "fp16", "tile": 0, "index": index + 1, "total": total, "xN": workers})
+                        progress("upscaling", 5 + (completed / max(1, total)) * 85, {"model": model_name, "precision": "fp16", "tile": 0, "index": index + 1, "total": total, "xN": workers, "batchMax": batch_max, "vramGb": vram_gb})
             except Exception as error:
                 if "out of memory" not in str(error).lower() and "CUDA_OOM" not in str(error):
                     raise
                 if not settings.get("oomAutoBackoff", True):
                     raise
-                progress("upscaling", 5 + (completed / max(1, total)) * 85, {"model": model_name, "oomBackoff": True, "xN": 1})
+                progress("upscaling", 5 + (completed / max(1, total)) * 85, {"model": model_name, "oomBackoff": True, "xN": 1, "batchMax": batch_max, "vramGb": vram_gb})
                 run_sequential(completed)
 
         compact_outputs = [item for item in outputs if item is not None]
-        progress("completed", 100, {"count": len(outputs)})
+        progress("completed", 100, {"count": len(outputs), "batchMax": batch_max, "vramGb": vram_gb})
         return {
             "runtime": "scenebuilder-enhancer-fast",
             "modelFamily": model_name,
@@ -158,6 +200,8 @@ def run_image_upscale_batch(job: dict[str, Any], cancel_event, progress: Progres
             "targetResolution": settings.get("targetResolution") or "2k",
             "items": compact_outputs,
             "count": len(compact_outputs),
+            "batchMax": batch_max,
+            "vramGb": vram_gb,
         }
 
 
