@@ -13,6 +13,41 @@ EXPECTED_CUDA_PREFIX = "13.0"
 EXPECTED_TORCH = "2.13.0"
 EXPECTED_TRT = "10.14.1.48"
 EXPECTED_TRT_PYTHON_VERSIONS = {EXPECTED_TRT, f"{EXPECTED_TRT}.post1"}
+IMAGE_BATCH_ABSOLUTE_MAX = 20
+IMAGE_BATCH_LOW_VRAM_MAX = 5
+IMAGE_BATCH_MID_VRAM_MAX = 10
+
+
+def image_vram_class_gb(vram_mb: int | float | None) -> int:
+    try:
+        mb = float(vram_mb or 0)
+    except (TypeError, ValueError):
+        return 0
+    if mb <= 0:
+        return 0
+    # nvidia-smi/PyTorch report MiB and nominal 24/48 GB cards can land just
+    # below an exact GiB boundary. Round to the nearest nominal GB class.
+    return max(0, round(mb / 1024.0))
+
+
+def image_batch_max_for_vram_mb(vram_mb: int | float | None) -> int:
+    vram_gb = image_vram_class_gb(vram_mb)
+    if vram_gb > 32:
+        return IMAGE_BATCH_ABSOLUTE_MAX
+    if vram_gb >= 24:
+        return IMAGE_BATCH_MID_VRAM_MAX
+    # 16 GB and 20 GB GPUs are capped at five. Unknown and unusual sub-24 GB
+    # capacities also stay conservative rather than risking an oversized batch.
+    return IMAGE_BATCH_LOW_VRAM_MAX
+
+
+def current_gpu_vram_mb() -> int:
+    import torch
+
+    if not torch.cuda.is_available():
+        return 0
+    props = torch.cuda.get_device_properties(0)
+    return int(props.total_memory // (1024 * 1024))
 
 
 def _cmd(args: list[str], timeout: int = 20) -> str:
