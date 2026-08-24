@@ -210,7 +210,7 @@ def _run_job(record: JobRecord) -> None:
         targetResolution=settings.get("targetResolution"),
         targetFps=settings.get("targetFps"),
         directorSpeed=settings.get("directorSpeed"),
-        videoEncoder=normalize_video_encoder(settings) if job_type == "video_upscale" else None,
+        videoEncoder=settings.get("videoEncoder") or settings.get("video_encoder") or ("nvenc" if job_type == "video_upscale" else None),
         engines=_engine_log_summary(settings),
         **_resource_snapshot(),
     )
