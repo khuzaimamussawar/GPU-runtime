@@ -7,7 +7,8 @@ from enhancer.src import callbacks, video_encoder
 from enhancer.src.config import RuntimeConfig
 
 
-CONTRACT = json.loads((Path(__file__).parents[1] / "runtime-contract.json").read_text())
+ROOT = Path(__file__).parents[1]
+CONTRACT = json.loads((ROOT / "runtime-contract.json").read_text())
 
 
 def test_shared_transport_and_runtime_defaults_match_contract():
@@ -53,3 +54,19 @@ def test_service_kind_contract_contains_all_gpu_runtime_modes():
         "enhancer_quality",
         "enhancer_engine_builder",
     }
+
+
+def test_container_logs_show_job_stage_engine_and_resource_context():
+    source = (ROOT / "src/server.py").read_text(encoding="utf-8")
+    assert "def _resource_snapshot()" in source
+    assert '"diskTotalGiB"' in source
+    assert '"diskUsedGiB"' in source
+    assert '"diskFreeGiB"' in source
+    assert '"gpuAllocatedMiB"' in source
+    assert '"job_start"' in source
+    assert '"job_progress"' in source
+    assert '"job_completed"' in source
+    assert '"job_failed"' in source
+    assert '"cancel_requested"' in source
+    assert "progress_value >= record.last_log_progress + 10.0" in source
+    assert "engines=_engine_log_summary(settings)" in source
