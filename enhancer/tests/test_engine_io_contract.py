@@ -11,6 +11,9 @@ def test_tensor_rt_inputs_follow_serialized_engine_dtype_and_stream():
     assert "with stream:" in source
     assert "device_inputs[name] = cp.asarray(host)" in source
     assert "context.execute_async_v3(stream.ptr)" in source
+    assert "def _execution_resources(engine):" in source
+    assert "_EXECUTION_CACHE[key] = resources" in source
+    assert "context, stream = _execution_resources(engine)" in source
 
     # Callers must preserve source precision and let the serialized engine decide
     # whether each input is FP16, FP32, or another supported TensorRT dtype.

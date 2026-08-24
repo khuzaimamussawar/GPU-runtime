@@ -12,6 +12,12 @@ import numpy as np
 from .r2_store import download_file
 
 _ENGINE_CACHE: dict[str, Any] = {}
+# TensorRT allocates the activation workspace when an execution context is
+# created. Recreating a 4K RIFE context for every interpolated frame can leave
+# the CUDA allocator holding multiple multi-gigabyte workspaces between jobs.
+# Pods process one job at a time, so one synchronized context per loaded engine
+# is both safe and materially less memory hungry.
+_EXECUTION_CACHE: dict[int, tuple[Any, Any]] = {}
 _ENGINE_USE_LOGGED: set[str] = set()
 _FATAL_CUDA_MARKERS = (
     "illegal memory access",
@@ -133,12 +139,23 @@ def _tensor_names(engine) -> list[str]:
     return [engine.get_tensor_name(index) for index in range(engine.num_io_tensors)]
 
 
+def _execution_resources(engine):
+    import cupy as cp
+
+    key = id(engine)
+    cached = _EXECUTION_CACHE.get(key)
+    if cached is not None:
+        return cached
+    resources = (engine.create_execution_context(), cp.cuda.Stream(non_blocking=True))
+    _EXECUTION_CACHE[key] = resources
+    return resources
+
+
 def _execute(engine, inputs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     import cupy as cp
     import tensorrt as trt
 
-    context = engine.create_execution_context()
-    stream = cp.cuda.Stream(non_blocking=True)
+    context, stream = _execution_resources(engine)
     host_inputs: dict[str, np.ndarray] = {}
     device_inputs: dict[str, Any] = {}
     device_outputs: dict[str, Any] = {}
