@@ -168,12 +168,21 @@ def interpolate_rife(frame0_rgb: np.ndarray, frame1_rgb: np.ndarray, timestep: f
     import torch
     if not 0.0 < float(timestep) < 1.0:
         raise ValueError("RIFE timestep must be between 0 and 1")
-    i0 = _rgb_to_rife_tensor(frame0_rgb)
-    i1 = _rgb_to_rife_tensor(frame1_rgb)
+    if frame0_rgb.shape != frame1_rgb.shape:
+        raise RuntimeError(f"RIFE_RUNTIME_FAILED:frame shape mismatch {frame0_rgb.shape} != {frame1_rgb.shape}")
+    height, width = frame0_rgb.shape[:2]
+    # RIFE's IFNet concatenates multi-scale tensors internally. Pad both frames
+    # together to a multiple of 32, then crop the generated frame back to the
+    # source geometry. This fixes 2160p inputs, whose height is not divisible by 32.
+    padded_height = ((height + 31) // 32) * 32
+    padded_width = ((width + 31) // 32) * 32
+    if padded_height != height or padded_width != width:
+        frame0_rgb = np.pad(frame0_rgb, ((0, padded_height - height), (0, padded_width - width), (0, 0)), mode="edge")
+        frame1_rgb = np.pad(frame1_rgb, ((0, padded_height - height), (0, padded_width - width), (0, 0)), mode="edge")
     with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.float16):
-        result = rife().inference(i0, i1, float(timestep), float(scale))
+        result = rife().inference(_rgb_to_rife_tensor(frame0_rgb), _rgb_to_rife_tensor(frame1_rgb), float(timestep), float(scale))
     require_cuda_tensor(result, "rife_output")
-    result = result[0].clamp(0, 1).float().permute(1, 2, 0).cpu().numpy()
+    result = result[0].clamp(0, 1).float().permute(1, 2, 0).cpu().numpy()[:height, :width]
     return np.rint(result * 255.0).astype(np.uint8)
 
 

@@ -187,6 +187,8 @@ def _error_code(error: BaseException) -> str:
     for code in known:
         if code in text:
             return code
+    if "libnvidia-encode" in text.lower() or "hevc_nvenc" in text.lower():
+        return "NVENC_ENCODE_FAILED"
     if "out of memory" in text.lower():
         return "CUDA_OOM"
     return "UNKNOWN"

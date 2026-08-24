@@ -25,3 +25,10 @@ def test_rife_loader_exposes_flat_snapshot_as_train_log_package():
 def test_native_rife_fallback_announces_model_loading():
     assert '[enhancer rife] native_load_start' in SOURCE
     assert '[enhancer rife] native_load_ready' in SOURCE
+
+
+def test_native_rife_pads_non_multiple_of_32_frames_before_inference():
+    assert 'padded_height = ((height + 31) // 32) * 32' in SOURCE
+    assert 'padded_width = ((width + 31) // 32) * 32' in SOURCE
+    assert 'mode="edge"' in SOURCE
+    assert '.cpu().numpy()[:height, :width]' in SOURCE
