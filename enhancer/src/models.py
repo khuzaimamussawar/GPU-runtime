@@ -16,6 +16,7 @@ RIFE_MODEL_DIR = Path(os.environ.get("RIFE_MODEL_DIR", "/opt/scenebuilder-models
 
 _ESRGAN: dict[str, Any] = {}
 _RIFE: Any | None = None
+_RIFE_PADDING_LOGGED: set[tuple[int, int, int, int]] = set()
 
 
 def require_cuda_tensor(value: Any, name: str = "tensor") -> None:
@@ -164,15 +165,38 @@ def _rgb_to_rife_tensor(frame_rgb: np.ndarray):
     return tensor
 
 
+def _rife_padded_shape(width: int, height: int, scale: float) -> tuple[int, int]:
+    # Practical-RIFE pads to tmp=max(32, int(32/scale)) before IFNet. 2160 is
+    # not divisible by 32, which otherwise produces internal 2176-vs-2160
+    # concatenation failures in the native fallback at 4K.
+    safe_scale = max(float(scale), 1e-6)
+    block = max(32, int(32 / safe_scale))
+    padded_w = ((int(width) - 1) // block + 1) * block
+    padded_h = ((int(height) - 1) // block + 1) * block
+    return padded_w, padded_h
+
+
 def interpolate_rife(frame0_rgb: np.ndarray, frame1_rgb: np.ndarray, timestep: float, scale: float = 1.0) -> np.ndarray:
     import torch
+    import torch.nn.functional as F
     if not 0.0 < float(timestep) < 1.0:
         raise ValueError("RIFE timestep must be between 0 and 1")
     i0 = _rgb_to_rife_tensor(frame0_rgb)
     i1 = _rgb_to_rife_tensor(frame1_rgb)
+    height, width = int(i0.shape[-2]), int(i0.shape[-1])
+    padded_w, padded_h = _rife_padded_shape(width, height, float(scale))
+    if padded_w != width or padded_h != height:
+        padding = (0, padded_w - width, 0, padded_h - height)
+        i0 = F.pad(i0, padding)
+        i1 = F.pad(i1, padding)
+        key = (width, height, padded_w, padded_h)
+        if key not in _RIFE_PADDING_LOGGED:
+            _RIFE_PADDING_LOGGED.add(key)
+            print(f"[enhancer rife] native_pad source={width}x{height} padded={padded_w}x{padded_h}", flush=True)
     with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.float16):
         result = rife().inference(i0, i1, float(timestep), float(scale))
     require_cuda_tensor(result, "rife_output")
+    result = result[..., :height, :width]
     result = result[0].clamp(0, 1).float().permute(1, 2, 0).cpu().numpy()
     return np.rint(result * 255.0).astype(np.uint8)
 
