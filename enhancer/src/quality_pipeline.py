@@ -13,15 +13,13 @@ from typing import Any, Callable
 from .r2_store import upload_file
 from .vfi_postprocess import interpolate_file
 from .video_encoder import normalize_video_encoder, video_encoder_args, video_encoder_failure_code
+from .video_geometry import ffmpeg_center_crop_filter, target_dimensions
 
 FLASH_ROOT = Path(os.environ.get("FLASHVSR_ROOT", "/opt/FlashVSR"))
 SCRIPT = FLASH_ROOT / "examples/WanVSR/infer_flashvsr_v1.1_tiny_long_video.py"
 _PIPE = None
 _MODULE = None
 Progress = Callable[[str, float, dict[str, Any] | None], None]
-
-TARGETS = {"1080p": (1920, 1080), "1440p": (2560, 1440), "2k": (2560, 1440), "2160p": (3840, 2160), "4k": (3840, 2160)}
-
 
 def _module():
     global _MODULE
@@ -69,7 +67,7 @@ def _finish_video(video: Path, source: Path, output: Path, width: int, height: i
     if has_audio: args += ["-i", str(source)]
     args += ["-map", "0:v:0"]
     if has_audio: args += ["-map", "1:a:0?"]
-    args += ["-vf", f"scale={width}:{height}:flags=lanczos", *video_encoder_args(settings)]
+    args += ["-vf", ffmpeg_center_crop_filter(width, height), *video_encoder_args(settings)]
     if has_audio and timing_baked and not math.isclose(speed, 1.0): args += ["-filter:a", _atempo(speed), "-c:a", "aac", "-b:a", "192k"]
     elif has_audio: args += ["-c:a", "copy"]
     args += ["-shortest", "-movflags", "+faststart", "-y", str(output)]
@@ -98,9 +96,12 @@ def run_video_upscale(job: dict[str, Any], cancel_event, progress: Progress) -> 
         root = Path(tmp); source = root / "input.mp4"; flash_raw = root / "flash.mp4"; temporal = root / "temporal.mp4"; final = root / "final.mp4"
         progress("downloading", 3, None); _download(source_url, source)
         source_probe = _probe(source)
-        target = TARGETS.get(str(settings.get("targetResolution") or "1080p").lower())
-        if not target: raise ValueError("Unsupported target resolution")
-        target_w, target_h = target[::-1] if source_probe["height"] > source_probe["width"] else target
+        target_w, target_h = target_dimensions(
+            str(settings.get("targetResolution") or "1080p"),
+            settings.get("aspectRatio") or settings.get("aspect_ratio"),
+            fallback_width=source_probe["width"],
+            fallback_height=source_probe["height"],
+        )
         scale = min(4.0, max(1.0, max(target_w / source_probe["width"], target_h / source_probe["height"])))
         progress("preparing_model", 10, {"precision": "bf16", "scale": scale, "videoEncoder": video_encoder})
         pipe = _pipe(); mod = _module()
@@ -128,7 +129,7 @@ def run_video_upscale(job: dict[str, Any], cancel_event, progress: Progress) -> 
             vfi_meta = interpolate_file(flash_raw, temporal, target_fps=target_fps, playback_speed=speed,
                                         timing_baked=timing_baked, interpolation_model=interpolation,
                                         cq=int(settings.get("nvencCq") or 17), cancel_event=cancel_event, progress=progress,
-                                        settings=settings)
+                                        settings=settings, output_width=target_w, output_height=target_h)
             base_for_finish = temporal
         progress("encoding", 91, {"videoEncoder": video_encoder})
         _finish_video(base_for_finish, source, final, target_w, target_h, speed=speed,

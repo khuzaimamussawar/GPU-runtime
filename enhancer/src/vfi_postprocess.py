@@ -12,6 +12,7 @@ import numpy as np
 from .engine_runtime import is_fatal_cuda_error, try_interpolate_rife_trt
 from .models import interpolate_rife
 from .video_encoder import normalize_video_encoder, video_encoder_args, video_encoder_failure_code
+from .video_geometry import center_crop_resize
 
 Progress = Callable[[str, float, dict[str, Any] | None], None]
 
@@ -43,6 +44,8 @@ def interpolate_file(
     cancel_event=None,
     progress: Progress | None = None,
     settings: dict[str, Any] | None = None,
+    output_width: int | None = None,
+    output_height: int | None = None,
 ) -> dict[str, Any]:
     if target_fps not in {30, 48, 60}:
         raise ValueError("target_fps must be 30, 48, or 60")
@@ -61,6 +64,8 @@ def interpolate_file(
     try: first = next(frames)
     except StopIteration: raise RuntimeError("FFMPEG_DECODE_FAILED:no frames")
     first_arr = first.to_ndarray(format="bgr24")
+    if output_width and output_height:
+        first_arr = center_crop_resize(first_arr, output_width, output_height)
     height, width = first_arr.shape[:2]
     enc = _encoder(output, width, height, float(target_fps), encoder_settings); assert enc.stdin is not None
     effective_speed = playback_speed if timing_baked else 1.0
@@ -77,6 +82,8 @@ def interpolate_file(
     last_interval = 1.0 / nominal_fps
     for frame in frames:
         current = frame.to_ndarray(format="bgr24")
+        if output_width and output_height:
+            current = center_crop_resize(current, output_width, output_height)
         current_t = float(frame.pts * stream.time_base) if frame.pts is not None else prev_t + last_interval
         if current_t <= prev_t: current_t = prev_t + last_interval
         last_interval = current_t - prev_t

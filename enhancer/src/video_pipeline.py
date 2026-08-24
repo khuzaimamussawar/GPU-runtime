@@ -18,17 +18,9 @@ from .models import interpolate_rife, upscale_bgr
 from .r2_store import upload_file
 from .engine_runtime import is_fatal_cuda_error, try_interpolate_rife_trt, try_upscale_bgr_trt
 from .video_encoder import normalize_video_encoder, video_encoder_args, video_encoder_failure_code
+from .video_geometry import center_crop_to_aspect, target_dimensions
 
 Progress = Callable[[str, float, dict[str, Any] | None], None]
-
-TARGETS = {
-    "1080p": (1920, 1080),
-    "1440p": (2560, 1440),
-    "2k": (2560, 1440),
-    "2160p": (3840, 2160),
-    "4k": (3840, 2160),
-}
-
 
 @dataclass
 class Probe:
@@ -61,20 +53,6 @@ def _probe(path: Path) -> Probe:
                  has_audio=any(s.get("codec_type") == "audio" for s in data.get("streams", [])))
 
 
-def _target_dimensions(target: str, width: int, height: int) -> tuple[int, int]:
-    dims = TARGETS.get(str(target).lower())
-    if not dims: raise ValueError(f"Unsupported target resolution: {target}")
-    return dims[::-1] if height > width else dims
-
-
-def _center_crop_to_aspect(frame: np.ndarray, target_w: int, target_h: int) -> np.ndarray:
-    h, w = frame.shape[:2]; source_ar = w / h; target_ar = target_w / target_h
-    if abs(source_ar - target_ar) < 1e-5: return frame
-    if source_ar > target_ar:
-        new_w = max(1, round(h * target_ar)); left = max(0, (w - new_w) // 2); return frame[:, left:left + new_w]
-    new_h = max(1, round(w / target_ar)); top = max(0, (h - new_h) // 2); return frame[top:top + new_h, :]
-
-
 def _hard_cut(a: np.ndarray, b: np.ndarray) -> bool:
     aa = cv2.resize(cv2.cvtColor(a, cv2.COLOR_BGR2GRAY), (64, 36), interpolation=cv2.INTER_AREA)
     bb = cv2.resize(cv2.cvtColor(b, cv2.COLOR_BGR2GRAY), (64, 36), interpolation=cv2.INTER_AREA)
@@ -86,7 +64,7 @@ def _hard_cut(a: np.ndarray, b: np.ndarray) -> bool:
 
 
 def _spatial(frame_bgr: np.ndarray, model_name: str, target_w: int, target_h: int, settings: dict[str, Any]) -> np.ndarray:
-    cropped = _center_crop_to_aspect(frame_bgr, target_w, target_h); h, w = cropped.shape[:2]
+    cropped = center_crop_to_aspect(frame_bgr, target_w, target_h); h, w = cropped.shape[:2]
     scale = min(4.0, max(1.0, max(target_w / w, target_h / h)))
     if target_w <= w and target_h <= h: enhanced = cropped
     else:
@@ -135,7 +113,12 @@ def run_fast_video(job: dict[str, Any], cancel_event, progress: Progress) -> dic
     with tempfile.TemporaryDirectory(prefix="sb-enhancer-video-") as tmp:
         root = Path(tmp); source = root / "input.mp4"; video_only = root / "video.mp4"; final = root / "final.mp4"
         progress("downloading", 3, None); _download(source_url, source); probe = _probe(source)
-        out_w, out_h = _target_dimensions(str(settings.get("targetResolution") or "1080p"), probe.width, probe.height)
+        out_w, out_h = target_dimensions(
+            str(settings.get("targetResolution") or "1080p"),
+            settings.get("aspectRatio") or settings.get("aspect_ratio"),
+            fallback_width=probe.width,
+            fallback_height=probe.height,
+        )
         fps_out = float(target_fps or probe.fps or 24.0); encoder = _open_encoder(video_only, out_w, out_h, fps_out, settings); assert encoder.stdin is not None
         container = av.open(str(source)); stream = container.streams.video[0]; time_base = float(stream.time_base); frames = iter(container.decode(stream))
         try: first = next(frames)
