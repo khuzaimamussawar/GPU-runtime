@@ -194,6 +194,22 @@ def _error_code(error: BaseException) -> str:
     return "UNKNOWN"
 
 
+def _video_encoder_settings(settings: dict[str, Any]) -> tuple[dict[str, Any], dict[str, str] | None]:
+    """Qualify NVENC early and use x265 only when that host feature is absent."""
+    resolved = dict(settings)
+    if normalize_video_encoder(resolved) != "nvenc":
+        return resolved, None
+    try:
+        qualify_gpu(require_nvenc=True)
+    except Exception as error:
+        code = _error_code(error)
+        if code not in {"NVENC_HEVC_ENCODER_MISSING", "NVENC_ENCODE_FAILED"}:
+            raise
+        resolved["videoEncoder"] = "x265"
+        return resolved, {"from": "nvenc", "to": "x265", "reason": code}
+    return resolved, None
+
+
 def _run_job(record: JobRecord) -> None:
     global _CURRENT_JOB_ID, _IDLE_SINCE, _IDLE_TIMEOUT_SENT, _DRAINING
     with _LOCK:
@@ -202,6 +218,12 @@ def _run_job(record: JobRecord) -> None:
     _event("job_started", jobId=record.id, status=record.status, stage=record.stage)
     settings = record.payload.get("settings") if isinstance(record.payload.get("settings"), dict) else {}
     job_type = str(record.payload.get("jobType") or record.payload.get("job_type") or "").strip()
+    encoder_fallback = None
+    if job_type == "video_upscale":
+        settings, encoder_fallback = _video_encoder_settings(settings)
+        if encoder_fallback:
+            record.payload = {**record.payload, "settings": settings}
+            _runtime_log("video_encoder_fallback", jobId=record.id, **encoder_fallback)
     _runtime_log(
         "job_start",
         jobId=record.id,
@@ -227,11 +249,6 @@ def _run_job(record: JobRecord) -> None:
                 raise RuntimeError("MODEL_LOAD_FAILED:image_upscale_batch requires FAST runtime")
             result = run_image_upscale_batch(record.payload, record.cancel_event, progress)
         elif job_type == "video_upscale":
-            if normalize_video_encoder(settings) == "nvenc":
-                # Encoder choice comes from the job/Admin UI. Only NVENC jobs
-                # pay the real hardware smoke check; x265 jobs must not be
-                # rejected merely because a GPU has no working NVENC block.
-                qualify_gpu(require_nvenc=True)
             result = run_quality_video(record.payload, record.cancel_event, progress) if config().service_kind == "enhancer_quality" else run_fast_video(record.payload, record.cancel_event, progress)
         elif job_type == "engine_build":
             if config().service_kind != "enhancer_engine_builder":

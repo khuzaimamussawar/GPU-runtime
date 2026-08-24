@@ -78,3 +78,11 @@ def test_final_images_request_nvidia_video_driver_capability_for_nvenc():
         assert "NVIDIA_DRIVER_CAPABILITIES=compute,utility,video" in dockerfile
         assert "hevc_nvenc" in dockerfile
         assert "libx265" in dockerfile
+
+
+def test_nvenc_smoke_failure_falls_back_to_x265_before_video_work_starts():
+    source = (ROOT / "src/server.py").read_text(encoding="utf-8")
+    assert "def _video_encoder_settings" in source
+    assert 'resolved["videoEncoder"] = "x265"' in source
+    assert 'return resolved, {"from": "nvenc", "to": "x265", "reason": code}' in source
+    assert '"video_encoder_fallback"' in source
