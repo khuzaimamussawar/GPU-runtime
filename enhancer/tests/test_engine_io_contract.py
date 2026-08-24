@@ -27,3 +27,14 @@ def test_tensor_rt_logs_engine_identity_and_rife_first_use():
     assert 'reason="missing_tensor_names"' in source
     assert 'profile=spec.get("profile")' in source
     assert 'compatibility=spec.get("compatibility")' in source
+
+
+def test_tensor_rt_refuses_engines_built_for_a_different_gpu_shape():
+    source = (ROOT / "src/engine_runtime.py").read_text(encoding="utf-8")
+    builder = (ROOT / "src/engine_builder.py").read_text(encoding="utf-8")
+
+    assert "def _engine_matches_gpu" in source
+    assert "multiprocessor_count_mismatch" in source
+    assert "missing_build_gpu_contract" in source
+    assert "if not _engine_matches_gpu(spec):" in source
+    assert '"buildGpu": _build_gpu_contract()' in builder

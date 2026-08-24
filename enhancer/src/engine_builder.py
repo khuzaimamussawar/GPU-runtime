@@ -149,6 +149,17 @@ def _validate_deserialize(engine_path: Path) -> None:
         raise RuntimeError("TRT_DESERIALIZE_FAILED:generated engine cannot be deserialized")
 
 
+def _build_gpu_contract() -> dict[str, Any]:
+    import torch
+
+    props = torch.cuda.get_device_properties(0)
+    return {
+        "name": props.name,
+        "multiprocessorCount": int(props.multi_processor_count),
+        "computeCapability": f"{props.major}.{props.minor}",
+    }
+
+
 def run_engine_build(job: dict[str, Any], cancel_event, progress: Progress) -> dict[str, Any]:
     settings = job.get("settings") if isinstance(job.get("settings"), dict) else {}
     trusted = job.get("trustedSource") if isinstance(job.get("trustedSource"), dict) else {}
@@ -208,6 +219,7 @@ def run_engine_build(job: dict[str, Any], cancel_event, progress: Progress) -> d
             "onnxSha256": trusted.get("onnxSha256"),
             "checkpointSha256": trusted.get("checkpointSha256"),
             "modelSourceSha256": trusted.get("modelSourceSha256"),
+            "buildGpu": _build_gpu_contract(),
             "validation": validation,
             "benchmark": benchmark,
             "debug": debug[-80:],

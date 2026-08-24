@@ -29,6 +29,7 @@ def test_encoder_qualification_is_job_specific():
 def test_post_job_idle_has_explicit_terminate_after():
     run_job = SERVER[SERVER.index("def _run_job"):SERVER.index("def _require_auth")]
     assert '_event("worker_idle"' in run_job
+    assert '_event("worker_idle", jobId=record.id' in run_job
     assert "_IDLE_SINCE = time.time()" in run_job
     assert "terminateAfter=(idle_since + timeout)" in run_job
 

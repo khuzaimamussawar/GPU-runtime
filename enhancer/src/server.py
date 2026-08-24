@@ -270,7 +270,7 @@ def _run_job(record: JobRecord) -> None:
             idle_since = _IDLE_SINCE
             timeout = config().idle_timeout_seconds
         _runtime_log("worker_idle", jobId=record.id, idleTimeoutSeconds=timeout, **_resource_snapshot())
-        _event("worker_idle", idleSince=idle_since, idleTimeoutSeconds=timeout,
+        _event("worker_idle", jobId=record.id, idleSince=idle_since, idleTimeoutSeconds=timeout,
                terminateAfter=(idle_since + timeout) if timeout > 0 else None)
 
 
@@ -363,7 +363,8 @@ def on_startup() -> None:
 @app.get("/health")
 def health() -> dict[str, Any]:
     return {"ok": True, "ready": _READY, "workerId": config().worker_id, "serviceKind": config().service_kind,
-            "busy": _CURRENT_JOB_ID is not None, "draining": _DRAINING, "startupError": _STARTUP_ERROR or None}
+            "busy": _CURRENT_JOB_ID is not None, "currentJobId": _CURRENT_JOB_ID,
+            "draining": _DRAINING, "startupError": _STARTUP_ERROR or None}
 
 
 @app.get("/ready")

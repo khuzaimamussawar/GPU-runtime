@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,30 @@ def _engine_spec(settings: dict[str, Any], name: str) -> dict[str, Any] | None:
     engines = settings.get("engines") if isinstance(settings.get("engines"), dict) else {}
     spec = engines.get(name) or (settings.get("engine") if name == "spatial" else None)
     return spec if isinstance(spec, dict) and spec.get("engineKey") and spec.get("engineSha256") else None
+
+
+def _gpu_identity(value: Any) -> str:
+    return re.sub(r"(?:nvidia|geforce|generation)|[^a-z0-9]", "", str(value or "").lower())
+
+
+def _engine_matches_gpu(spec: dict[str, Any]) -> bool:
+    import torch
+
+    props = torch.cuda.get_device_properties(0)
+    contract = spec.get("buildGpu") if isinstance(spec.get("buildGpu"), dict) else {}
+    expected_count = int(contract.get("multiprocessorCount") or 0)
+    if expected_count and expected_count != int(props.multi_processor_count):
+        _log("engine_unavailable", reason="multiprocessor_count_mismatch", expected=expected_count, actual=props.multi_processor_count, key=spec.get("engineKey"))
+        return False
+    expected_gpu = _gpu_identity(contract.get("name") or spec.get("buildGpuClass"))
+    actual_gpu = _gpu_identity(props.name)
+    if expected_gpu and expected_gpu != actual_gpu:
+        _log("engine_unavailable", reason="gpu_model_mismatch", expected=expected_gpu, actual=actual_gpu, key=spec.get("engineKey"))
+        return False
+    if not expected_count and not expected_gpu:
+        _log("engine_unavailable", reason="missing_build_gpu_contract", key=spec.get("engineKey"))
+        return False
+    return True
 
 
 def _load_engine(spec: dict[str, Any]):
@@ -151,6 +176,8 @@ def try_upscale_bgr_trt(frame_bgr: np.ndarray, settings: dict[str, Any], target_
     spec = _engine_spec(settings, "spatial")
     if not spec:
         return None
+    if not _engine_matches_gpu(spec):
+        return None
     key = str(spec["engineKey"])
     use_key = f"spatial:{key}"
     if use_key not in _ENGINE_USE_LOGGED:
@@ -186,6 +213,8 @@ def try_interpolate_rife_trt(frame0_rgb: np.ndarray, frame1_rgb: np.ndarray, tim
         if missing_key not in _ENGINE_USE_LOGGED:
             _ENGINE_USE_LOGGED.add(missing_key)
             _log("rife_unavailable", reason="missing_engine_spec")
+        return None
+    if not _engine_matches_gpu(spec):
         return None
     key = str(spec["engineKey"])
     use_key = f"rife:{key}"
