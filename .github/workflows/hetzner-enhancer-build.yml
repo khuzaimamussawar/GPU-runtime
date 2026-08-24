@@ -39,7 +39,7 @@ on:
       server_type:
         description: "Hetzner builder server type"
         required: true
-        default: "cpx32"
+        default: "cpx22"
         type: string
       location:
         description: "Hetzner location"
