@@ -36,5 +36,7 @@ def test_tensor_rt_refuses_engines_built_for_a_different_gpu_shape():
     assert "def _engine_matches_gpu" in source
     assert "multiprocessor_count_mismatch" in source
     assert "missing_build_gpu_contract" in source
+    assert "same_compute_capability" in source
     assert "if not _engine_matches_gpu(spec):" in source
-    assert '"buildGpu": _build_gpu_contract()' in builder
+    assert '"buildGpu": _build_gpu_contract(compatibility)' in builder
+    assert "HardwareCompatibilityLevel.SAME_COMPUTE_CAPABILITY" in builder

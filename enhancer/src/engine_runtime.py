@@ -64,6 +64,19 @@ def _engine_matches_gpu(spec: dict[str, Any]) -> bool:
         return False
 
     contract = spec.get("buildGpu") if isinstance(spec.get("buildGpu"), dict) else {}
+    hardware_mode = str(contract.get("hardwareCompatibility") or "").strip().lower()
+    actual_cc = f"{props.major}.{props.minor}"
+    expected_cc = str(contract.get("computeCapability") or "").strip()
+    if hardware_mode == "same_compute_capability":
+        if not expected_cc:
+            return unavailable("missing_compute_capability_contract")
+        if expected_cc != actual_cc:
+            return unavailable("compute_capability_mismatch", expected=expected_cc, actual=actual_cc)
+        return True
+    if hardware_mode == "ampere_plus":
+        if (props.major, props.minor) < (8, 0):
+            return unavailable("ampere_plus_requires_sm80", actual=actual_cc)
+        return True
     expected_count = int(contract.get("multiprocessorCount") or 0)
     if expected_count and expected_count != int(props.multi_processor_count):
         return unavailable("multiprocessor_count_mismatch", expected=expected_count, actual=props.multi_processor_count)

@@ -111,6 +111,15 @@ def _profile_shapes(model: str, profile: str, trusted: dict[str, Any]) -> dict[s
     return {str(name): (shape, shape, shape) for name in names}
 
 
+def _hardware_compatibility_mode(compatibility: str) -> str:
+    normalized = str(compatibility or "").strip().upper()
+    if normalized == "AMPERE_PLUS":
+        return "ampere_plus"
+    if normalized in {"SM86", "SM89", "SM120"}:
+        return "same_compute_capability"
+    return "exact_gpu"
+
+
 def _build_with_python_api(onnx: Path, engine_path: Path, model: str, profile: str, compatibility: str, trusted: dict[str, Any], debug: list[str]) -> None:
     import tensorrt as trt
 
@@ -125,8 +134,14 @@ def _build_with_python_api(onnx: Path, engine_path: Path, model: str, profile: s
         raise RuntimeError("TRT_BUILD_FAILED:ONNX parse failed: " + " | ".join(errors[-3:]))
     config = builder.create_builder_config()
     config.set_flag(trt.BuilderFlag.FP16)
-    if compatibility == "AMPERE_PLUS" and hasattr(trt, "HardwareCompatibilityLevel"):
-        config.hardware_compatibility_level = trt.HardwareCompatibilityLevel.AMPERE_PLUS
+    mode = _hardware_compatibility_mode(compatibility)
+    if mode != "exact_gpu":
+        if not hasattr(trt, "HardwareCompatibilityLevel"):
+            raise RuntimeError("TRT_BUILD_FAILED:TensorRT hardware compatibility is unavailable")
+        if mode == "same_compute_capability" and not hasattr(trt.HardwareCompatibilityLevel, "SAME_COMPUTE_CAPABILITY"):
+            raise RuntimeError("TRT_BUILD_FAILED:SAME_COMPUTE_CAPABILITY requires TensorRT 10.9+")
+        level = trt.HardwareCompatibilityLevel.AMPERE_PLUS if mode == "ampere_plus" else trt.HardwareCompatibilityLevel.SAME_COMPUTE_CAPABILITY
+        config.hardware_compatibility_level = level
     profile_obj = builder.create_optimization_profile()
     shapes = _profile_shapes(model, profile, trusted)
     for name, (minimum, optimum, maximum) in shapes.items():
@@ -149,7 +164,7 @@ def _validate_deserialize(engine_path: Path) -> None:
         raise RuntimeError("TRT_DESERIALIZE_FAILED:generated engine cannot be deserialized")
 
 
-def _build_gpu_contract() -> dict[str, Any]:
+def _build_gpu_contract(compatibility: str) -> dict[str, Any]:
     import torch
 
     props = torch.cuda.get_device_properties(0)
@@ -157,6 +172,7 @@ def _build_gpu_contract() -> dict[str, Any]:
         "name": props.name,
         "multiprocessorCount": int(props.multi_processor_count),
         "computeCapability": f"{props.major}.{props.minor}",
+        "hardwareCompatibility": _hardware_compatibility_mode(compatibility),
     }
 
 
@@ -185,7 +201,10 @@ def run_engine_build(job: dict[str, Any], cancel_event, progress: Progress) -> d
             onnx_sha = _sha256(onnx)
             engine_path = tmp / f"{model}-{_slug(profile)}-{_slug(compatibility)}.engine"
             progress("building", 20, {"onnx": str(onnx), "onnxSha256": onnx_sha})
-            if binary:
+            # trtexec images do not consistently expose SAME_COMPUTE_CAPABILITY.
+            # Use the Python API for portable per-SM plans so its contract matches
+            # the runtime policy exactly.
+            if binary and _hardware_compatibility_mode(compatibility) == "exact_gpu":
                 args = [binary, f"--onnx={onnx}", f"--saveEngine={engine_path}", "--fp16", "--skipInference", *_shape_args(model, profile, trusted)]
                 if compatibility == "AMPERE_PLUS":
                     args.append("--hardwareCompatibilityLevel=ampere+")
@@ -219,7 +238,7 @@ def run_engine_build(job: dict[str, Any], cancel_event, progress: Progress) -> d
             "onnxSha256": trusted.get("onnxSha256"),
             "checkpointSha256": trusted.get("checkpointSha256"),
             "modelSourceSha256": trusted.get("modelSourceSha256"),
-            "buildGpu": _build_gpu_contract(),
+            "buildGpu": _build_gpu_contract(compatibility),
             "validation": validation,
             "benchmark": benchmark,
             "debug": debug[-80:],
