@@ -25,6 +25,7 @@ RUN set -eux; \
 ENV H3_POD_PORT=8000 \
     H3_POD_IDLE_TIMEOUT_SECONDS=60 \
     SCENEBUILDER_SERVICE_KIND=enhancer_fast \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility,video \
     REAL_ESRGAN_ROOT=/opt/Real-ESRGAN \
     RIFE_ROOT=/opt/Practical-RIFE \
     RIFE_MODEL_DIR=/opt/scenebuilder-models/rife-4.9 \

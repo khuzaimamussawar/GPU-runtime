@@ -26,6 +26,7 @@ RUN set -eux; \
 ENV H3_POD_PORT=8000 \
     H3_POD_IDLE_TIMEOUT_SECONDS=60 \
     SCENEBUILDER_SERVICE_KIND=enhancer_quality \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility,video \
     FLASHVSR_ROOT=/opt/FlashVSR \
     FLASHVSR_MODEL_DIR=/opt/scenebuilder-models/flashvsr-v1.1 \
     RIFE_ROOT=/opt/Practical-RIFE \
