@@ -210,6 +210,22 @@ def _video_encoder_settings(settings: dict[str, Any]) -> tuple[dict[str, Any], d
     return resolved, None
 
 
+def _release_job_gpu_memory() -> dict[str, Any]:
+    from .engine_runtime import release_job_execution_resources
+
+    released = release_job_execution_resources()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()
+    except Exception as error:
+        released["torchCleanupError"] = f"{type(error).__name__}:{error}"
+    return released
+
+
 def _run_job(record: JobRecord) -> None:
     global _CURRENT_JOB_ID, _IDLE_SINCE, _IDLE_TIMEOUT_SENT, _DRAINING
     with _LOCK:
@@ -282,6 +298,8 @@ def _run_job(record: JobRecord) -> None:
         _event("job_cancelled" if cancelled else "job_failed", jobId=record.id, status=record.status, stage=record.stage,
                errorCode=record.error_code, error=record.error, debug=record.debug[-40:], telemetry=telemetry(record.public()))
     finally:
+        released = _release_job_gpu_memory()
+        _runtime_log("job_gpu_memory_released", jobId=record.id, released=released, **_resource_snapshot())
         with _LOCK:
             _CURRENT_JOB_ID = None; _IDLE_SINCE = time.time(); _IDLE_TIMEOUT_SENT = False; _DRAINING = False
             idle_since = _IDLE_SINCE

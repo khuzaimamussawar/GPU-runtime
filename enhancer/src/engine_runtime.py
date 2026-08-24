@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import gc
 import re
 import tempfile
 from pathlib import Path
@@ -149,6 +150,31 @@ def _execution_resources(engine):
     resources = (engine.create_execution_context(), cp.cuda.Stream(non_blocking=True))
     _EXECUTION_CACHE[key] = resources
     return resources
+
+
+def release_job_execution_resources() -> dict[str, int]:
+    """Release per-job TensorRT/CuPy allocations without evicting engine files."""
+    released_contexts = len(_EXECUTION_CACHE)
+    resources: tuple[Any, Any] | None = None
+    for resources in list(_EXECUTION_CACHE.values()):
+        try:
+            resources[1].synchronize()
+        except Exception:
+            pass
+    _EXECUTION_CACHE.clear()
+    resources = None
+    gc.collect()
+    released_pool_bytes = 0
+    try:
+        import cupy as cp
+
+        pool = cp.get_default_memory_pool()
+        released_pool_bytes = int(pool.total_bytes() - pool.used_bytes())
+        pool.free_all_blocks()
+        cp.get_default_pinned_memory_pool().free_all_blocks()
+    except Exception:
+        pass
+    return {"trtExecutionContexts": released_contexts, "cupyPoolBytes": released_pool_bytes}
 
 
 def _execute(engine, inputs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:

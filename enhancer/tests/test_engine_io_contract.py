@@ -14,6 +14,8 @@ def test_tensor_rt_inputs_follow_serialized_engine_dtype_and_stream():
     assert "def _execution_resources(engine):" in source
     assert "_EXECUTION_CACHE[key] = resources" in source
     assert "context, stream = _execution_resources(engine)" in source
+    assert "def release_job_execution_resources()" in source
+    assert "_EXECUTION_CACHE.clear()" in source
 
     # Callers must preserve source precision and let the serialized engine decide
     # whether each input is FP16, FP32, or another supported TensorRT dtype.
