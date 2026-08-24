@@ -70,3 +70,11 @@ def test_container_logs_show_job_stage_engine_and_resource_context():
     assert '"cancel_requested"' in source
     assert "progress_value >= record.last_log_progress + 10.0" in source
     assert "engines=_engine_log_summary(settings)" in source
+
+
+def test_final_images_request_nvidia_video_driver_capability_for_nvenc():
+    for name in ("Dockerfile.fast", "Dockerfile.quality"):
+        dockerfile = (ROOT / "docker" / name).read_text(encoding="utf-8")
+        assert "NVIDIA_DRIVER_CAPABILITIES=compute,utility,video" in dockerfile
+        assert "hevc_nvenc" in dockerfile
+        assert "libx265" in dockerfile
