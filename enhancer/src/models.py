@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import sys
+import types
 from pathlib import Path
 from typing import Any
 
@@ -80,6 +81,29 @@ def upscale_bgr(frame: np.ndarray, model_name: str, outscale: float = 4.0) -> np
     return output
 
 
+def _install_rife_train_log_alias(module_path: Path) -> None:
+    """Make Hugging Face's flat RIFE 4.9 snapshot importable without mutating it.
+
+    The pinned Practical-RIFE checkout provides the repository-level ``model``
+    package, while the downloaded RIFE 4.9 snapshot stores ``RIFE_HDv3.py`` and
+    ``IFNet_HDv3.py`` side-by-side. Its runtime wrapper still imports
+    ``train_log.IFNet_HDv3``. Expose the flat snapshot directory as that package
+    only when loading the snapshot copy, so the native fallback uses the exact
+    files that accompany the downloaded checkpoint.
+    """
+    if module_path.parent != RIFE_MODEL_DIR:
+        return
+    ifnet_path = RIFE_MODEL_DIR / "IFNet_HDv3.py"
+    if not ifnet_path.is_file():
+        raise RuntimeError(f"RIFE_RUNTIME_FAILED:{ifnet_path} not found")
+    package = sys.modules.get("train_log")
+    if package is None:
+        package = types.ModuleType("train_log")
+        package.__package__ = "train_log"
+        package.__path__ = [str(RIFE_MODEL_DIR)]
+        sys.modules["train_log"] = package
+
+
 def _load_rife_module():
     candidates = [
         RIFE_MODEL_DIR / "RIFE_HDv3.py",
@@ -105,6 +129,7 @@ def _load_rife_module():
         if value and value not in sys.path:
             sys.path.insert(0, value)
 
+    _install_rife_train_log_alias(module_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
