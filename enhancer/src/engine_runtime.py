@@ -54,19 +54,25 @@ def _engine_matches_gpu(spec: dict[str, Any]) -> bool:
     import torch
 
     props = torch.cuda.get_device_properties(0)
+    engine_key = str(spec.get("engineKey") or "unknown")
+
+    def unavailable(reason: str, **fields: Any) -> bool:
+        log_key = f"unavailable:{reason}:{engine_key}"
+        if log_key not in _ENGINE_USE_LOGGED:
+            _ENGINE_USE_LOGGED.add(log_key)
+            _log("engine_unavailable", reason=reason, key=engine_key, **fields)
+        return False
+
     contract = spec.get("buildGpu") if isinstance(spec.get("buildGpu"), dict) else {}
     expected_count = int(contract.get("multiprocessorCount") or 0)
     if expected_count and expected_count != int(props.multi_processor_count):
-        _log("engine_unavailable", reason="multiprocessor_count_mismatch", expected=expected_count, actual=props.multi_processor_count, key=spec.get("engineKey"))
-        return False
+        return unavailable("multiprocessor_count_mismatch", expected=expected_count, actual=props.multi_processor_count)
     expected_gpu = _gpu_identity(contract.get("name") or spec.get("buildGpuClass"))
     actual_gpu = _gpu_identity(props.name)
     if expected_gpu and expected_gpu != actual_gpu:
-        _log("engine_unavailable", reason="gpu_model_mismatch", expected=expected_gpu, actual=actual_gpu, key=spec.get("engineKey"))
-        return False
+        return unavailable("gpu_model_mismatch", expected=expected_gpu, actual=actual_gpu)
     if not expected_count and not expected_gpu:
-        _log("engine_unavailable", reason="missing_build_gpu_contract", key=spec.get("engineKey"))
-        return False
+        return unavailable("missing_build_gpu_contract")
     return True
 
 
