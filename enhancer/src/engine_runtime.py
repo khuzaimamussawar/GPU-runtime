@@ -72,35 +72,44 @@ def _execute(engine, inputs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
 
     context = engine.create_execution_context()
     stream = cp.cuda.Stream(non_blocking=True)
+    host_inputs: dict[str, np.ndarray] = {}
     device_inputs: dict[str, Any] = {}
     device_outputs: dict[str, Any] = {}
 
     try:
-        for name, array in inputs.items():
-            if not engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT:
-                continue
-            if not context.set_input_shape(name, tuple(array.shape)):
-                raise RuntimeError(f"TRT_DESERIALIZE_FAILED:input shape rejected for {name}: {tuple(array.shape)}")
-            device_inputs[name] = cp.asarray(array)
+        # TensorRT's FP16 builder flag controls tactic/internal precision; it does
+        # not guarantee FP16 network I/O. Bind buffers using each serialized
+        # engine tensor's declared dtype. Keep copies on the same non-blocking
+        # stream as execute_async_v3 so TRT cannot race an H2D upload.
+        with stream:
+            for name, array in inputs.items():
+                if not engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT:
+                    continue
+                expected_dtype = np.dtype(trt.nptype(engine.get_tensor_dtype(name)))
+                host = np.ascontiguousarray(array, dtype=expected_dtype)
+                if not context.set_input_shape(name, tuple(host.shape)):
+                    raise RuntimeError(f"TRT_DESERIALIZE_FAILED:input shape rejected for {name}: {tuple(host.shape)}")
+                host_inputs[name] = host
+                device_inputs[name] = cp.asarray(host)
 
-        for name in _tensor_names(engine):
-            mode = engine.get_tensor_mode(name)
-            if mode == trt.TensorIOMode.INPUT:
-                tensor = device_inputs.get(name)
-                if tensor is None:
-                    raise RuntimeError(f"TRT_DESERIALIZE_FAILED:missing input tensor {name}")
-            else:
-                shape = tuple(int(dim) for dim in context.get_tensor_shape(name))
-                if not shape or any(dim <= 0 for dim in shape):
-                    raise RuntimeError(f"TRT_DESERIALIZE_FAILED:invalid output shape for {name}: {shape}")
-                dtype = trt.nptype(engine.get_tensor_dtype(name))
-                tensor = cp.empty(shape, dtype=dtype)
-                device_outputs[name] = tensor
-            context.set_tensor_address(name, int(tensor.data.ptr))
+            for name in _tensor_names(engine):
+                mode = engine.get_tensor_mode(name)
+                if mode == trt.TensorIOMode.INPUT:
+                    tensor = device_inputs.get(name)
+                    if tensor is None:
+                        raise RuntimeError(f"TRT_DESERIALIZE_FAILED:missing input tensor {name}")
+                else:
+                    shape = tuple(int(dim) for dim in context.get_tensor_shape(name))
+                    if not shape or any(dim <= 0 for dim in shape):
+                        raise RuntimeError(f"TRT_DESERIALIZE_FAILED:invalid output shape for {name}: {shape}")
+                    dtype = np.dtype(trt.nptype(engine.get_tensor_dtype(name)))
+                    tensor = cp.empty(shape, dtype=dtype)
+                    device_outputs[name] = tensor
+                context.set_tensor_address(name, int(tensor.data.ptr))
 
-        ok = context.execute_async_v3(stream.ptr)
-        if not ok:
-            raise RuntimeError("TRT_DESERIALIZE_FAILED:execute_async_v3 failed")
+            ok = context.execute_async_v3(stream.ptr)
+            if not ok:
+                raise RuntimeError("TRT_DESERIALIZE_FAILED:execute_async_v3 failed")
         stream.synchronize()
         return {name: cp.asnumpy(tensor) for name, tensor in device_outputs.items()}
     except Exception as error:
@@ -123,7 +132,7 @@ def try_upscale_bgr_trt(frame_bgr: np.ndarray, settings: dict[str, Any], target_
     names = _tensor_names(engine)
     input_names = [name for name in names if "input" in name.lower()] or [names[0]]
     rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-    chw = np.transpose(rgb, (2, 0, 1))[None].astype(np.float16)
+    chw = np.ascontiguousarray(np.transpose(rgb, (2, 0, 1))[None])
     output = _first_output(_execute(engine, {input_names[0]: chw}))
     if output.ndim == 4:
         output = output[0]
@@ -148,8 +157,8 @@ def try_interpolate_rife_trt(frame0_rgb: np.ndarray, frame1_rgb: np.ndarray, tim
     timestep_name = lower.get("timestep") or lower.get("time") or lower.get("t")
     if not img0_name or not img1_name or not timestep_name:
         return None
-    left = np.transpose(frame0_rgb.astype(np.float32) / 255.0, (2, 0, 1))[None].astype(np.float16)
-    right = np.transpose(frame1_rgb.astype(np.float32) / 255.0, (2, 0, 1))[None].astype(np.float16)
+    left = np.ascontiguousarray(np.transpose(frame0_rgb.astype(np.float32) / 255.0, (2, 0, 1))[None])
+    right = np.ascontiguousarray(np.transpose(frame1_rgb.astype(np.float32) / 255.0, (2, 0, 1))[None])
     t = np.asarray([float(timestep)], dtype=np.float32)
     output = _first_output(_execute(engine, {img0_name: left, img1_name: right, timestep_name: t}))
     if output.ndim == 4:
