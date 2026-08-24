@@ -20,3 +20,8 @@ def test_rife_loader_exposes_flat_snapshot_as_train_log_package():
     assert 'package.__path__ = [str(RIFE_MODEL_DIR)]' in SOURCE
     assert 'sys.modules["train_log"] = package' in SOURCE
     assert '_install_rife_train_log_alias(module_path)' in SOURCE
+
+
+def test_native_rife_fallback_announces_model_loading():
+    assert '[enhancer rife] native_load_start' in SOURCE
+    assert '[enhancer rife] native_load_ready' in SOURCE

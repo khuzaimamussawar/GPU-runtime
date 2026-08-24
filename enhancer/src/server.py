@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import subprocess
 import threading
 import time
@@ -40,6 +42,51 @@ def config() -> RuntimeConfig:
     return _CONFIG
 
 
+def _resource_snapshot() -> dict[str, Any]:
+    snapshot: dict[str, Any] = {}
+    try:
+        usage = shutil.disk_usage("/")
+        gib = 1024 ** 3
+        snapshot.update({
+            "diskTotalGiB": round(usage.total / gib, 2),
+            "diskUsedGiB": round(usage.used / gib, 2),
+            "diskFreeGiB": round(usage.free / gib, 2),
+        })
+    except Exception as error:
+        snapshot["diskError"] = f"{type(error).__name__}:{error}"
+    try:
+        import torch
+        if torch.cuda.is_available():
+            snapshot.update({
+                "gpuAllocatedMiB": int(torch.cuda.memory_allocated(0) // (1024 * 1024)),
+                "gpuReservedMiB": int(torch.cuda.memory_reserved(0) // (1024 * 1024)),
+                "gpuMaxAllocatedMiB": int(torch.cuda.max_memory_allocated(0) // (1024 * 1024)),
+            })
+    except Exception as error:
+        snapshot["gpuMemoryError"] = f"{type(error).__name__}:{error}"
+    return snapshot
+
+
+def _runtime_log(event: str, **fields: Any) -> None:
+    payload = {"event": event, "serviceKind": config().service_kind, **fields}
+    print("[enhancer runtime] " + json.dumps(payload, sort_keys=True, default=str), flush=True)
+
+
+def _engine_log_summary(settings: dict[str, Any]) -> dict[str, Any]:
+    engines = settings.get("engines") if isinstance(settings.get("engines"), dict) else {}
+    summary: dict[str, Any] = {}
+    for name, raw in engines.items():
+        if not isinstance(raw, dict):
+            continue
+        summary[str(name)] = {
+            "key": raw.get("engineKey"),
+            "sha256": raw.get("engineSha256"),
+            "profile": raw.get("profile"),
+            "compatibility": raw.get("compatibility"),
+        }
+    return summary
+
+
 @dataclass
 class JobRecord:
     id: str
@@ -57,6 +104,8 @@ class JobRecord:
     updated_at: int = field(default_factory=lambda: int(time.time() * 1000))
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
     last_callback_at: float = 0.0
+    last_log_stage: str = ""
+    last_log_progress: float = -10.0
 
     def public(self) -> dict[str, Any]:
         return {
@@ -96,10 +145,29 @@ def _post_event_background(event_type: str, payload: dict[str, Any]) -> None:
 
 def _progress(record: JobRecord, stage: str, value: float, detail: dict[str, Any] | None = None) -> None:
     now = time.time()
+    stage_value = str(stage)
+    progress_value = max(0.0, min(100.0, float(value)))
     with _LOCK:
-        record.stage = str(stage)
-        record.progress = max(0.0, min(100.0, float(value)))
+        record.stage = stage_value
+        record.progress = progress_value
         record.updated_at = int(now * 1000)
+        should_log = (
+            stage_value != record.last_log_stage
+            or progress_value >= record.last_log_progress + 10.0
+            or progress_value >= 100.0
+        )
+        if should_log:
+            record.last_log_stage = stage_value
+            record.last_log_progress = progress_value
+    if should_log:
+        _runtime_log(
+            "job_progress",
+            jobId=record.id,
+            stage=stage_value,
+            progress=round(progress_value, 1),
+            detail=detail or {},
+            **_resource_snapshot(),
+        )
     if now - record.last_callback_at >= 1.0 or value >= 100:
         record.last_callback_at = now
         _event("job_progress", jobId=record.id, status=record.status, stage=record.stage,
@@ -130,8 +198,23 @@ def _run_job(record: JobRecord) -> None:
         record.status = "processing"; record.stage = "starting"; record.started_at = int(time.time() * 1000)
         record.updated_at = record.started_at; _CURRENT_JOB_ID = record.id; _IDLE_SINCE = None; _IDLE_TIMEOUT_SENT = False; _DRAINING = False
     _event("job_started", jobId=record.id, status=record.status, stage=record.stage)
+    settings = record.payload.get("settings") if isinstance(record.payload.get("settings"), dict) else {}
+    job_type = str(record.payload.get("jobType") or record.payload.get("job_type") or "").strip()
+    _runtime_log(
+        "job_start",
+        jobId=record.id,
+        jobType=job_type,
+        mode=settings.get("mode"),
+        upscalerModel=settings.get("upscalerModel") or record.payload.get("modelFamily"),
+        interpolationModel=settings.get("interpolationModel"),
+        targetResolution=settings.get("targetResolution"),
+        targetFps=settings.get("targetFps"),
+        directorSpeed=settings.get("directorSpeed"),
+        videoEncoder=settings.get("videoEncoder") or settings.get("video_encoder") or ("nvenc" if job_type == "video_upscale" else None),
+        engines=_engine_log_summary(settings),
+        **_resource_snapshot(),
+    )
     try:
-        job_type = str(record.payload.get("jobType") or record.payload.get("job_type") or "").strip()
         progress = lambda stage, value, detail=None: _progress(record, stage, value, detail)
         if job_type == "image_upscale":
             if config().service_kind != "enhancer_fast":
@@ -142,7 +225,6 @@ def _run_job(record: JobRecord) -> None:
                 raise RuntimeError("MODEL_LOAD_FAILED:image_upscale_batch requires FAST runtime")
             result = run_image_upscale_batch(record.payload, record.cancel_event, progress)
         elif job_type == "video_upscale":
-            settings = record.payload.get("settings") or {}
             if normalize_video_encoder(settings) == "nvenc":
                 # Encoder choice comes from the job/Admin UI. Only NVENC jobs
                 # pay the real hardware smoke check; x265 jobs must not be
@@ -158,6 +240,7 @@ def _run_job(record: JobRecord) -> None:
         with _LOCK:
             record.result = result; record.status = "completed"; record.stage = "completed"; record.progress = 100.0
             record.completed_at = int(time.time() * 1000); record.updated_at = record.completed_at
+        _runtime_log("job_completed", jobId=record.id, durationMs=record.completed_at - (record.started_at or record.completed_at), **_resource_snapshot())
         _event("job_completed", jobId=record.id, status="completed", stage="completed", progress=100, output=result,
                telemetry=telemetry(record.public()))
     except Exception as error:
@@ -170,6 +253,13 @@ def _run_job(record: JobRecord) -> None:
             record.error = str(error)[:4000]
             record.debug = traceback.format_exc().splitlines()[-80:]
             record.completed_at = int(time.time() * 1000); record.updated_at = record.completed_at
+        _runtime_log(
+            "job_cancelled" if cancelled else "job_failed",
+            jobId=record.id,
+            errorCode=record.error_code,
+            error=record.error,
+            **_resource_snapshot(),
+        )
         _event("job_cancelled" if cancelled else "job_failed", jobId=record.id, status=record.status, stage=record.stage,
                errorCode=record.error_code, error=record.error, debug=record.debug[-40:], telemetry=telemetry(record.public()))
     finally:
@@ -177,6 +267,7 @@ def _run_job(record: JobRecord) -> None:
             _CURRENT_JOB_ID = None; _IDLE_SINCE = time.time(); _IDLE_TIMEOUT_SENT = False; _DRAINING = False
             idle_since = _IDLE_SINCE
             timeout = config().idle_timeout_seconds
+        _runtime_log("worker_idle", jobId=record.id, idleTimeoutSeconds=timeout, **_resource_snapshot())
         _event("worker_idle", idleSince=idle_since, idleTimeoutSeconds=timeout,
                terminateAfter=(idle_since + timeout) if timeout > 0 else None)
 
@@ -210,6 +301,7 @@ def _boot() -> None:
                 raise RuntimeError("TRT_BUILD_FAILED:TensorRT builder unavailable")
         _READY = True
         _IDLE_SINCE = None
+        _runtime_log("worker_ready", qualification=_QUALIFICATION, **_resource_snapshot())
         _event("worker_ready", readyAt=time.time(), qualification=_QUALIFICATION, capabilities=_capabilities())
     except Exception as error:
         _STARTUP_ERROR = str(error)
@@ -229,6 +321,7 @@ def _idle_monitor() -> None:
             continue
         if time.time() - idle_since >= config().idle_timeout_seconds:
             timeout = config().idle_timeout_seconds
+            _runtime_log("idle_expired", idleTimeoutSeconds=timeout, **_resource_snapshot())
             _event("idle_expired", idleSince=idle_since, idleTimeoutSeconds=timeout,
                    terminateAfter=idle_since + timeout)
             with _LOCK:
@@ -372,6 +465,7 @@ async def create_job(request: Request, authorization: str | None = Header(defaul
             raise HTTPException(status_code=409, detail=f"Worker busy with {_CURRENT_JOB_ID}")
         record = JobRecord(id=job_id, payload=payload)
         _JOBS[job_id] = record
+        _runtime_log("job_accepted", jobId=job_id, jobType=payload.get("jobType") or payload.get("job_type"), **_resource_snapshot())
         thread = threading.Thread(target=_run_job, args=(record,), daemon=True, name=f"enhancer-job-{job_id[:12]}")
         thread.start()
     return record.public()
@@ -392,6 +486,7 @@ def cancel_job(job_id: str, authorization: str | None = Header(default=None)):
     if not record: raise HTTPException(status_code=404, detail="Job not found")
     if record.status in {"completed", "failed", "cancelled"}: return record.public()
     record.cancel_event.set(); record.stage = "cancelling"; record.updated_at = int(time.time() * 1000)
+    _runtime_log("cancel_requested", jobId=record.id, stage=record.stage, **_resource_snapshot())
     _event("job_cancelling", jobId=record.id, status=record.status, stage=record.stage)
     return record.public()
 

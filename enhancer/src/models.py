@@ -142,6 +142,7 @@ def rife():
         return _RIFE
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA_UNAVAILABLE")
+    print(f"[enhancer rife] native_load_start model_dir={RIFE_MODEL_DIR}", flush=True)
     module = _load_rife_module()
     model = module.Model()
     model.load_model(str(RIFE_MODEL_DIR), -1)
@@ -151,6 +152,7 @@ def rife():
     if version < 3.9:
         raise RuntimeError(f"RIFE_RUNTIME_FAILED:checkpoint lacks arbitrary timestep support version={version}")
     _RIFE = model
+    print(f"[enhancer rife] native_load_ready version={version}", flush=True)
     return model
 
 

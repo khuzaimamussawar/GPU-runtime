@@ -15,3 +15,15 @@ def test_tensor_rt_inputs_follow_serialized_engine_dtype_and_stream():
     # Callers must preserve source precision and let the serialized engine decide
     # whether each input is FP16, FP32, or another supported TensorRT dtype.
     assert "[None].astype(np.float16)" not in source
+
+
+def test_tensor_rt_logs_engine_identity_and_rife_first_use():
+    source = (ROOT / "src/engine_runtime.py").read_text(encoding="utf-8")
+    assert '"engine_download_start"' in source
+    assert '"engine_ready"' in source
+    assert '"spatial_first_use"' in source
+    assert '"rife_first_use"' in source
+    assert '"rife_unusable"' in source
+    assert 'reason="missing_tensor_names"' in source
+    assert 'profile=spec.get("profile")' in source
+    assert 'compatibility=spec.get("compatibility")' in source
