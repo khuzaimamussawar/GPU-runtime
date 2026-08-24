@@ -34,7 +34,7 @@ def is_fatal_cuda_error(error: BaseException) -> bool:
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024, ), b""):
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
 
@@ -182,7 +182,10 @@ def try_upscale_bgr_trt(frame_bgr: np.ndarray, settings: dict[str, Any], target_
 def try_interpolate_rife_trt(frame0_rgb: np.ndarray, frame1_rgb: np.ndarray, timestep: float, settings: dict[str, Any]) -> np.ndarray | None:
     spec = _engine_spec(settings, "rife")
     if not spec:
-        _log("rife_unavailable", reason="missing_engine_spec")
+        missing_key = "rife:missing_engine_spec"
+        if missing_key not in _ENGINE_USE_LOGGED:
+            _ENGINE_USE_LOGGED.add(missing_key)
+            _log("rife_unavailable", reason="missing_engine_spec")
         return None
     key = str(spec["engineKey"])
     use_key = f"rife:{key}"
@@ -203,7 +206,10 @@ def try_interpolate_rife_trt(frame0_rgb: np.ndarray, frame1_rgb: np.ndarray, tim
     img1_name = lower.get("img1") or lower.get("i1")
     timestep_name = lower.get("timestep") or lower.get("time") or lower.get("t")
     if not img0_name or not img1_name or not timestep_name:
-        _log("rife_unusable", reason="missing_tensor_names", key=key, tensors="|".join(names))
+        unusable_key = f"rife-unusable:{key}"
+        if unusable_key not in _ENGINE_USE_LOGGED:
+            _ENGINE_USE_LOGGED.add(unusable_key)
+            _log("rife_unusable", reason="missing_tensor_names", key=key, tensors="|".join(names))
         return None
     left = np.ascontiguousarray(np.transpose(frame0_rgb.astype(np.float32) / 255.0, (2, 0, 1))[None])
     right = np.ascontiguousarray(np.transpose(frame1_rgb.astype(np.float32) / 255.0, (2, 0, 1))[None])
