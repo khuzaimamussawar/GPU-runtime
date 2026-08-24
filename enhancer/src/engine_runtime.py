@@ -11,6 +11,7 @@ import numpy as np
 from .r2_store import download_file
 
 _ENGINE_CACHE: dict[str, Any] = {}
+_ENGINE_USE_LOGGED: set[str] = set()
 _FATAL_CUDA_MARKERS = (
     "illegal memory access",
     "cudaerrorillegaladdress",
@@ -18,6 +19,11 @@ _FATAL_CUDA_MARKERS = (
     "launch failed",
     "unspecified launch failure",
 )
+
+
+def _log(event: str, **fields: Any) -> None:
+    detail = " ".join(f"{key}={value}" for key, value in fields.items() if value is not None)
+    print(f"[enhancer trt] {event}{' ' + detail if detail else ''}", flush=True)
 
 
 def is_fatal_cuda_error(error: BaseException) -> bool:
@@ -46,8 +52,16 @@ def _load_engine(spec: dict[str, Any]):
     expected = str(spec["engineSha256"]).lower()
     cache_key = f"{key}:{expected}"
     if cache_key in _ENGINE_CACHE:
+        _log("engine_cache_hit", key=key)
         return _ENGINE_CACHE[cache_key]
 
+    _log(
+        "engine_download_start",
+        key=key,
+        profile=spec.get("profile"),
+        compatibility=spec.get("compatibility"),
+        sha256=expected,
+    )
     with tempfile.TemporaryDirectory(prefix="sb-trt-runtime-") as tmp:
         path = download_file(key, Path(tmp) / "model.engine")
         actual = _sha256(path)
@@ -58,6 +72,16 @@ def _load_engine(spec: dict[str, Any]):
         engine = runtime.deserialize_cuda_engine(path.read_bytes())
         if engine is None:
             raise RuntimeError("TRT_DESERIALIZE_FAILED:deserialize_cuda_engine returned None")
+        io = []
+        for index in range(engine.num_io_tensors):
+            name = engine.get_tensor_name(index)
+            io.append(f"{name}:{engine.get_tensor_dtype(name)}:{tuple(engine.get_tensor_shape(name))}")
+        _log(
+            "engine_ready",
+            key=key,
+            bytes=path.stat().st_size,
+            tensors="|".join(io),
+        )
     _ENGINE_CACHE[cache_key] = engine
     return engine
 
@@ -128,6 +152,17 @@ def try_upscale_bgr_trt(frame_bgr: np.ndarray, settings: dict[str, Any], target_
     spec = _engine_spec(settings, "spatial")
     if not spec:
         return None
+    key = str(spec["engineKey"])
+    use_key = f"spatial:{key}"
+    if use_key not in _ENGINE_USE_LOGGED:
+        _ENGINE_USE_LOGGED.add(use_key)
+        _log(
+            "spatial_first_use",
+            key=key,
+            profile=spec.get("profile"),
+            source=f"{frame_bgr.shape[1]}x{frame_bgr.shape[0]}",
+            target=f"{target_w}x{target_h}",
+        )
     engine = _load_engine(spec)
     names = _tensor_names(engine)
     input_names = [name for name in names if "input" in name.lower()] or [names[0]]
@@ -148,7 +183,20 @@ def try_upscale_bgr_trt(frame_bgr: np.ndarray, settings: dict[str, Any], target_
 def try_interpolate_rife_trt(frame0_rgb: np.ndarray, frame1_rgb: np.ndarray, timestep: float, settings: dict[str, Any]) -> np.ndarray | None:
     spec = _engine_spec(settings, "rife")
     if not spec:
+        _log("rife_unavailable", reason="missing_engine_spec")
         return None
+    key = str(spec["engineKey"])
+    use_key = f"rife:{key}"
+    if use_key not in _ENGINE_USE_LOGGED:
+        _ENGINE_USE_LOGGED.add(use_key)
+        _log(
+            "rife_first_use",
+            key=key,
+            profile=spec.get("profile"),
+            compatibility=spec.get("compatibility"),
+            frame=f"{frame0_rgb.shape[1]}x{frame0_rgb.shape[0]}",
+            timestep=round(float(timestep), 6),
+        )
     engine = _load_engine(spec)
     names = _tensor_names(engine)
     lower = {name.lower(): name for name in names}
@@ -156,6 +204,7 @@ def try_interpolate_rife_trt(frame0_rgb: np.ndarray, frame1_rgb: np.ndarray, tim
     img1_name = lower.get("img1") or lower.get("i1")
     timestep_name = lower.get("timestep") or lower.get("time") or lower.get("t")
     if not img0_name or not img1_name or not timestep_name:
+        _log("rife_unusable", reason="missing_tensor_names", key=key, tensors="|".join(names))
         return None
     left = np.ascontiguousarray(np.transpose(frame0_rgb.astype(np.float32) / 255.0, (2, 0, 1))[None])
     right = np.ascontiguousarray(np.transpose(frame1_rgb.astype(np.float32) / 255.0, (2, 0, 1))[None])
