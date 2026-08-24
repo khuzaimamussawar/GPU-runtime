@@ -181,6 +181,8 @@ def interpolate_rife(frame0_rgb: np.ndarray, frame1_rgb: np.ndarray, timestep: f
     import torch.nn.functional as F
     if not 0.0 < float(timestep) < 1.0:
         raise ValueError("RIFE timestep must be between 0 and 1")
+    if frame0_rgb.shape != frame1_rgb.shape:
+        raise RuntimeError(f"RIFE_RUNTIME_FAILED:frame shape mismatch {frame0_rgb.shape} != {frame1_rgb.shape}")
     i0 = _rgb_to_rife_tensor(frame0_rgb)
     i1 = _rgb_to_rife_tensor(frame1_rgb)
     height, width = int(i0.shape[-2]), int(i0.shape[-1])

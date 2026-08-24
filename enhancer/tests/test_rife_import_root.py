@@ -44,5 +44,15 @@ def test_native_rife_pads_4k_height_to_ifnet_alignment_and_crops_result():
         '    padded_h = ((int(height) - 1) // block + 1) * block',
         '    return padded_w, padded_h',
     ]), '<rife-shape-test>', 'exec'), namespace)
-    assert namespace['shape'](3840, 2160, 1.0) == (3840, 2176)
-    assert namespace['shape'](1920, 1080, 1.0) == (1920, 1088)
+    # RIFE receives padded tensors, but interpolate_rife crops the output back
+    # to the original dimensions for every portrait and landscape input.
+    cases = {
+        (1920, 1080): (1920, 1088),
+        (1080, 1920): (1088, 1920),
+        (2560, 1440): (2560, 1440),
+        (1440, 2560): (1440, 2560),
+        (3840, 2160): (3840, 2176),
+        (2160, 3840): (2176, 3840),
+    }
+    for source, padded in cases.items():
+        assert namespace['shape'](*source, 1.0) == padded
