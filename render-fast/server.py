@@ -22,6 +22,7 @@ POD_TOKEN = os.environ.get("SCENEBUILDER_POD_TOKEN", "").strip()
 WORKER_ID = os.environ.get("SCENEBUILDER_WORKER_ID", "").strip()
 CONTROL_URL = os.environ.get("SCENEBUILDER_CONTROL_URL", "").strip()
 DEFAULT_IDLE_TIMEOUT = max(0, int(os.environ.get("SCENEBUILDER_IDLE_TIMEOUT_SECONDS", "60")))
+MAX_ERROR_DETAIL_CHARS = 16000
 
 
 class RenderError(RuntimeError):
@@ -68,7 +69,7 @@ def run(command: list[str], label: str, stdout: Any = None) -> subprocess.Comple
     print(f"[GPU Render] {label}: {' '.join(command[:12])}", flush=True)
     completed = subprocess.run(command, stdout=stdout, stderr=subprocess.PIPE, check=False)
     if completed.returncode != 0:
-        error = completed.stderr.decode("utf-8", errors="replace")[-4000:]
+        error = completed.stderr.decode("utf-8", errors="replace")[-MAX_ERROR_DETAIL_CHARS:]
         raise RenderError(f"{label} exited with {completed.returncode}: {error}")
     return completed
 
@@ -281,7 +282,7 @@ def render_video(job: dict[str, Any], audio: Path | None, work_dir: Path) -> Pat
                 encoder.stdin.write(chunk)
             stderr = decoder.stderr.read().decode("utf-8", errors="replace") if decoder.stderr else ""
             if decoder.wait() != 0:
-                raise RenderError(f"visual unit {index} failed: {stderr[-3000:]}")
+                raise RenderError(f"visual unit {index} failed: {stderr[-MAX_ERROR_DETAIL_CHARS:]}")
             unregister_process(decoder)
             progress = 20 + int(((index + 1) / total) * 70)
             emit("job_progress", jobId=job["jobId"], progress=progress, phase="video", clipIndex=index)
@@ -290,7 +291,7 @@ def render_video(job: dict[str, Any], audio: Path | None, work_dir: Path) -> Pat
         encoder.stdin.close()
         stderr = encoder.stderr.read().decode("utf-8", errors="replace") if encoder.stderr else ""
         if encoder.wait() != 0:
-            raise RenderError(f"final NVENC encode failed: {stderr[-4000:]}")
+            raise RenderError(f"final NVENC encode failed: {stderr[-MAX_ERROR_DETAIL_CHARS:]}")
     finally:
         unregister_process(encoder)
     if audio is None:
@@ -327,7 +328,17 @@ def process_job(job: dict[str, Any]) -> None:
         cancelled = str(exc) == "RENDER_CANCELLED"
         event = "job_cancelled" if cancelled else "job_failed"
         code = "RENDER_CANCELLED" if cancelled else ("GPU_OOM" if "out of memory" in str(exc).lower() else "GPU_RENDER_FAILED")
-        emit(event, jobId=job_id, errorCode=code, error=str(exc))
+        emit(
+            event,
+            jobId=job_id,
+            errorCode=code,
+            error=str(exc),
+            errorDetails={
+                "exceptionType": type(exc).__name__,
+                "gpu": gpu_stats(),
+                "disk": disk_stats(),
+            },
+        )
     finally:
         with STATE.lock:
             STATE.active_job_id = None
@@ -394,7 +405,7 @@ class Handler(BaseHTTPRequestHandler):
         return value
 
     def do_GET(self) -> None:
-        if self.path.split("?", 1)[0] == "/health":
+        if self.path.split("?", 1)[0] in ("/", "/health"):
             with STATE.lock:
                 self.send_json(HTTPStatus.OK, {"ok": True, "runtime": "scenebuilder-gpu-fast-render", "status": STATE.status, "activeJobId": STATE.active_job_id, "idle": STATE.status == "idle"})
             return
