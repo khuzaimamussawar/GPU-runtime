@@ -122,6 +122,31 @@ driver or FFmpeg error, is retired, and the job is requeued to another GPU.
 Fast never falls back to x264/x265. The render fails only after the selected
 provider policy has exhausted its viable candidates.
 
+## Streaming Execution
+
+Fast uses the existing `renders` table for render history, settings, status,
+progress, output URL, provider, and assigned worker. It does not introduce a
+second render-history table. `render_gpu_workers` only records reusable GPU
+worker state and measured capabilities.
+
+For one timeline export, Fast starts one final H.264/HEVC NVENC encoder and
+keeps it alive for the entire output. Each visual timeline unit is decoded,
+trimmed, and normalized in timeline order, then streamed directly into that
+same final encoder. The current unit's decoder/filter process and the final
+encoder run concurrently through a bounded pipe.
+
+```text
+unit 1 decode/filter -> final encoder stdin -> final.mp4
+unit 2 decode/filter -> same encoder stdin -> final.mp4
+unit N decode/filter -> same encoder stdin -> final.mp4
+```
+
+Fast never decodes the entire video before encoding it. A five-minute 4K/48
+timeline would require hundreds of GB of raw frames and add unnecessary disk
+I/O and latency. There are no encoded per-clip MP4 intermediates. Source
+downloads may be prefetched with a bounded one-unit lookahead, but output
+frames remain timeline-ordered and bounded in memory.
+
 ## Parallel Scheduling
 
 One GPU pod is not permanently limited to one job. Parallel work is permitted
