@@ -34,8 +34,9 @@ workflow, not a new repository and not an enhancer build.
 
 ## Pod Contract
 
-Use the existing H3 environment and callback shape, but issue a render-scoped
-token. Do not reuse an H3 token value.
+Use the existing H3 authentication master secret and callback shape, but derive
+a render-scoped token from the worker ID. The pod therefore never receives an
+H3 workload token value.
 
 ```text
 SCENEBUILDER_POD_TOKEN=<per-render-worker secret>
