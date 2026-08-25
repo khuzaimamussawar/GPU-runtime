@@ -39,7 +39,7 @@ token. Do not reuse an H3 token value.
 
 ```text
 SCENEBUILDER_POD_TOKEN=<per-render-worker secret>
-SCENEBUILDER_WORKER_ID=<render_gpu_workers.id>
+SCENEBUILDER_WORKER_ID=<render_pod_workers.id>
 SCENEBUILDER_CONTROL_URL=https://scene-builder.snorvians.workers.dev/api/projects/v2/render-gpu/pod/events
 SCENEBUILDER_IDLE_TIMEOUT_SECONDS=<scheduler-selected timeout>
 NVIDIA_VISIBLE_DEVICES=all
@@ -124,10 +124,10 @@ provider policy has exhausted its viable candidates.
 
 ## Streaming Execution
 
-Fast uses the existing `renders` table for render history, settings, status,
+Fast uses the existing `renders` table for the render job, settings, status,
 progress, output URL, provider, and assigned worker. It does not introduce a
-second render-history table. `render_gpu_workers` only records reusable GPU
-worker state and measured capabilities.
+second render-job table. `render_pod_workers` only records reusable GPU-worker
+state and measured capabilities.
 
 For one timeline export, Fast starts one final H.264/HEVC NVENC encoder and
 keeps it alive for the entire output. Each visual timeline unit is decoded,
@@ -152,17 +152,17 @@ frames remain timeline-ordered and bounded in memory.
 Fast extends the existing render records. It does not create a second
 `render_jobs` or render-history table.
 
-### `renders` (one row per user export)
+### `renders` (one row per render job)
 
-`renders` remains the canonical user-visible history row for both Quality and
-Fast. Existing fields continue to own the title, project, status, progress,
-output URL, error, timestamps, and billed hours. Fast adds only durable job
-provenance:
+`renders` remains the canonical job row for both Quality and Fast while that
+job is live and during the one-hour troubleshooting retention window. Existing
+fields continue to own the title, project, status, progress, output URL, error,
+timestamps, and billed hours. Fast adds only job provenance:
 
 ```text
 execution_mode          quality | fast
 provider_preference     auto | runpod | novita
-gpu_worker_id           render_gpu_workers.id, nullable until assigned
+gpu_worker_id           render_pod_workers.id, nullable until assigned
 minimum_vram_mb         scheduler request floor for this output profile
 actual_gpu_name         probe result for the worker that ran the job
 actual_gpu_vram_mb      probe result
@@ -188,7 +188,7 @@ queued -> waiting_for_gpu -> provisioning -> probing -> rendering
 -> completed | failed | cancelled
 ```
 
-### `render_gpu_workers` (live provider-pod state)
+### `render_pod_workers` (live provider-pod state)
 
 This is deliberately separate from the existing IP-oriented `render_servers`
 table. It describes a reusable RunPod or Novita GPU pod, not a user export.
@@ -211,9 +211,36 @@ last_error_code, last_error
 
 `busy` is derived from `active_jobs_json`, not a stale single-job flag. A pod
 receives a new job only when it has an available calibrated slot. `deleted` and
-`delete_failed` never count as capacity. A `delete_failed` row is retained for
-the reaper to retry provider deletion, but it cannot block a fresh pod for a
-project or profile.
+`delete_failed` never count as capacity. A `delete_failed` row is retained only
+until the reaper has confirmed provider deletion; it cannot block a fresh pod
+for a project or profile.
+
+### H3-Style Dispatch And Recovery
+
+Fast follows the H3 scheduler pattern rather than batch/cohort failure logic:
+
+1. Claim one queued render atomically for one available worker slot.
+2. The pod reports `worker_busy(jobId)` before work, and its callbacks are
+   idempotent for that exact job ID.
+3. On `job_done`, `job_failed`, or a confirmed cancellation, release only that
+   slot. Immediately assign the next eligible queued render; do not wait for a
+   cron tick or an idle timeout.
+4. Prefer queued work from the same project while it exists, then lend the
+   idle slot to another eligible project. Project caps count only live,
+   non-draining pod-worker slots for the requested Fast profile.
+5. A `409 worker busy`, stale callback, or callback for another job never fails
+   a batch. Reconcile that worker's `active_jobs_json` and retry/requeue only
+   the unstarted job.
+6. A lost or draining pod requeues each of its still-active jobs immediately,
+   marks the worker for retirement, and provisions/reuses another eligible
+   worker. It never waits for an idle timeout when queued work exists.
+7. Cancelling a render sends a job-specific cancel request to the pod, stops
+   its FFmpeg process, clears the slot after acknowledgement (or a bounded
+   recovery timeout), and returns the pod to `idle` or its normal delete path.
+
+The capacity calculation ignores `deleted` and `delete_failed` rows exactly as
+the enhancer/H3 worker logic does. It counts only available, probe-verified,
+non-draining slots of the requested render profile.
 
 ### `render_gpu_capability_profiles` (reusable calibration)
 
@@ -252,12 +279,23 @@ peak CPU, RAM, disk, GPU, VRAM, NVENC, and NVDEC for an individual render.
 
 ### Retention And Reaping
 
-The existing 15-minute cleanup keeps `renders` permanently. It deletes only
-terminal telemetry older than one hour. Fast extends that rule to terminal GPU
-worker records after provider deletion is confirmed. Active, idle, provisioning,
-and `delete_failed` workers are never silently deleted by that telemetry
-cleanup; the explicit idle/delete reaper owns their lifecycle. This preserves
-cost control without losing a failed provider-delete record or a user render.
+The existing 15-minute cron owns cleanup. At each run it deletes D1 rows whose
+last update is older than one hour and whose state is terminal:
+
+```text
+renders:             completed | failed | cancelled | deleted
+render_pod_workers:  deleted | nvenc_unavailable, or delete_failed after the
+                     reaper has confirmed provider deletion
+render_job_metrics:  terminal-job telemetry older than one hour
+```
+
+This removes completed, failed, cancelled, and deleted render jobs just like
+the video-generation and direct-audio job cleanup. The final R2 output object
+is not deleted by this D1 reaper; its storage retention remains a separate
+policy. Active, idle, provisioning, probing, busy, draining, and unresolved
+`delete_failed` workers are never silently removed. The explicit reaper owns
+their provider deletion and retry path, so a stuck provider row cannot hide a
+billable pod or block replacement capacity.
 
 ## Parallel Scheduling
 
