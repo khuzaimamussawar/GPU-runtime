@@ -147,6 +147,118 @@ I/O and latency. There are no encoded per-clip MP4 intermediates. Source
 downloads may be prefetched with a bounded one-unit lookahead, but output
 frames remain timeline-ordered and bounded in memory.
 
+## D1 Data Model
+
+Fast extends the existing render records. It does not create a second
+`render_jobs` or render-history table.
+
+### `renders` (one row per user export)
+
+`renders` remains the canonical user-visible history row for both Quality and
+Fast. Existing fields continue to own the title, project, status, progress,
+output URL, error, timestamps, and billed hours. Fast adds only durable job
+provenance:
+
+```text
+execution_mode          quality | fast
+provider_preference     auto | runpod | novita
+gpu_worker_id           render_gpu_workers.id, nullable until assigned
+minimum_vram_mb         scheduler request floor for this output profile
+actual_gpu_name         probe result for the worker that ran the job
+actual_gpu_vram_mb      probe result
+actual_driver_version   probe result
+actual_encoder          h264_nvenc | hevc_nvenc
+encoder_settings_json   resolved codec, cq, preset, pixel format, FPS, size
+render_plan_json        resolved visual/audio plan and Fast eligibility result
+attempt_count           retry accounting
+next_retry_at           nullable retry schedule
+last_error_code         stable scheduling/probe/render error code
+```
+
+`provider` records the provider actually selected after assignment. Legacy
+`server_id` remains the Hetzner Quality-server reference; Fast uses the new
+`gpu_worker_id` rather than overloading it. `render_plan_json` is separate
+from the temporary dispatch payload so the completed row retains enough
+provenance to diagnose a result later without retaining signed URLs or tokens.
+
+Fast job status lives on this same row:
+
+```text
+queued -> waiting_for_gpu -> provisioning -> probing -> rendering
+-> completed | failed | cancelled
+```
+
+### `render_gpu_workers` (live provider-pod state)
+
+This is deliberately separate from the existing IP-oriented `render_servers`
+table. It describes a reusable RunPod or Novita GPU pod, not a user export.
+
+```text
+id                         primary key
+provider                   runpod | novita
+provider_pod_id            unique provider pod identifier
+image, region
+gpu_name, gpu_vram_mb, compute_capability, driver_version, ffmpeg_version
+status                     provisioning | probing | idle | busy | draining |
+                           nvenc_unavailable | delete_failed | deleted
+active_jobs_json           assigned render IDs; supports calibrated parallelism
+active_slots, max_slots    scheduler state for the current profile capacity
+capabilities_json          exact probe results and supported profiles
+pod_token_hash             hash only; the raw per-worker token is never stored
+created_at, last_activity_at, idle_since, terminate_after
+last_error_code, last_error
+```
+
+`busy` is derived from `active_jobs_json`, not a stale single-job flag. A pod
+receives a new job only when it has an available calibrated slot. `deleted` and
+`delete_failed` never count as capacity. A `delete_failed` row is retained for
+the reaper to retry provider deletion, but it cannot block a fresh pod for a
+project or profile.
+
+### `render_gpu_capability_profiles` (reusable calibration)
+
+This small table prevents a blind retry on every new pod while keeping the
+actual pod probe authoritative. Its key is GPU model plus driver, FFmpeg build,
+and output profile, for example `L4|driver-XXX|ffmpeg-XXX|2160p-48-hevc`.
+
+```text
+gpu_fingerprint, output_profile, codec
+nvenc_h264_ok, nvenc_hevc_main10_ok, nvdec_ok, cuda_filter_ok
+benchmark_fps, peak_vram_mb, peak_gpu_percent
+peak_nvenc_percent, peak_nvdec_percent, recommended_slots
+failure_code, failure_detail, updated_at
+```
+
+The scheduler may use a green profile to rank candidates, but a new pod still
+runs its short smoke/probe before it receives a user export. A failed driver
+or NVENC probe marks that fingerprint unhealthy and sends the queued render to
+the next allowed candidate; it never falls back to CPU encoding.
+
+### `render_job_metrics` (existing telemetry table)
+
+The existing metrics table remains the per-clip and overall telemetry stream.
+Fast adds queryable GPU fields rather than burying every value in JSON:
+
+```text
+gpu_vram_used_mb, gpu_vram_total_mb, gpu_util_percent
+gpu_encoder_util_percent, gpu_decoder_util_percent
+render_fps, output_frames, expected_frames
+```
+
+Its existing `phase`, `clip_index`, `route`, CPU, memory, disk, elapsed time,
+and `details_json` fields continue to record decode/filter/final-encode and
+overall measurements. The dashboard can therefore show current progress and
+peak CPU, RAM, disk, GPU, VRAM, NVENC, and NVDEC for an individual render.
+
+### Retention And Reaping
+
+The existing 15-minute cleanup keeps `renders` permanently. It deletes only
+terminal telemetry older than one hour. Fast extends that rule to terminal GPU
+worker records after provider deletion is confirmed. Active, idle, provisioning,
+and `delete_failed` workers are never silently deleted by that telemetry
+cleanup; the explicit idle/delete reaper owns their lifecycle. This preserves
+cost control without losing a failed provider-delete record or a user render.
+
 ## Parallel Scheduling
 
 One GPU pod is not permanently limited to one job. Parallel work is permitted
