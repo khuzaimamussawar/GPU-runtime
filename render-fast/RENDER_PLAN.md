@@ -154,10 +154,10 @@ Fast extends the existing render records. It does not create a second
 
 ### `renders` (one row per render job)
 
-`renders` remains the canonical job row for both Quality and Fast while that
-job is live and during the one-hour troubleshooting retention window. Existing
-fields continue to own the title, project, status, progress, output URL, error,
-timestamps, and billed hours. Fast adds only job provenance:
+`renders` remains the canonical user-visible history row for both Quality and
+Fast. Existing fields continue to own the title, project, status, progress,
+output URL, error, timestamps, and billed hours. Fast adds only durable job
+provenance:
 
 ```text
 execution_mode          quality | fast
@@ -279,23 +279,21 @@ peak CPU, RAM, disk, GPU, VRAM, NVENC, and NVDEC for an individual render.
 
 ### Retention And Reaping
 
-The existing 15-minute cron owns cleanup. At each run it deletes D1 rows whose
-last update is older than one hour and whose state is terminal:
+The existing 15-minute cron owns cleanup. At each run it deletes terminal
+non-history D1 rows whose last update is older than one hour:
 
 ```text
-renders:             completed | failed | cancelled | deleted
 render_pod_workers:  deleted | nvenc_unavailable, or delete_failed after the
                      reaper has confirmed provider deletion
 render_job_metrics:  terminal-job telemetry older than one hour
 ```
 
-This removes completed, failed, cancelled, and deleted render jobs just like
-the video-generation and direct-audio job cleanup. The final R2 output object
-is not deleted by this D1 reaper; its storage retention remains a separate
-policy. Active, idle, provisioning, probing, busy, draining, and unresolved
-`delete_failed` workers are never silently removed. The explicit reaper owns
-their provider deletion and retry path, so a stuck provider row cannot hide a
-billable pod or block replacement capacity.
+`renders` is never deleted by this cron, regardless of whether it is completed,
+failed, cancelled, or deleted. The final R2 output object also follows a
+separate storage-retention policy. Active, idle, provisioning, probing, busy,
+draining, and unresolved `delete_failed` workers are never silently removed.
+The explicit reaper owns their provider deletion and retry path, so a stuck
+provider row cannot hide a billable pod or block replacement capacity.
 
 ## Parallel Scheduling
 
