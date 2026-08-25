@@ -129,9 +129,10 @@ only after the GPU/model/driver/profile benchmark has calibrated it.
 
 The scheduler uses profile slots, not a blind VRAM target. It considers:
 
-- peak VRAM, capped at 80 percent
-- GPU compute utilization, capped at 85-90 percent
-- NVENC and NVDEC engine utilization, capped at 85-90 percent
+- peak VRAM, capped at 90 percent to retain a 10 percent safety reserve
+- GPU compute utilization, allowed to reach 100 percent
+- NVENC and NVDEC engine utilization, with realtime FPS deciding whether they
+  have enough headroom for another job
 - per-job achieved FPS, which must remain above the output FPS with headroom
 - host CPU, RAM, disk, and active encoder session limits
 
@@ -145,9 +146,9 @@ The initial concurrency matrix is conservative:
 | 48 GB | 1-2 after benchmark | 2-3 after benchmark | 3-4 after benchmark |
 
 The benchmark is authoritative. If adding a second job drops either job below
-realtime or violates a utilization cap, the scheduler lowers that profile's
-slot count. It does not launch parallel jobs merely to fill unused VRAM: NVENC
-can be the limiting engine while VRAM remains mostly free.
+realtime or exceeds the VRAM ceiling, the scheduler lowers that profile's slot
+count. It does not launch parallel jobs merely to fill unused VRAM: NVENC can
+be the limiting engine while VRAM remains mostly free.
 
 ## Quality Mapping
 
