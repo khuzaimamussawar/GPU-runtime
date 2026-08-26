@@ -566,8 +566,9 @@ def prepare_visual_unit(
         # some builds. Make the unit output contract explicit: one CFR frame
         # for every frame reserved by this timeline clip. The single-frame
         # clone pad covers clips whose requested end lands between source PTS
-        # values; -frames:v remains the authoritative exact duration limit.
-        unit_filter = f"{video_filter(clip, settings, False)},tpad=stop_mode=clone:stop_duration={1 / settings['fps']}"
+        # values. Use tpad's frame-count form: a fractional stop_duration can
+        # itself round to zero. -frames:v remains the exact duration limit.
+        unit_filter = f"{video_filter(clip, settings, False)},tpad=stop_mode=clone:stop=1"
         decoder = subprocess.Popen([
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
             "-filter_threads", decoder_threads,
