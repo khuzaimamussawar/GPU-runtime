@@ -100,6 +100,7 @@ class RenderFastSchedulerTests(unittest.TestCase):
         self.assertEqual(command[command.index("-fps_mode") + 1], "cfr")
         self.assertEqual(command[command.index("-r") + 1], "48")
         self.assertEqual(command[command.index("-frames:v") + 1], "72")
+        self.assertIn("tpad=stop_mode=clone:stop_duration=0.020833333333333332", command[command.index("-vf") + 1])
 
 
 if __name__ == "__main__":
