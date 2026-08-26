@@ -276,6 +276,16 @@ def available_vcpus() -> int:
     return max(1, min(limits)) if limits else max(1, os.cpu_count() or 1)
 
 
+def allocated_vcpus(value: Any, detected_vcpus: int | None = None) -> int:
+    """Honor provider vCPUs while retaining a lower cgroup quota as a hard limit."""
+    detected = max(1, int(detected_vcpus or available_vcpus()))
+    try:
+        provider = int(value or 0)
+    except (TypeError, ValueError):
+        provider = 0
+    return min(detected, provider) if provider > 0 else detected
+
+
 def system_memory_stats() -> dict[str, float | bool]:
     """Read the pod's cgroup budget first, then use host memory as a fallback."""
     try:
@@ -666,6 +676,9 @@ def render_video(job: dict[str, Any], audio: Path | None, work_dir: Path, use_gp
         "details": {
             "parallelClipWorkers": parallel_workers,
             "decoderThreads": int(ffmpeg_threads),
+            "providerAllocatedVcpus": int(settings.get("_providerAllocatedVcpus") or 0),
+            "detectedVcpus": int(settings.get("_detectedVcpus") or 0),
+            "effectiveVcpus": int(settings.get("_physicalVcpus") or 0),
             "frameBlockFrames": frames_per_block,
             "lookaheadBufferSeconds": LOOKAHEAD_BUFFER_SECONDS,
             "bufferedBytesPerClip": buffered_bytes_per_clip,
@@ -963,8 +976,15 @@ class Handler(BaseHTTPRequestHandler):
                 settings["width"] = int(settings.get("width") or 1920)
                 settings["height"] = int(settings.get("height") or 1080)
                 settings["fps"] = int(settings.get("fps") or 30)
-                physical_vcpus = available_vcpus()
+                detected_vcpus = available_vcpus()
+                try:
+                    provider_vcpus = max(0, int(payload.get("allocatedVcpus") or 0))
+                except (TypeError, ValueError):
+                    provider_vcpus = 0
+                physical_vcpus = allocated_vcpus(provider_vcpus, detected_vcpus)
                 cpu_budget = max(1, int((physical_vcpus * 0.90) // requested_slots))
+                settings["_providerAllocatedVcpus"] = provider_vcpus
+                settings["_detectedVcpus"] = detected_vcpus
                 settings["_physicalVcpus"] = physical_vcpus
                 settings["_cpuBudget"] = cpu_budget
                 settings["_parallelClipWorkers"] = parallel_clip_worker_count(settings)

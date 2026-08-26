@@ -16,6 +16,11 @@ class RenderFastSchedulerTests(unittest.TestCase):
     def test_cpu_set_count_handles_ranges_and_individual_cores(self) -> None:
         self.assertEqual(SERVER.cpu_set_count("0-3,8,10-11"), 7)
 
+    def test_provider_vcpu_allocation_caps_host_visible_cpu_count(self) -> None:
+        self.assertEqual(SERVER.allocated_vcpus(6, 48), 6)
+        self.assertEqual(SERVER.allocated_vcpus(20, 12), 12)
+        self.assertEqual(SERVER.allocated_vcpus(None, 9), 9)
+
     def test_video_filter_uses_fps_and_duration_without_endpoint_padding(self) -> None:
         clip = {"type": "video", "sceneDuration": 1.75, "speed": 1}
         settings = {"width": 1920, "height": 1080, "fps": 48}
