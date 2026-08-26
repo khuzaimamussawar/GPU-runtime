@@ -16,6 +16,11 @@ class RenderFastSchedulerTests(unittest.TestCase):
     def test_cpu_set_count_handles_ranges_and_individual_cores(self) -> None:
         self.assertEqual(SERVER.cpu_set_count("0-3,8,10-11"), 7)
 
+    def test_timeline_frame_counts_use_cumulative_boundaries(self) -> None:
+        clips = [{"sceneDuration": 1.733}, {"sceneDuration": 0.3}]
+        self.assertEqual(SERVER.timeline_frame_counts(clips, 48), [83, 15])
+        self.assertEqual(sum(SERVER.timeline_frame_counts(clips, 48)), round(2.033 * 48))
+
     def test_parallel_worker_profile_table(self) -> None:
         expected = {
             6: {(3840, 2160, 30): 3, (3840, 2160, 48): 2, (3840, 2160, 60): 1, (2560, 1440, 48): 4, (2560, 1440, 60): 3, (1920, 1080, 48): 6},
@@ -88,7 +93,7 @@ class RenderFastSchedulerTests(unittest.TestCase):
         clip = {"type": "video", "url": "https://example.invalid/source.mp4", "sceneDuration": 1, "speed": 1}
         settings = {"width": 2, "height": 2, "fps": 1, "_ffmpegThreads": 1}
         with mock.patch.object(SERVER.subprocess, "Popen", side_effect=FileNotFoundError("ffmpeg unavailable")):
-            SERVER.prepare_visual_unit(job, 0, clip, settings, 6, 1, buffer, threading.Event(), 0)
+            SERVER.prepare_visual_unit(job, 0, clip, settings, 72, 6, 1, buffer, threading.Event(), 0)
         self.assertIsNone(buffer.take(0, lambda: None))
         self.assertIn("ffmpeg unavailable", buffer.error(0) or "")
 
@@ -103,7 +108,7 @@ class RenderFastSchedulerTests(unittest.TestCase):
         process.wait.return_value = 0
         process.poll.return_value = 0
         with mock.patch.object(SERVER.subprocess, "Popen", return_value=process) as popen:
-            SERVER.prepare_visual_unit(job, 0, clip, settings, 6, 1, buffer, threading.Event(), 0)
+            SERVER.prepare_visual_unit(job, 0, clip, settings, 72, 6, 1, buffer, threading.Event(), 0)
         command = popen.call_args.args[0]
         self.assertEqual(command[command.index("-fps_mode") + 1], "cfr")
         self.assertEqual(command[command.index("-r") + 1], "48")

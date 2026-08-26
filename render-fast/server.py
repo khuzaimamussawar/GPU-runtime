@@ -113,6 +113,19 @@ def parallel_clip_worker_count(settings: dict[str, Any]) -> int:
     return max(1, min(12, vcpus, int(math.floor(base_workers * multiplier))))
 
 
+def timeline_frame_counts(clips: list[dict[str, Any]], fps: int) -> list[int]:
+    """Quantize clip boundaries on one Director timeline, never independently."""
+    running_seconds = 0.0
+    previous_boundary = 0
+    counts: list[int] = []
+    for clip in clips:
+        running_seconds += max(0.001, float(clip.get("sceneDuration") or 0.001))
+        boundary = max(previous_boundary + 1, round(running_seconds * fps))
+        counts.append(boundary - previous_boundary)
+        previous_boundary = boundary
+    return counts
+
+
 class State:
     def __init__(self) -> None:
         self.lock = threading.RLock()
@@ -529,6 +542,7 @@ def prepare_visual_unit(
     index: int,
     clip: dict[str, Any],
     settings: dict[str, Any],
+    expected_frames: int,
     frame_bytes: int,
     frames_per_block: int,
     frame_buffer: OrderedFrameBuffer,
@@ -537,7 +551,6 @@ def prepare_visual_unit(
 ) -> None:
     """Run one CPU FFmpeg unit and publish bounded raw-frame blocks."""
     job_id = job["jobId"]
-    expected_frames = max(1, round(max(0.001, float(clip.get("sceneDuration") or 0.001)) * settings["fps"]))
     decoder_threads = str(max(1, int(settings.get("_ffmpegThreads") or 1)))
     started = time.monotonic()
     output_frames = 0
@@ -624,7 +637,8 @@ def render_video(job: dict[str, Any], audio: Path | None, work_dir: Path, use_gp
     ffmpeg_threads = str(max(1, int(settings.get("_ffmpegThreads") or 1)))
     encoder = subprocess.Popen(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-threads", ffmpeg_threads, "-f", "rawvideo", "-pix_fmt", "yuv420p", "-video_size", f"{settings['width']}x{settings['height']}", "-framerate", str(settings["fps"]), "-i", "pipe:0", "-map", "0:v:0", "-an", *encoder_args, "-r", str(settings["fps"]), str(output)], stdin=subprocess.PIPE, stderr=subprocess.PIPE)
     register_process(job["jobId"], encoder)
-    expected_frames = max(1, sum(max(1, round(max(0.001, float(clip.get("sceneDuration") or 0.001)) * settings["fps"])) for clip in clips))
+    frame_counts = timeline_frame_counts(clips, settings["fps"])
+    expected_frames = max(1, sum(frame_counts))
     completed_frames = 0
     peak_gpu: dict[str, Any] = {}
     video_started = time.monotonic()
@@ -646,7 +660,7 @@ def render_video(job: dict[str, Any], audio: Path | None, work_dir: Path, use_gp
             except queue.Empty:
                 return
             try:
-                prepare_visual_unit(job, index, clips[index], settings, frame_bytes, frames_per_block, frame_buffer, abort_event, worker_number)
+                prepare_visual_unit(job, index, clips[index], settings, frame_counts[index], frame_bytes, frames_per_block, frame_buffer, abort_event, worker_number)
             finally:
                 source_queue.task_done()
 
@@ -680,7 +694,7 @@ def render_video(job: dict[str, Any], audio: Path | None, work_dir: Path, use_gp
             raise_if_cancelled(job["jobId"])
             clip_route = "cpu_filter_lanczos_nvenc"
             unit_started = time.monotonic()
-            unit_expected_frames = max(1, round(max(0.001, float(clip.get("sceneDuration") or 0.001)) * settings["fps"]))
+            unit_expected_frames = frame_counts[index]
             unit_frames = 0
             last_progress_emit = 0.0
             last_gpu_sample = time.monotonic()
