@@ -21,6 +21,16 @@ class RenderFastSchedulerTests(unittest.TestCase):
         self.assertEqual(SERVER.allocated_vcpus(20, 12), 12)
         self.assertEqual(SERVER.allocated_vcpus(None, 9), 9)
 
+    def test_visual_source_probe_uses_this_clip_url_without_cache(self) -> None:
+        clip = {"id": "clip-a", "type": "video", "url": "https://example.invalid/active-upscale.mp4"}
+        output = '{"streams":[{"codec_name":"hevc","width":3840,"height":2160,"avg_frame_rate":"48/1","r_frame_rate":"48/1","duration":"5.5","nb_frames":"264"}]}'
+        with mock.patch.object(SERVER, "command_output", return_value=output) as command_output:
+            probe = SERVER.probe_visual_clip(clip)
+        self.assertEqual(command_output.call_args.args[0][-1], clip["url"])
+        self.assertEqual(probe["averageFps"], 48)
+        self.assertEqual(probe["realFps"], 48)
+        self.assertEqual(probe["frameCount"], 264)
+
     def test_video_filter_uses_fps_and_duration_without_endpoint_padding(self) -> None:
         clip = {"type": "video", "sceneDuration": 1.75, "speed": 1}
         settings = {"width": 1920, "height": 1080, "fps": 48}
@@ -100,7 +110,7 @@ class RenderFastSchedulerTests(unittest.TestCase):
         job = {"jobId": "test-job"}
         clip = {"type": "video", "url": "https://example.invalid/source.mp4", "sceneDuration": 1, "speed": 1}
         settings = {"width": 2, "height": 2, "fps": 1, "_ffmpegThreads": 1}
-        with mock.patch.object(SERVER.subprocess, "Popen", side_effect=FileNotFoundError("ffmpeg unavailable")):
+        with mock.patch.object(SERVER, "probe_visual_clip", return_value={"sourceAvailable": True}), mock.patch.object(SERVER.subprocess, "Popen", side_effect=FileNotFoundError("ffmpeg unavailable")):
             SERVER.prepare_visual_unit(job, 0, clip, settings, 6, 1, buffer, threading.Event(), 0)
         self.assertIsNone(buffer.take(0, lambda: None))
         self.assertIn("ffmpeg unavailable", buffer.error(0) or "")
@@ -115,7 +125,7 @@ class RenderFastSchedulerTests(unittest.TestCase):
         process.stderr.read.return_value = b""
         process.wait.return_value = 0
         process.poll.return_value = 0
-        with mock.patch.object(SERVER.subprocess, "Popen", return_value=process) as popen:
+        with mock.patch.object(SERVER, "probe_visual_clip", return_value={"sourceAvailable": True}), mock.patch.object(SERVER.subprocess, "Popen", return_value=process) as popen:
             SERVER.prepare_visual_unit(job, 0, clip, settings, 6, 1, buffer, threading.Event(), 0)
         command = popen.call_args.args[0]
         self.assertNotIn("-fps_mode", command)

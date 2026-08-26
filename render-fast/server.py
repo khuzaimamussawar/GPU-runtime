@@ -185,6 +185,68 @@ def command_output(command: list[str]) -> str:
         return f"{type(exc).__name__}: {exc}"
 
 
+def parse_rational_fps(value: Any) -> float | None:
+    text = str(value or "").strip()
+    if not text or text == "0/0":
+        return None
+    try:
+        if "/" in text:
+            numerator_text, denominator_text = text.split("/", 1)
+            numerator, denominator = float(numerator_text), float(denominator_text)
+            result = numerator / denominator
+        else:
+            result = float(text)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    return round(result, 6) if result > 0 else None
+
+
+def probe_visual_clip(clip: dict[str, Any]) -> dict[str, Any]:
+    """Probe every timeline clip independently; never share URL metadata."""
+    source = str(clip.get("url") or "").strip()
+    media_type = str(clip.get("type") or "video")
+    if media_type == "placeholder" or not source:
+        return {"sourceAvailable": False, "mediaType": media_type}
+    raw = command_output([
+        "ffprobe", "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "stream=codec_name,width,height,avg_frame_rate,r_frame_rate,duration,nb_frames",
+        "-of", "json", source,
+    ])
+    try:
+        payload = json.loads(raw)
+        streams = payload.get("streams") if isinstance(payload, dict) else []
+        stream = streams[0] if isinstance(streams, list) and streams else None
+    except (TypeError, ValueError, json.JSONDecodeError):
+        stream = None
+    if not isinstance(stream, dict):
+        clip_id = str(clip.get("id") or "unknown")
+        raise RenderError(f"visual source probe failed for clip {clip_id}: {raw[-MAX_ERROR_DETAIL_CHARS:]}")
+
+    def whole_number(value: Any) -> int | None:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def decimal_number(value: Any) -> float | None:
+        try:
+            return round(float(value), 6)
+        except (TypeError, ValueError):
+            return None
+
+    return {
+        "sourceAvailable": True,
+        "mediaType": media_type,
+        "codec": str(stream.get("codec_name") or "") or None,
+        "width": whole_number(stream.get("width")),
+        "height": whole_number(stream.get("height")),
+        "averageFps": parse_rational_fps(stream.get("avg_frame_rate")),
+        "realFps": parse_rational_fps(stream.get("r_frame_rate")),
+        "durationSeconds": decimal_number(stream.get("duration")),
+        "frameCount": whole_number(stream.get("nb_frames")),
+    }
+
+
 def gpu_stats() -> dict[str, Any]:
     output = command_output([
         "nvidia-smi",
@@ -563,6 +625,14 @@ def prepare_visual_unit(
 
     decoder: subprocess.Popen[bytes] | None = None
     try:
+        source_probe = probe_visual_clip(clip)
+        source_probe["targetFps"] = int(settings["fps"])
+        emit("job_metric", jobId=job_id, metric={
+            "phase": "video_source_probe", "clipIndex": index,
+            "workerIndex": worker_number, "route": "cpu_filter_lanczos_nvenc",
+            "details": source_probe,
+            "resource": {"cpuPercent": host_cpu_percent(), **disk_stats()},
+        })
         # Match the proven serial Fast path: FFmpeg owns duration-to-frame
         # quantization for each clip and the ordered buffer forwards every
         # naturally produced frame to the persistent NVENC encoder.
