@@ -21,6 +21,12 @@ class RenderFastSchedulerTests(unittest.TestCase):
         self.assertEqual(SERVER.timeline_frame_counts(clips, 48), [83, 15])
         self.assertEqual(sum(SERVER.timeline_frame_counts(clips, 48)), round(2.033 * 48))
 
+    def test_endpoint_padding_allows_only_one_missing_frame(self) -> None:
+        self.assertEqual(SERVER.endpoint_frame_padding(82, 83, b"last"), b"last")
+        self.assertIsNone(SERVER.endpoint_frame_padding(83, 83, b"last"))
+        with self.assertRaisesRegex(SERVER.RenderError, "produced 81 frames; expected 83"):
+            SERVER.endpoint_frame_padding(81, 83, b"last")
+
     def test_parallel_worker_profile_table(self) -> None:
         expected = {
             6: {(3840, 2160, 30): 3, (3840, 2160, 48): 2, (3840, 2160, 60): 1, (2560, 1440, 48): 4, (2560, 1440, 60): 3, (1920, 1080, 48): 6},
@@ -113,7 +119,7 @@ class RenderFastSchedulerTests(unittest.TestCase):
         self.assertEqual(command[command.index("-fps_mode") + 1], "cfr")
         self.assertEqual(command[command.index("-r") + 1], "48")
         self.assertEqual(command[command.index("-frames:v") + 1], "72")
-        self.assertIn("tpad=stop_mode=clone:stop=1", command[command.index("-vf") + 1])
+        self.assertNotIn("tpad=", command[command.index("-vf") + 1])
 
 
 if __name__ == "__main__":

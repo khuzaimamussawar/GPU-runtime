@@ -126,6 +126,15 @@ def timeline_frame_counts(clips: list[dict[str, Any]], fps: int) -> list[int]:
     return counts
 
 
+def endpoint_frame_padding(output_frames: int, expected_frames: int, last_frame: bytes | None) -> bytes | None:
+    """Resolve one fractional endpoint tick without hiding a broken source."""
+    if output_frames == expected_frames:
+        return None
+    if output_frames == expected_frames - 1 and last_frame:
+        return last_frame
+    raise RenderError(f"produced {output_frames} frames; expected {expected_frames}")
+
+
 class State:
     def __init__(self) -> None:
         self.lock = threading.RLock()
@@ -554,6 +563,7 @@ def prepare_visual_unit(
     decoder_threads = str(max(1, int(settings.get("_ffmpegThreads") or 1)))
     started = time.monotonic()
     output_frames = 0
+    last_frame: bytes | None = None
 
     def should_stop() -> None:
         if abort_event.is_set():
@@ -564,11 +574,10 @@ def prepare_visual_unit(
     try:
         # The rawvideo muxer otherwise preserves a source's native cadence on
         # some builds. Make the unit output contract explicit: one CFR frame
-        # for every frame reserved by this timeline clip. The single-frame
-        # clone pad covers clips whose requested end lands between source PTS
-        # values. Use tpad's frame-count form: a fractional stop_duration can
-        # itself round to zero. -frames:v remains the exact duration limit.
-        unit_filter = f"{video_filter(clip, settings, False)},tpad=stop_mode=clone:stop=1"
+        # for every frame reserved by this timeline clip. If a source ends on
+        # a fractional output-frame boundary, the worker copies its last raw
+        # frame once after FFmpeg finishes; -frames:v remains the hard cap.
+        unit_filter = video_filter(clip, settings, False)
         decoder = subprocess.Popen([
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
             "-filter_threads", decoder_threads,
@@ -596,11 +605,15 @@ def prepare_visual_unit(
                 raise RenderError(f"visual unit {index} emitted an incomplete raw frame block")
             frame_buffer.put(index, block, should_stop)
             output_frames += len(block) // frame_bytes
+            last_frame = block[-frame_bytes:]
         stderr = decoder.stderr.read().decode("utf-8", errors="replace") if decoder.stderr else ""
         if decoder.wait() != 0:
             raise RenderError(f"visual unit {index} failed: {stderr[-MAX_ERROR_DETAIL_CHARS:]}")
-        if output_frames != expected_frames:
-            raise RenderError(f"visual unit {index} produced {output_frames} frames; expected {expected_frames}")
+        endpoint_frame = endpoint_frame_padding(output_frames, expected_frames, last_frame)
+        if endpoint_frame is not None:
+            frame_buffer.put(index, endpoint_frame, should_stop)
+            output_frames += 1
+            print(f"[GPU Render] {job_id} endpoint-padded clip={index} to {output_frames} frames", flush=True)
         frame_buffer.close(index)
         elapsed = max(0.001, time.monotonic() - started)
         print(
