@@ -22,6 +22,7 @@ POD_TOKEN = os.environ.get("SCENEBUILDER_POD_TOKEN", "").strip()
 WORKER_ID = os.environ.get("SCENEBUILDER_WORKER_ID", "").strip()
 CONTROL_URL = os.environ.get("SCENEBUILDER_CONTROL_URL", "").strip()
 DEFAULT_IDLE_TIMEOUT = max(0, int(os.environ.get("SCENEBUILDER_IDLE_TIMEOUT_SECONDS", "60")))
+REQUIRED_CODEC = os.environ.get("SCENEBUILDER_REQUIRED_CODEC", "").strip().lower()
 MAX_ERROR_DETAIL_CHARS = 16000
 
 
@@ -140,14 +141,14 @@ def probe() -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="sb-render-probe-") as work:
         h264_path = str(Path(work) / "h264.mp4")
         h265_path = str(Path(work) / "h265.mp4")
-        if h264_listed:
+        if REQUIRED_CODEC in ("", "h264") and h264_listed:
             try:
                 run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=black:s=256x256:r=1", "-frames:v", "1", "-c:v", "h264_nvenc", "-preset", "p4", h264_path], "H.264 NVENC smoke")
                 capabilities["encoders"]["h264Nvenc"] = True
             except Exception as exc:
                 print(f"[GPU Render] H.264 NVENC smoke: failed: {exc}", flush=True)
                 capabilities["error"] = str(exc)
-        if hevc_listed:
+        if REQUIRED_CODEC in ("", "h265") and hevc_listed:
             try:
                 run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=black:s=256x256:r=1", "-frames:v", "1", "-c:v", "hevc_nvenc", "-profile:v", "main10", "-pix_fmt", "p010le", "-preset", "p4", h265_path], "HEVC NVENC smoke")
                 capabilities["encoders"]["hevcNvencMain10"] = True
@@ -358,6 +359,7 @@ def worker_loop() -> None:
         STATE.status = "idle"
         STATE.idle_since = time.time()
     capabilities = probe()
+    print(f"[GPU Render] required codec: {REQUIRED_CODEC or 'both'}", flush=True)
     emit("worker_ready")
     emit("probe_complete", capabilities=capabilities)
     while True:
