@@ -47,6 +47,10 @@ NVIDIA_VISIBLE_DEVICES=all
 NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
 ```
 
+SceneBuilder resolves the full callback URL from `RENDER_GPU_POD_CONTROL_URL`
+when configured; otherwise it uses the render callback URL above. It is an
+address, not a credential: the per-worker bearer token remains mandatory.
+
 The Worker stores only a hash of `SCENEBUILDER_POD_TOKEN`. The pod authenticates
 every event with `Authorization: Bearer <token>`. Provider API keys, permanent
 R2 credentials, Hetzner credentials, and user credentials never enter the
