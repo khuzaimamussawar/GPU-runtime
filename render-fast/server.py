@@ -46,7 +46,7 @@ class State:
 STATE = State()
 
 
-def _callback(event: str, **fields: Any) -> None:
+def _callback(event: str, *, attempts: int = 1, log_delivery: bool = False, **fields: Any) -> None:
     if not CONTROL_URL:
         return
     payload = {"event": event, "workerId": WORKER_ID, "timestamp": int(time.time() * 1000), **fields}
@@ -55,15 +55,32 @@ def _callback(event: str, **fields: Any) -> None:
     if POD_TOKEN:
         headers["Authorization"] = f"Bearer {POD_TOKEN}"
     request = urllib.request.Request(CONTROL_URL, data=body, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(request, timeout=12) as response:
-            response.read(1024)
-    except Exception as exc:
-        print(f"[GPU Render] callback {event} failed: {type(exc).__name__}: {exc}", flush=True)
+    last_error: Exception | None = None
+    for attempt in range(max(1, attempts)):
+        try:
+            with urllib.request.urlopen(request, timeout=12) as response:
+                response.read(1024)
+            if log_delivery:
+                print(f"[GPU Render] callback {event}: delivered on attempt {attempt + 1}", flush=True)
+            return
+        except Exception as exc:
+            last_error = exc
+            if attempt + 1 < max(1, attempts):
+                print(f"[GPU Render] callback {event}: retrying after {type(exc).__name__}: {exc}", flush=True)
+                time.sleep(min(8, 2 ** attempt))
+    print(f"[GPU Render] callback {event} failed: {type(last_error).__name__}: {last_error}", flush=True)
 
 
 def emit(event: str, **fields: Any) -> None:
     threading.Thread(target=_callback, args=(event,), kwargs=fields, daemon=True).start()
+
+
+def emit_startup_events(capabilities: dict[str, Any]) -> None:
+    def announce() -> None:
+        # These events are idempotent. Retry only during boot, when provider networking can lag the process.
+        _callback("worker_ready", attempts=5, log_delivery=True)
+        _callback("probe_complete", attempts=5, log_delivery=True, capabilities=capabilities)
+    threading.Thread(target=announce, name="gpu-render-startup-callback", daemon=True).start()
 
 
 def run(command: list[str], label: str, stdout: Any = None) -> subprocess.CompletedProcess[bytes]:
@@ -360,8 +377,7 @@ def worker_loop() -> None:
         STATE.idle_since = time.time()
     capabilities = probe()
     print(f"[GPU Render] required codec: {REQUIRED_CODEC or 'both'}", flush=True)
-    emit("worker_ready")
-    emit("probe_complete", capabilities=capabilities)
+    emit_startup_events(capabilities)
     while True:
         job = STATE.work_queue.get()
         try:
