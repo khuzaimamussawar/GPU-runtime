@@ -24,6 +24,7 @@ CONTROL_URL = os.environ.get("SCENEBUILDER_CONTROL_URL", "").strip()
 DEFAULT_IDLE_TIMEOUT = max(0, int(os.environ.get("SCENEBUILDER_IDLE_TIMEOUT_SECONDS", "60")))
 REQUIRED_CODEC = os.environ.get("SCENEBUILDER_REQUIRED_CODEC", "").strip().lower()
 MAX_ERROR_DETAIL_CHARS = 16000
+MAX_CONCURRENT_JOBS = max(1, min(4, int(os.environ.get("RENDER_GPU_MAX_CONCURRENT_JOBS", "4"))))
 
 
 class RenderError(RuntimeError):
@@ -34,9 +35,10 @@ class State:
     def __init__(self) -> None:
         self.lock = threading.RLock()
         self.jobs: dict[str, dict[str, Any]] = {}
-        self.work_queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=1)
-        self.active_job_id: str | None = None
-        self.active_processes: list[subprocess.Popen[bytes]] = []
+        self.work_queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=MAX_CONCURRENT_JOBS)
+        self.active_job_ids: set[str] = set()
+        self.active_processes: dict[str, list[subprocess.Popen[bytes]]] = {}
+        self.max_concurrent_jobs = 1
         self.status = "starting"
         self.idle_since: float | None = None
         self.terminate_after: float | None = None
@@ -130,9 +132,29 @@ def gpu_stats() -> dict[str, Any]:
     }
 
 
+def merge_gpu_peak(peak: dict[str, Any], sample: dict[str, Any]) -> dict[str, Any]:
+    """Keep the per-render high-water marks used by the central scheduler."""
+    if not sample.get("available"):
+        return peak
+    peak["vramMb"] = max(int(peak.get("vramMb") or 0), int(sample.get("vramMb") or 0))
+    peak["vramUsedMb"] = max(int(peak.get("vramUsedMb") or 0), int(sample.get("vramUsedMb") or 0))
+    peak["gpuUtilPercent"] = max(float(peak.get("gpuUtilPercent") or 0), float(sample.get("gpuUtilPercent") or 0))
+    peak["encoderUtilPercent"] = max(float(peak.get("encoderUtilPercent") or 0), float(sample.get("encoderUtilPercent") or 0))
+    peak["decoderUtilPercent"] = max(float(peak.get("decoderUtilPercent") or 0), float(sample.get("decoderUtilPercent") or 0))
+    return peak
+
+
 def disk_stats() -> dict[str, float]:
     usage = shutil.disk_usage("/")
     return {"diskUsedMb": round((usage.total - usage.free) / 1048576, 2), "diskFreeMb": round(usage.free / 1048576, 2)}
+
+
+def host_cpu_percent() -> float:
+    cores = max(1, os.cpu_count() or 1)
+    try:
+        return round(min(100.0, max(0.0, os.getloadavg()[0] * 100 / cores)), 2)
+    except (AttributeError, OSError):
+        return 0.0
 
 
 def ffmpeg_encoders() -> str:
@@ -183,14 +205,15 @@ def ffmpeg_video_decoder_args(clip: dict[str, Any], settings: dict[str, Any]) ->
     duration = max(0.001, float(clip.get("sceneDuration") or 0.001))
     media_type = str(clip.get("type") or "placeholder")
     source = str(clip.get("url") or "")
+    threads = str(max(1, int(settings.get("_ffmpegThreads") or 1)))
     if media_type == "placeholder" or not source:
-        return ["-f", "lavfi", "-i", f"color=c=black:s={settings['width']}x{settings['height']}:r={settings['fps']}", "-t", str(duration)]
+        return ["-threads", threads, "-f", "lavfi", "-i", f"color=c=black:s={settings['width']}x{settings['height']}:r={settings['fps']}", "-t", str(duration)]
     if media_type == "image":
-        return ["-loop", "1", "-framerate", str(settings["fps"]), "-i", source, "-t", str(duration)]
+        return ["-threads", threads, "-loop", "1", "-framerate", str(settings["fps"]), "-i", source, "-t", str(duration)]
     speed = max(0.1, float(clip.get("speed") or 1))
     source_duration = duration * speed
     start = max(0, float(clip.get("startTimeOffset") or 0))
-    return ["-accurate_seek", "-ss", str(start), "-t", str(source_duration), "-i", source]
+    return ["-threads", threads, "-accurate_seek", "-ss", str(start), "-t", str(source_duration), "-i", source]
 
 
 def video_filter(clip: dict[str, Any], settings: dict[str, Any]) -> str:
@@ -283,15 +306,16 @@ def materialize_project_audio(job: dict[str, Any], work_dir: Path) -> Path | Non
     return output
 
 
-def register_process(process: subprocess.Popen[bytes]) -> None:
+def register_process(job_id: str, process: subprocess.Popen[bytes]) -> None:
     with STATE.lock:
-        STATE.active_processes.append(process)
+        STATE.active_processes.setdefault(job_id, []).append(process)
 
 
-def unregister_process(process: subprocess.Popen[bytes]) -> None:
+def unregister_process(job_id: str, process: subprocess.Popen[bytes]) -> None:
     with STATE.lock:
-        if process in STATE.active_processes:
-            STATE.active_processes.remove(process)
+        processes = STATE.active_processes.get(job_id, [])
+        if process in processes:
+            processes.remove(process)
 
 
 def raise_if_cancelled(job_id: str) -> None:
@@ -300,43 +324,79 @@ def raise_if_cancelled(job_id: str) -> None:
             raise RenderError("RENDER_CANCELLED")
 
 
-def render_video(job: dict[str, Any], audio: Path | None, work_dir: Path) -> Path:
+def render_video(job: dict[str, Any], audio: Path | None, work_dir: Path) -> tuple[Path, dict[str, Any]]:
     settings = job["settings"]
     clips = job["clips"]
     output = work_dir / "video.mp4"
     codec = str(settings.get("codec") or "h264")
     encoder_args = ["-c:v", "hevc_nvenc", "-profile:v", "main10", "-pix_fmt", "p010le", "-preset", str(settings.get("preset") or "p6"), "-rc", "vbr", "-cq", str(settings.get("cq") or 17), "-tag:v", "hvc1"] if codec == "h265" else ["-c:v", "h264_nvenc", "-preset", str(settings.get("preset") or "p6"), "-rc", "vbr", "-cq", str(settings.get("cq") or 17), "-pix_fmt", "yuv420p"]
-    encoder = subprocess.Popen(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "yuv420p", "-video_size", f"{settings['width']}x{settings['height']}", "-framerate", str(settings["fps"]), "-i", "pipe:0", "-map", "0:v:0", "-an", *encoder_args, "-r", str(settings["fps"]), str(output)], stdin=subprocess.PIPE, stderr=subprocess.PIPE)
-    register_process(encoder)
+    ffmpeg_threads = str(max(1, int(settings.get("_ffmpegThreads") or 1)))
+    encoder = subprocess.Popen(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-threads", ffmpeg_threads, "-f", "rawvideo", "-pix_fmt", "yuv420p", "-video_size", f"{settings['width']}x{settings['height']}", "-framerate", str(settings["fps"]), "-i", "pipe:0", "-map", "0:v:0", "-an", *encoder_args, "-r", str(settings["fps"]), str(output)], stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+    register_process(job["jobId"], encoder)
     total = max(1, len(clips))
+    expected_frames = max(1, sum(max(1, round(max(0.001, float(clip.get("sceneDuration") or 0.001)) * settings["fps"])) for clip in clips))
+    completed_frames = 0
+    peak_gpu: dict[str, Any] = {}
+    video_started = time.monotonic()
     try:
+        merge_gpu_peak(peak_gpu, gpu_stats())
         for index, clip in enumerate(clips):
             raise_if_cancelled(job["jobId"])
+            unit_started = time.monotonic()
+            unit_expected_frames = max(1, round(max(0.001, float(clip.get("sceneDuration") or 0.001)) * settings["fps"]))
+            unit_frames = 0
+            last_progress_emit = 0.0
+            last_gpu_sample = time.monotonic()
             decoder = subprocess.Popen(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *ffmpeg_video_decoder_args(clip, settings), "-map", "0:v:0", "-an", "-vf", video_filter(clip, settings), "-pix_fmt", "yuv420p", "-f", "rawvideo", "pipe:1"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            register_process(decoder)
+            register_process(job["jobId"], decoder)
             assert decoder.stdout is not None and encoder.stdin is not None
             while chunk := decoder.stdout.read(1024 * 1024):
                 raise_if_cancelled(job["jobId"])
                 encoder.stdin.write(chunk)
+                unit_frames += len(chunk) // max(1, settings["width"] * settings["height"] * 3 // 2)
+                elapsed = max(0.001, time.monotonic() - unit_started)
+                if time.monotonic() - last_gpu_sample >= 1:
+                    merge_gpu_peak(peak_gpu, gpu_stats())
+                    last_gpu_sample = time.monotonic()
+                if time.monotonic() - last_progress_emit >= 1:
+                    completed = min(expected_frames, completed_frames + min(unit_expected_frames, unit_frames))
+                    progress = 20 + int((completed / expected_frames) * 70)
+                    emit("job_progress", jobId=job["jobId"], progress=progress, phase="video", clipIndex=index)
+                    emit("job_metric", jobId=job["jobId"], metric={
+                        "phase": "video", "clipIndex": index, "route": "nvenc_final_cpu_decode_filter",
+                        "renderFps": round(unit_frames / elapsed, 2), "outputFrames": completed, "expectedFrames": expected_frames,
+                        "resource": {"cpuPercent": host_cpu_percent(), **gpu_stats(), **disk_stats()},
+                    })
+                    last_progress_emit = time.monotonic()
             stderr = decoder.stderr.read().decode("utf-8", errors="replace") if decoder.stderr else ""
             if decoder.wait() != 0:
                 raise RenderError(f"visual unit {index} failed: {stderr[-MAX_ERROR_DETAIL_CHARS:]}")
-            unregister_process(decoder)
-            progress = 20 + int(((index + 1) / total) * 70)
+            unregister_process(job["jobId"], decoder)
+            sample = gpu_stats()
+            merge_gpu_peak(peak_gpu, sample)
+            completed_frames += unit_expected_frames
+            elapsed = max(0.001, time.monotonic() - unit_started)
+            progress = 20 + int((min(expected_frames, completed_frames) / expected_frames) * 70)
             emit("job_progress", jobId=job["jobId"], progress=progress, phase="video", clipIndex=index)
-            emit("job_metric", jobId=job["jobId"], metric={"phase": "video", "clipIndex": index, "route": "streaming", "renderFps": 0, "resource": {**gpu_stats(), **disk_stats()}})
+            emit("job_metric", jobId=job["jobId"], metric={
+                "phase": "video", "clipIndex": index, "route": "nvenc_final_cpu_decode_filter",
+                "renderFps": round(unit_expected_frames / elapsed, 2), "outputFrames": min(expected_frames, completed_frames), "expectedFrames": expected_frames,
+                "resource": {"cpuPercent": host_cpu_percent(), **sample, **disk_stats()},
+            })
         assert encoder.stdin is not None
         encoder.stdin.close()
         stderr = encoder.stderr.read().decode("utf-8", errors="replace") if encoder.stderr else ""
         if encoder.wait() != 0:
             raise RenderError(f"final NVENC encode failed: {stderr[-MAX_ERROR_DETAIL_CHARS:]}")
+        merge_gpu_peak(peak_gpu, gpu_stats())
     finally:
-        unregister_process(encoder)
+        unregister_process(job["jobId"], encoder)
+    peak_gpu["renderFps"] = round(expected_frames / max(0.001, time.monotonic() - video_started), 2)
     if audio is None:
-        return output
+        return output, peak_gpu
     muxed = work_dir / "output.mp4"
     run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(output), "-i", str(audio), "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", str(settings.get("audioBitrate") or "192k"), "-ar", "48000", "-ac", "1", "-movflags", "+faststart", str(muxed)], "final audio mux")
-    return muxed
+    return muxed, peak_gpu
 
 
 def upload(url: str, path: Path) -> None:
@@ -357,11 +417,27 @@ def process_job(job: dict[str, Any]) -> None:
             work_dir = Path(temporary)
             audio = materialize_project_audio(job, work_dir) or render_canonical_audio(job["audioClips"], work_dir, job["settings"])
             emit("job_progress", jobId=job_id, progress=20, phase="audio_ready")
-            output = render_video(job, audio, work_dir)
+            output, peak_gpu = render_video(job, audio, work_dir)
             raise_if_cancelled(job_id)
             emit("job_progress", jobId=job_id, progress=95, phase="uploading")
             upload(str(job["uploadUrl"]), output)
-            emit("job_done", jobId=job_id, outputUrl=job.get("outputUrl"), elapsedMs=int((time.time() - started) * 1000))
+            settings = job["settings"]
+            emit(
+                "job_done",
+                jobId=job_id,
+                outputUrl=job.get("outputUrl"),
+                elapsedMs=int((time.time() - started) * 1000),
+                calibration={
+                    "outputProfile": f"{settings['width']}x{settings['height']}-{settings['fps']}",
+                    "codec": str(settings.get("codec") or "h264"),
+                    "peakVramMb": int(peak_gpu.get("vramUsedMb") or 0),
+                    "totalVramMb": int(peak_gpu.get("vramMb") or 0),
+                    "peakGpuPercent": float(peak_gpu.get("gpuUtilPercent") or 0),
+                    "peakNvencPercent": float(peak_gpu.get("encoderUtilPercent") or 0),
+                    "peakNvdecPercent": float(peak_gpu.get("decoderUtilPercent") or 0),
+                    "renderFps": float(peak_gpu.get("renderFps") or 0),
+                },
+            )
     except Exception as exc:
         cancelled = str(exc) == "RENDER_CANCELLED"
         event = "job_cancelled" if cancelled else "job_failed"
@@ -378,14 +454,19 @@ def process_job(job: dict[str, Any]) -> None:
             },
         )
     finally:
+        idle_event: tuple[int, int] | None = None
         with STATE.lock:
-            STATE.active_job_id = None
-            STATE.active_processes.clear()
-            STATE.status = "idle"
-            STATE.idle_since = time.time()
-            timeout = int(job.get("idleTimeoutSeconds") or DEFAULT_IDLE_TIMEOUT)
-            STATE.terminate_after = STATE.idle_since + timeout
-        emit("worker_idle", idleSince=int(STATE.idle_since * 1000), terminateAfter=int(STATE.terminate_after * 1000))
+            STATE.active_job_ids.discard(job_id)
+            STATE.active_processes.pop(job_id, None)
+            STATE.jobs.pop(job_id, None)
+            if not STATE.active_job_ids:
+                STATE.status = "idle"
+                STATE.idle_since = time.time()
+                timeout = int(job.get("idleTimeoutSeconds") or DEFAULT_IDLE_TIMEOUT)
+                STATE.terminate_after = STATE.idle_since + timeout
+                idle_event = (int(STATE.idle_since * 1000), int(STATE.terminate_after * 1000))
+        if idle_event:
+            emit("worker_idle", idleSince=idle_event[0], terminateAfter=idle_event[1])
 
 
 def worker_loop() -> None:
@@ -397,10 +478,12 @@ def worker_loop() -> None:
     emit_startup_events(capabilities)
     while True:
         job = STATE.work_queue.get()
-        try:
-            process_job(job)
-        finally:
-            STATE.work_queue.task_done()
+        def run_job(next_job: dict[str, Any] = job) -> None:
+            try:
+                process_job(next_job)
+            finally:
+                STATE.work_queue.task_done()
+        threading.Thread(target=run_job, name=f"gpu-render-{job['jobId'][:8]}", daemon=True).start()
 
 
 def idle_watchdog() -> None:
@@ -445,7 +528,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path.split("?", 1)[0] in ("/", "/health"):
             with STATE.lock:
-                self.send_json(HTTPStatus.OK, {"ok": True, "runtime": "scenebuilder-gpu-fast-render", "status": STATE.status, "activeJobId": STATE.active_job_id, "idle": STATE.status == "idle"})
+                self.send_json(HTTPStatus.OK, {"ok": True, "runtime": "scenebuilder-gpu-fast-render", "status": STATE.status, "activeJobIds": sorted(STATE.active_job_ids), "activeSlots": len(STATE.active_job_ids), "maxSlots": STATE.max_concurrent_jobs, "idle": STATE.status == "idle"})
             return
         self.send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "Not found"})
 
@@ -471,22 +554,47 @@ class Handler(BaseHTTPRequestHandler):
                 if job_id in STATE.jobs:
                     self.send_json(HTTPStatus.OK, {"ok": True, "duplicate": True, "jobId": job_id})
                     return
-                if STATE.active_job_id is not None or not STATE.work_queue.empty():
-                    self.send_json(HTTPStatus.CONFLICT, {"ok": False, "error": f"Worker busy with {STATE.active_job_id}"})
+                requested_slots = max(1, min(MAX_CONCURRENT_JOBS, int(payload.get("maxConcurrentJobs") or 1)))
+                STATE.max_concurrent_jobs = requested_slots
+                if len(STATE.active_job_ids) >= STATE.max_concurrent_jobs:
+                    self.send_json(HTTPStatus.CONFLICT, {"ok": False, "error": f"Worker busy with {sorted(STATE.active_job_ids)}"})
                     return
+                expected_vram_mb = max(0, int(payload.get("expectedPeakVramMb") or 0))
+                if expected_vram_mb:
+                    stats = gpu_stats()
+                    total_vram_mb = int(stats.get("vramMb") or 0)
+                    used_vram_mb = int(stats.get("vramUsedMb") or 0)
+                    vram_budget_mb = int(total_vram_mb * 0.90)
+                    if total_vram_mb and used_vram_mb + expected_vram_mb > vram_budget_mb:
+                        self.send_json(HTTPStatus.CONFLICT, {
+                            "ok": False,
+                            "error": "VRAM_HEADROOM_EXHAUSTED",
+                            "vramUsedMb": used_vram_mb,
+                            "expectedPeakVramMb": expected_vram_mb,
+                            "vramBudgetMb": vram_budget_mb,
+                        })
+                        return
                 settings = dict(payload.get("settings") or {})
                 settings["width"] = int(settings.get("width") or 1920)
                 settings["height"] = int(settings.get("height") or 1080)
                 settings["fps"] = int(settings.get("fps") or 30)
+                cpu_budget = max(1, int((max(1, os.cpu_count() or 1) * 0.90) // requested_slots))
+                settings["_ffmpegThreads"] = cpu_budget
                 payload["settings"] = settings
                 payload["audioClips"] = list(payload.get("audioClips") or [])
                 payload["jobId"] = job_id
                 STATE.jobs[job_id] = {"cancelRequested": False}
-                STATE.active_job_id = job_id
+                STATE.active_job_ids.add(job_id)
                 STATE.status = "busy"
                 STATE.idle_since = None
                 STATE.terminate_after = None
-                STATE.work_queue.put_nowait(payload)
+                try:
+                    STATE.work_queue.put_nowait(payload)
+                except queue.Full:
+                    STATE.active_job_ids.discard(job_id)
+                    STATE.jobs.pop(job_id, None)
+                    self.send_json(HTTPStatus.CONFLICT, {"ok": False, "error": "Worker queue is full"})
+                    return
             self.send_json(HTTPStatus.ACCEPTED, {"ok": True, "accepted": True, "jobId": job_id})
             return
         if path.startswith("/jobs/") and path.endswith("/cancel"):
@@ -497,7 +605,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "Unknown job"})
                     return
                 record["cancelRequested"] = True
-                processes = list(STATE.active_processes)
+                processes = list(STATE.active_processes.get(job_id, []))
             for process in processes:
                 if process.poll() is None:
                     process.terminate()
