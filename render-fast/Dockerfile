@@ -29,11 +29,13 @@ RUN curl -fsSL "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" -o 
         --disable-shared \
         --enable-static \
         --enable-nonfree \
+        --enable-gnutls \
         --enable-ffnvcodec \
         --enable-nvenc \
         --extra-cflags=-I/opt/ffmpeg/include \
     && make -j"$(nproc)" \
     && make install \
+    && /opt/ffmpeg/bin/ffmpeg -hide_banner -protocols | grep -qE '(^|[[:space:]])https([[:space:]]|$)' \
     && /opt/ffmpeg/bin/ffmpeg -hide_banner -encoders | grep -q h264_nvenc \
     && /opt/ffmpeg/bin/ffmpeg -hide_banner -encoders | grep -q hevc_nvenc \
     && rm -rf "/tmp/ffmpeg-${FFMPEG_VERSION}" /tmp/ffmpeg.tar.xz
