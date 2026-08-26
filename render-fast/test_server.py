@@ -16,20 +16,13 @@ class RenderFastSchedulerTests(unittest.TestCase):
     def test_cpu_set_count_handles_ranges_and_individual_cores(self) -> None:
         self.assertEqual(SERVER.cpu_set_count("0-3,8,10-11"), 7)
 
-    def test_timeline_frame_counts_use_cumulative_boundaries(self) -> None:
-        clips = [{"sceneDuration": 1.733}, {"sceneDuration": 0.3}]
-        self.assertEqual(SERVER.timeline_frame_counts(clips, 48), [83, 15])
-        self.assertEqual(sum(SERVER.timeline_frame_counts(clips, 48)), round(2.033 * 48))
-
-    def test_video_filter_extends_source_before_exact_director_trim(self) -> None:
+    def test_video_filter_uses_fps_and_duration_without_endpoint_padding(self) -> None:
         clip = {"type": "video", "sceneDuration": 1.75, "speed": 1}
         settings = {"width": 1920, "height": 1080, "fps": 48}
         filters = SERVER.video_filter(clip, settings).split(",")
-        fps_index = filters.index("fps=48")
-        pad_index = filters.index("tpad=stop_mode=clone:stop=-1")
-        trim_index = filters.index("trim=duration=1.75")
-        self.assertLess(fps_index, pad_index)
-        self.assertLess(pad_index, trim_index)
+        self.assertIn("fps=48", filters)
+        self.assertIn("trim=duration=1.75", filters)
+        self.assertFalse(any(item.startswith("tpad=") for item in filters))
 
     def test_parallel_worker_profile_table(self) -> None:
         expected = {
@@ -103,29 +96,32 @@ class RenderFastSchedulerTests(unittest.TestCase):
         clip = {"type": "video", "url": "https://example.invalid/source.mp4", "sceneDuration": 1, "speed": 1}
         settings = {"width": 2, "height": 2, "fps": 1, "_ffmpegThreads": 1}
         with mock.patch.object(SERVER.subprocess, "Popen", side_effect=FileNotFoundError("ffmpeg unavailable")):
-            SERVER.prepare_visual_unit(job, 0, clip, settings, 72, 6, 1, buffer, threading.Event(), 0)
+            SERVER.prepare_visual_unit(job, 0, clip, settings, 6, 1, buffer, threading.Event(), 0)
         self.assertIsNone(buffer.take(0, lambda: None))
         self.assertIn("ffmpeg unavailable", buffer.error(0) or "")
 
-    def test_visual_unit_requests_exact_cfr_frame_budget(self) -> None:
+    def test_visual_unit_accepts_natural_ffmpeg_frame_count(self) -> None:
         buffer = SERVER.OrderedFrameBuffer(1, 1024)
         job = {"jobId": "test-job"}
         clip = {"type": "video", "url": "https://example.invalid/source.mp4", "sceneDuration": 1.5, "speed": 1}
         settings = {"width": 2, "height": 2, "fps": 48, "_ffmpegThreads": 1}
         process = mock.Mock()
-        process.stdout.read.side_effect = [b"",]
+        process.stdout.read.side_effect = [b"frame!", b""]
         process.stderr.read.return_value = b""
         process.wait.return_value = 0
         process.poll.return_value = 0
         with mock.patch.object(SERVER.subprocess, "Popen", return_value=process) as popen:
-            SERVER.prepare_visual_unit(job, 0, clip, settings, 72, 6, 1, buffer, threading.Event(), 0)
+            SERVER.prepare_visual_unit(job, 0, clip, settings, 6, 1, buffer, threading.Event(), 0)
         command = popen.call_args.args[0]
-        self.assertEqual(command[command.index("-fps_mode") + 1], "cfr")
-        self.assertEqual(command[command.index("-r") + 1], "48")
-        self.assertEqual(command[command.index("-frames:v") + 1], "72")
+        self.assertNotIn("-fps_mode", command)
+        self.assertNotIn("-r", command)
+        self.assertNotIn("-frames:v", command)
         unit_filter = command[command.index("-vf") + 1]
-        self.assertIn("tpad=stop_mode=clone:stop=-1", unit_filter)
-        self.assertLess(unit_filter.index("tpad="), unit_filter.index("trim=duration="))
+        self.assertIn("fps=48", unit_filter)
+        self.assertIn("trim=duration=1.5", unit_filter)
+        self.assertNotIn("tpad=", unit_filter)
+        self.assertEqual(buffer.take(0, lambda: None), b"frame!")
+        self.assertIsNone(buffer.error(0))
 
 
 if __name__ == "__main__":
