@@ -131,8 +131,11 @@ provider policy has exhausted its viable candidates.
 
 ### Default Visual Route
 
-The Fast image is pinned to CUDA 13.0 and builds FFmpeg with NVENC, NVDEC,
-`scale_cuda`, and NPP support rather than relying on Ubuntu's packaged FFmpeg.
+The Fast image is pinned to CUDA 13.0 and builds FFmpeg with the NVIDIA codec
+headers and both NVENC encoders rather than relying on Ubuntu's packaged
+FFmpeg. It deliberately does not compile CUDA filter support: FFmpeg 7.1.1's
+CUDA 13 `nvcc` probe fails in the image builder, and the current renderer does
+not select GPU filters.
 The normal Fast route deliberately uses the established CPU filter chain:
 
 ```text
@@ -145,10 +148,9 @@ by FFmpeg's CPU `scale` filter using `flags=lanczos`, followed by the exact
 16:9/9:16 project-frame crop. It is therefore the same deterministic visual
 normalization as Quality, but the final codec is NVENC.
 
-CUDA/NVDEC/`scale_cuda` remain built into the image for a later fully
-GPU-resident implementation, but they are neither smoke-tested nor selected by
-the current renderer. Pod readiness and dispatch depend only on the selected
-H.264 or HEVC NVENC smoke test.
+The CUDA 13 runtime remains in the image for the host-mounted NVIDIA driver and
+NVENC runtime. Pod readiness and dispatch depend only on the selected H.264 or
+HEVC NVENC smoke test.
 
 ## Streaming Execution
 

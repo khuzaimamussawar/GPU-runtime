@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
-# Build FFmpeg ourselves: Ubuntu's packaged binary does not promise CUDA filters.
-# CUDA 13 is baked into the image so Blackwell is a native build target. The pod
-# provider still supplies the matching host kernel driver and NVENC/NVDEC device.
+# Build FFmpeg ourselves so the selected NVENC encoders are always present.
+# CUDA 13 is the runtime base for Blackwell. The pod provider still supplies
+# the matching host kernel driver and NVENC device library.
 FROM nvidia/cuda:13.0.0-devel-ubuntu22.04 AS ffmpeg-build
 
 ARG FFMPEG_VERSION=7.1.1
@@ -29,18 +29,12 @@ RUN curl -fsSL "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" -o 
         --disable-shared \
         --enable-static \
         --enable-nonfree \
-        --enable-cuda-nvcc \
         --enable-ffnvcodec \
         --enable-nvenc \
-        --enable-nvdec \
-        --enable-cuvid \
-        --enable-libnpp \
         --extra-cflags=-I/opt/ffmpeg/include \
-        --extra-cflags=-I/usr/local/cuda/include \
-        --extra-ldflags=-L/usr/local/cuda/lib64 \
     && make -j"$(nproc)" \
     && make install \
-    && /opt/ffmpeg/bin/ffmpeg -hide_banner -filters | grep -q scale_cuda \
+    && /opt/ffmpeg/bin/ffmpeg -hide_banner -encoders | grep -q h264_nvenc \
     && /opt/ffmpeg/bin/ffmpeg -hide_banner -encoders | grep -q hevc_nvenc \
     && rm -rf "/tmp/ffmpeg-${FFMPEG_VERSION}" /tmp/ffmpeg.tar.xz
 
