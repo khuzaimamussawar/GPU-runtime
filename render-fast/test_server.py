@@ -13,6 +13,9 @@ SPEC.loader.exec_module(SERVER)
 
 
 class RenderFastSchedulerTests(unittest.TestCase):
+    def test_cpu_set_count_handles_ranges_and_individual_cores(self) -> None:
+        self.assertEqual(SERVER.cpu_set_count("0-3,8,10-11"), 7)
+
     def test_parallel_worker_profile_table(self) -> None:
         expected = {
             6: {(3840, 2160, 30): 3, (3840, 2160, 48): 2, (3840, 2160, 60): 1, (2560, 1440, 48): 4, (2560, 1440, 60): 3, (1920, 1080, 48): 6},

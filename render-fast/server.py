@@ -92,7 +92,7 @@ class OrderedFrameBuffer:
 
 def parallel_clip_worker_count(settings: dict[str, Any]) -> int:
     """Scale the approved profile table to any provider vCPU allocation."""
-    vcpus = max(1, int(settings.get("_physicalVcpus") or os.cpu_count() or 1))
+    vcpus = max(1, int(settings.get("_physicalVcpus") or available_vcpus()))
     cpu_budget = max(1, int(settings.get("_cpuBudget") or vcpus))
     # Each 4K/48 preparation worker receives roughly three vCPUs. This makes
     # the 6/9/12/16 reference rows exact while accommodating 8, 10, 14, 20,
@@ -233,11 +233,47 @@ def disk_stats() -> dict[str, float]:
 
 
 def host_cpu_percent() -> float:
-    cores = max(1, os.cpu_count() or 1)
+    cores = available_vcpus()
     try:
         return round(min(100.0, max(0.0, os.getloadavg()[0] * 100 / cores)), 2)
     except (AttributeError, OSError):
         return 0.0
+
+
+def cpu_set_count(value: str) -> int:
+    total = 0
+    for item in value.strip().split(","):
+        if not item:
+            continue
+        try:
+            start_text, end_text = item.split("-", 1) if "-" in item else (item, item)
+            start, end = int(start_text), int(end_text)
+            total += max(0, end - start + 1)
+        except ValueError:
+            continue
+    return total
+
+
+def available_vcpus() -> int:
+    """Use the container quota, never the provider host CPU count when limited."""
+    limits: list[int] = []
+    try:
+        quota_text, period_text = Path("/sys/fs/cgroup/cpu.max").read_text(encoding="utf-8").split()
+        if quota_text != "max":
+            quota, period = int(quota_text), int(period_text)
+            if quota > 0 and period > 0:
+                limits.append(max(1, quota // period))
+    except (OSError, ValueError):
+        pass
+    for path in ("/sys/fs/cgroup/cpuset.cpus.effective", "/sys/fs/cgroup/cpuset.cpus"):
+        try:
+            count = cpu_set_count(Path(path).read_text(encoding="utf-8"))
+            if count:
+                limits.append(count)
+                break
+        except OSError:
+            continue
+    return max(1, min(limits)) if limits else max(1, os.cpu_count() or 1)
 
 
 def system_memory_stats() -> dict[str, float | bool]:
@@ -926,7 +962,7 @@ class Handler(BaseHTTPRequestHandler):
                 settings["width"] = int(settings.get("width") or 1920)
                 settings["height"] = int(settings.get("height") or 1080)
                 settings["fps"] = int(settings.get("fps") or 30)
-                physical_vcpus = max(1, os.cpu_count() or 1)
+                physical_vcpus = available_vcpus()
                 cpu_budget = max(1, int((physical_vcpus * 0.90) // requested_slots))
                 settings["_physicalVcpus"] = physical_vcpus
                 settings["_cpuBudget"] = cpu_budget
