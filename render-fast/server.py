@@ -30,6 +30,7 @@ MAX_ERROR_DETAIL_CHARS = 16000
 MAX_CONCURRENT_JOBS = max(1, min(4, int(os.environ.get("RENDER_GPU_MAX_CONCURRENT_JOBS", "4"))))
 FRAME_BLOCK_FRAMES = max(1, min(16, int(os.environ.get("RENDER_GPU_FRAME_BLOCK_FRAMES", "8"))))
 LOOKAHEAD_BUFFER_SECONDS = max(1, min(4, int(os.environ.get("RENDER_GPU_LOOKAHEAD_BUFFER_SECONDS", "2"))))
+SYSTEM_MEMORY_CEILING_PERCENT = max(80.0, min(95.0, float(os.environ.get("RENDER_GPU_SYSTEM_MEMORY_CEILING_PERCENT", "90"))))
 
 
 class RenderError(RuntimeError):
@@ -52,14 +53,17 @@ class OrderedFrameBuffer:
         self._max_bytes_per_clip = max(1, max_bytes_per_clip)
 
     def put(self, index: int, block: bytes, should_stop: Callable[[], None]) -> None:
-        with self._condition:
-            while self._queued_bytes[index] + len(block) > self._max_bytes_per_clip:
+        while True:
+            wait_for_system_memory_headroom(should_stop)
+            with self._condition:
+                if self._queued_bytes[index] + len(block) <= self._max_bytes_per_clip:
+                    should_stop()
+                    self._queues[index].append(block)
+                    self._queued_bytes[index] += len(block)
+                    self._condition.notify_all()
+                    return
                 should_stop()
                 self._condition.wait(timeout=0.2)
-            should_stop()
-            self._queues[index].append(block)
-            self._queued_bytes[index] += len(block)
-            self._condition.notify_all()
 
     def close(self, index: int, error: Exception | str | None = None) -> None:
         with self._condition:
@@ -234,6 +238,49 @@ def host_cpu_percent() -> float:
         return round(min(100.0, max(0.0, os.getloadavg()[0] * 100 / cores)), 2)
     except (AttributeError, OSError):
         return 0.0
+
+
+def system_memory_stats() -> dict[str, float | bool]:
+    """Read the pod's cgroup budget first, then use host memory as a fallback."""
+    try:
+        limit_text = Path("/sys/fs/cgroup/memory.max").read_text(encoding="utf-8").strip()
+        current_text = Path("/sys/fs/cgroup/memory.current").read_text(encoding="utf-8").strip()
+        if limit_text != "max":
+            total = int(limit_text)
+            used = int(current_text)
+            if total > 0:
+                return {
+                    "systemMemoryAvailable": True,
+                    "systemMemoryTotalMb": round(total / 1048576, 2),
+                    "systemMemoryUsedMb": round(used / 1048576, 2),
+                    "systemMemoryPercent": round(used * 100 / total, 2),
+                }
+    except (OSError, ValueError):
+        pass
+    try:
+        total = int(os.sysconf("SC_PAGE_SIZE")) * int(os.sysconf("SC_PHYS_PAGES"))
+        available = os.sysconf("SC_AVPHYS_PAGES")
+        used = total - int(os.sysconf("SC_PAGE_SIZE")) * int(available)
+        if total > 0:
+            return {
+                "systemMemoryAvailable": True,
+                "systemMemoryTotalMb": round(total / 1048576, 2),
+                "systemMemoryUsedMb": round(used / 1048576, 2),
+                "systemMemoryPercent": round(used * 100 / total, 2),
+            }
+    except (AttributeError, OSError, ValueError):
+        pass
+    return {"systemMemoryAvailable": False}
+
+
+def wait_for_system_memory_headroom(should_stop: Callable[[], None]) -> None:
+    """Pause producers before buffered raw frames can exceed the pod RAM ceiling."""
+    while True:
+        memory = system_memory_stats()
+        if not memory.get("systemMemoryAvailable") or float(memory.get("systemMemoryPercent") or 0) < SYSTEM_MEMORY_CEILING_PERCENT:
+            return
+        should_stop()
+        time.sleep(0.2)
 
 
 def ffmpeg_encoders() -> str:

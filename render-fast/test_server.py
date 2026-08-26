@@ -74,6 +74,11 @@ class RenderFastSchedulerTests(unittest.TestCase):
         self.assertFalse(producer.is_alive())
         self.assertEqual(buffer.take(0, lambda: None), b"b")
 
+    def test_memory_headroom_does_not_block_below_hard_ceiling(self) -> None:
+        with mock.patch.object(SERVER, "system_memory_stats", return_value={"systemMemoryAvailable": True, "systemMemoryPercent": 89.9}), mock.patch.object(SERVER.time, "sleep") as sleep:
+            SERVER.wait_for_system_memory_headroom(lambda: self.fail("should not stop below the memory ceiling"))
+        sleep.assert_not_called()
+
     def test_decoder_start_failure_closes_its_ordered_queue(self) -> None:
         buffer = SERVER.OrderedFrameBuffer(1, 1024)
         job = {"jobId": "test-job"}
