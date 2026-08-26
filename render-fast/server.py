@@ -229,26 +229,26 @@ def render_audio_clip(clip: dict[str, Any], output_path: Path, work_dir: Path, s
     duration = max(0.001, float(clip.get("sceneDuration") or 0.001))
     source = str(clip.get("audioSourceFile") or clip.get("url") or "")
     if bool(clip.get("isMuted")) or not source:
-        run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", f"anullsrc=r=48000:cl=stereo", "-t", str(duration), "-c:a", "pcm_s16le", str(output_path)], "audio silence")
+        run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", f"anullsrc=r=48000:cl=mono", "-t", str(duration), "-c:a", "pcm_s16le", str(output_path)], "audio silence")
         return
     base = float(clip.get("audioSourceStart") or 0) + float(clip.get("startTimeOffset") or 0)
     ranges = [item for item in (clip.get("keepRanges") or []) if float(item.get("end") or 0) > float(item.get("start") or 0)]
     filter_value = audio_filter(clip)
     if not ranges:
-        run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-ss", str(max(0, base)), "-i", source, "-t", str(duration), "-vn", "-af", f"{filter_value},apad", "-t", str(duration), "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le", str(output_path)], "audio unit")
+        run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-ss", str(max(0, base)), "-i", source, "-t", str(duration), "-vn", "-af", f"{filter_value},apad", "-t", str(duration), "-ar", "48000", "-ac", "1", "-c:a", "pcm_s16le", str(output_path)], "audio unit")
         return
     pieces: list[Path] = []
     for index, item in enumerate(ranges):
         start = float(item["start"])
         length = max(0.001, float(item["end"]) - start)
         piece = work_dir / f"audio-range-{output_path.stem}-{index}.wav"
-        run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-ss", str(max(0, base + start)), "-i", source, "-t", str(length), "-vn", "-af", filter_value, "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le", str(piece)], "retained audio range")
+        run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-ss", str(max(0, base + start)), "-i", source, "-t", str(length), "-vn", "-af", filter_value, "-ar", "48000", "-ac", "1", "-c:a", "pcm_s16le", str(piece)], "retained audio range")
         pieces.append(piece)
     list_path = work_dir / f"{output_path.stem}.txt"
     list_path.write_text("\n".join(f"file '{path.as_posix()}'" for path in pieces), encoding="utf-8")
     joined = work_dir / f"{output_path.stem}-joined.wav"
     run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(list_path), "-c:a", "pcm_s16le", str(joined)], "join retained audio")
-    run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(joined), "-af", "apad", "-t", str(duration), "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le", str(output_path)], "normalize retained audio")
+    run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(joined), "-af", "apad", "-t", str(duration), "-ar", "48000", "-ac", "1", "-c:a", "pcm_s16le", str(output_path)], "normalize retained audio")
 
 
 def render_canonical_audio(audio_clips: list[dict[str, Any]], work_dir: Path, settings: dict[str, Any]) -> Path | None:
@@ -262,7 +262,7 @@ def render_canonical_audio(audio_clips: list[dict[str, Any]], work_dir: Path, se
     list_path = work_dir / "audio-units.txt"
     list_path.write_text("\n".join(f"file '{path.as_posix()}'" for path in units), encoding="utf-8")
     output = work_dir / "canonical-audio.wav"
-    run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(list_path), "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le", str(output)], "canonical audio mix")
+    run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(list_path), "-ar", "48000", "-ac", "1", "-c:a", "pcm_s16le", str(output)], "canonical audio mix")
     return output
 
 
@@ -279,7 +279,7 @@ def materialize_project_audio(job: dict[str, Any], work_dir: Path) -> Path | Non
         raise RenderError(f"project encoded audio download failed: {exc}") from exc
     output = work_dir / "canonical-audio.wav"
     total_seconds = max(0.001, float(job.get("durationInFrames") or 0) / max(1, int(job["settings"].get("fps") or 30)))
-    run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(downloaded), "-af", "apad", "-t", str(total_seconds), "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le", str(output)], "prepare project encoded audio")
+    run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(downloaded), "-af", "apad", "-t", str(total_seconds), "-ar", "48000", "-ac", "1", "-c:a", "pcm_s16le", str(output)], "prepare project encoded audio")
     return output
 
 
@@ -335,7 +335,7 @@ def render_video(job: dict[str, Any], audio: Path | None, work_dir: Path) -> Pat
     if audio is None:
         return output
     muxed = work_dir / "output.mp4"
-    run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(output), "-i", str(audio), "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", str(settings.get("audioBitrate") or "384k"), "-ar", "48000", "-ac", "2", "-movflags", "+faststart", str(muxed)], "final audio mux")
+    run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(output), "-i", str(audio), "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", str(settings.get("audioBitrate") or "192k"), "-ar", "48000", "-ac", "1", "-movflags", "+faststart", str(muxed)], "final audio mux")
     return muxed
 
 
