@@ -173,7 +173,7 @@ def probe() -> dict[str, Any]:
                 print(f"[GPU Render] HEVC NVENC smoke: failed: {exc}", flush=True)
                 capabilities["hevcError"] = str(exc)
     for key, width, height, fps in (("1080p-48", 1920, 1080, 48), ("2k-48", 2560, 1440, 48), ("4k-48", 3840, 2160, 48)):
-        if key == "4k-48" and int(gpu.get("vramMb") or 0) < 20 * 1024:
+        if key == "4k-48" and int(gpu.get("vramMb") or 0) < 20000:
             continue
         capabilities["profiles"].append({"key": key, "codec": "h264", "fps": 0, "recommendedSlots": 1})
     return capabilities
