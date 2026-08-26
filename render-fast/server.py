@@ -266,6 +266,23 @@ def render_canonical_audio(audio_clips: list[dict[str, Any]], work_dir: Path, se
     return output
 
 
+def materialize_project_audio(job: dict[str, Any], work_dir: Path) -> Path | None:
+    canonical = job.get("canonicalAudio") or {}
+    source = str(canonical.get("url") or "").strip() if isinstance(canonical, dict) else ""
+    if not source:
+        return None
+    downloaded = work_dir / "project-audio-source.wav"
+    try:
+        with urllib.request.urlopen(source, timeout=600) as response:
+            downloaded.write_bytes(response.read())
+    except Exception as exc:
+        raise RenderError(f"project encoded audio download failed: {exc}") from exc
+    output = work_dir / "canonical-audio.wav"
+    total_seconds = max(0.001, float(job.get("durationInFrames") or 0) / max(1, int(job["settings"].get("fps") or 30)))
+    run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(downloaded), "-af", "apad", "-t", str(total_seconds), "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le", str(output)], "prepare project encoded audio")
+    return output
+
+
 def register_process(process: subprocess.Popen[bytes]) -> None:
     with STATE.lock:
         STATE.active_processes.append(process)
@@ -338,7 +355,7 @@ def process_job(job: dict[str, Any]) -> None:
     try:
         with tempfile.TemporaryDirectory(prefix=f"sb-render-{job_id[:8]}-") as temporary:
             work_dir = Path(temporary)
-            audio = render_canonical_audio(job["audioClips"], work_dir, job["settings"])
+            audio = materialize_project_audio(job, work_dir) or render_canonical_audio(job["audioClips"], work_dir, job["settings"])
             emit("job_progress", jobId=job_id, progress=20, phase="audio_ready")
             output = render_video(job, audio, work_dir)
             raise_if_cancelled(job_id)
