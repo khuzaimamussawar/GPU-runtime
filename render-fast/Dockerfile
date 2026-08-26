@@ -2,7 +2,7 @@
 # Build FFmpeg ourselves: Ubuntu's packaged binary does not promise CUDA filters.
 # CUDA 13 is baked into the image so Blackwell is a native build target. The pod
 # provider still supplies the matching host kernel driver and NVENC/NVDEC device.
-FROM nvidia/cuda:13.0.2-devel-ubuntu22.04 AS ffmpeg-build
+FROM nvidia/cuda:13.0.0-devel-ubuntu22.04 AS ffmpeg-build
 
 ARG FFMPEG_VERSION=7.1.1
 ARG NV_CODEC_HEADERS_VERSION=n12.2.72.0
@@ -44,7 +44,7 @@ RUN curl -fsSL "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" -o 
     && /opt/ffmpeg/bin/ffmpeg -hide_banner -encoders | grep -q hevc_nvenc \
     && rm -rf "/tmp/ffmpeg-${FFMPEG_VERSION}" /tmp/ffmpeg.tar.xz
 
-FROM nvidia/cuda:13.0.2-devel-ubuntu22.04
+FROM nvidia/cuda:13.0.0-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \

@@ -115,14 +115,13 @@ cards are excluded.
 Every new pod must prove the selected render path before it receives user work:
 
 1. `nvidia-smi` detects the assigned GPU and driver.
-2. FFmpeg lists the required CUDA/NVENC/NVDEC components.
+2. FFmpeg lists the required NVENC encoder.
 3. For an H.264 job, H.264 NVENC encode succeeds; for an H.265 job, HEVC
    Main10/P010 NVENC encode succeeds. It does not reject an H.265 render
    merely because H.264 is unavailable, or vice versa.
-4. Hardware decode plus the selected-codec CUDA scale/FPS path succeeds.
-5. The image's CUDA 13 userspace supports the pod architecture, including
+4. The image's CUDA 13 userspace supports the pod architecture, including
    native Blackwell support. The provider host driver remains authoritative.
-6. A short 1080p, 2K, and where eligible 4K/48 benchmark records realtime FPS
+5. A short 1080p, 2K, and where eligible 4K/48 benchmark records realtime FPS
    and peak VRAM, GPU, NVENC, NVDEC, CPU, and disk usage.
 
 If a probe fails, the worker becomes `nvenc_unavailable`, records the concrete
@@ -130,29 +129,26 @@ driver or FFmpeg error, is retired, and the job is requeued to another GPU.
 Fast never falls back to x264/x265. The render fails only after the selected
 provider policy has exhausted its viable candidates.
 
-### Implemented CUDA Route
+### Default Visual Route
 
-The Fast image bakes CUDA 13 and builds pinned FFmpeg with NVENC, NVDEC,
+The Fast image is pinned to CUDA 13.0 and builds FFmpeg with NVENC, NVDEC,
 `scale_cuda`, and NPP support rather than relying on Ubuntu's packaged FFmpeg.
-At pod boot it creates a tiny source using the selected output codec and proves
-the real chain used by Fast:
+The normal Fast route deliberately uses the established CPU filter chain:
 
 ```text
-NVDEC -> scale_cuda (Lanczos cover) -> hwdownload ->
-exact project-frame crop / speed / fps / trim -> final NVENC
+CPU decode -> Lanczos cover scale / exact crop / speed / FPS / trim ->
+one upload to the final H.264 or HEVC NVENC encoder
 ```
 
-The logs and `render_job_metrics.route` state whether the result is
-`gpu_decode_cuda_scale_cpu_timing_nvenc` or `cpu_filter_nvenc_fallback`.
-Crop positioning, speed, FPS conversion, trim, and final timeline ordering
-deliberately remain in the established CPU filter section because the pinned FFmpeg route
-does not have a verified CUDA equivalent for every one of those operations.
-If a real source rejects hardware decoding or the CUDA graph, Fast restarts the
-whole visual stream through the CPU-filter/NVENC path; it never mixes partial
-GPU and CPU output in one file.
+This has no GPU-to-CPU-to-GPU round trip. Resolution mismatch is always handled
+by FFmpeg's CPU `scale` filter using `flags=lanczos`, followed by the exact
+16:9/9:16 project-frame crop. It is therefore the same deterministic visual
+normalization as Quality, but the final codec is NVENC.
 
-`RENDER_GPU_FILTER_MODE=cpu` is an emergency Worker-side switch that preserves
-the CPU-filter/NVENC route without rebuilding the image. Its default is `auto`.
+CUDA/NVDEC/`scale_cuda` remain built into the image for a later fully
+GPU-resident implementation, but they are neither smoke-tested nor selected by
+the current renderer. Pod readiness and dispatch depend only on the selected
+H.264 or HEVC NVENC smoke test.
 
 ## Streaming Execution
 
@@ -162,22 +158,43 @@ second render-job table. `render_pod_workers` only records reusable GPU-worker
 state and measured capabilities.
 
 For one timeline export, Fast starts one final H.264/HEVC NVENC encoder and
-keeps it alive for the entire output. Each visual timeline unit is decoded,
-trimmed, and normalized in timeline order, then streamed directly into that
-same final encoder. The current unit's decoder/filter process and the final
-encoder run concurrently through a bounded pipe.
+keeps it alive for the entire output. CPU preparation workers decode, trim,
+speed-adjust, FPS-normalize, and Lanczos-scale upcoming visual units in
+parallel. They publish raw-frame blocks to bounded per-unit queues; the final
+encoder consumes only the next timeline unit, so output order is never altered.
 
 ```text
-unit 1 decode/filter -> final encoder stdin -> final.mp4
-unit 2 decode/filter -> same encoder stdin -> final.mp4
-unit N decode/filter -> same encoder stdin -> final.mp4
+unit 1 CPU worker -> ordered queue -> final encoder stdin -> final.mp4
+unit 2 CPU worker -> ordered queue -> same encoder stdin -> final.mp4
+unit N CPU worker -> ordered queue -> same encoder stdin -> final.mp4
 ```
 
-Fast never decodes the entire video before encoding it. A five-minute 4K/48
-timeline would require hundreds of GB of raw frames and add unnecessary disk
-I/O and latency. There are no encoded per-clip MP4 intermediates. Source
-downloads may be prefetched with a bounded one-unit lookahead, but output
-frames remain timeline-ordered and bounded in memory.
+Each worker streams its long clip through one continuous FFmpeg process in
+eight-frame blocks; it never buffers a complete 15-second or 15-minute clip.
+The default queue limit is two seconds of raw output per worker. A later clip
+may finish preparation before an earlier clip, but it cannot enter the final
+NVENC stream until every preceding timeline frame has been written.
+
+The initial per-render worker caps are bounded by the available vCPUs and 12
+workers maximum:
+
+| Output profile | 6 vCPU | 9 vCPU | 12 vCPU | 16 vCPU |
+| --- | ---: | ---: | ---: | ---: |
+| 4K, 30 fps | 3 | 4 | 6 | 8 |
+| 4K, 48 fps | 2 | 3 | 4 | 5 |
+| 4K, 60 fps | 1 | 2 | 3 | 4 |
+| 2K, 48 fps | 4 | 6 | 8 | 10 |
+| 2K, 60 fps | 3 | 5 | 7 | 9 |
+| 1080p or below, 48/60 fps | 6 | 9 | 12 | 12 |
+
+These are reference points, not an allowlist. Other provider allocations use
+the same proportional CPU-budget calculation: 8, 10, 14, 20, and similar vCPU
+counts receive the corresponding bounded worker cap automatically.
+
+If a pod has multiple calibrated render slots, each job gets only its 90%
+share of the CPU budget before this table is applied. Fast never decodes the
+entire video before encoding it, creates no encoded per-clip MP4 intermediates,
+and performs no final video concat.
 
 ## D1 Data Model
 
