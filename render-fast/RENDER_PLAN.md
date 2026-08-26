@@ -112,13 +112,16 @@ cards are excluded.
 
 ## NVENC Probe And Retry
 
-Every new pod must prove all of the following before it receives user work:
+Every new pod must prove the selected render path before it receives user work:
 
 1. `nvidia-smi` detects the assigned GPU and driver.
 2. FFmpeg lists the required CUDA/NVENC/NVDEC components.
-3. H.264 NVENC encode succeeds.
-4. HEVC Main10/P010 NVENC encode succeeds.
-5. Hardware decode plus the requested scale/FPS path succeeds.
+3. For an H.264 job, H.264 NVENC encode succeeds; for an H.265 job, HEVC
+   Main10/P010 NVENC encode succeeds. It does not reject an H.265 render
+   merely because H.264 is unavailable, or vice versa.
+4. Hardware decode plus the selected-codec CUDA scale/FPS path succeeds.
+5. The image's CUDA 13 userspace supports the pod architecture, including
+   native Blackwell support. The provider host driver remains authoritative.
 6. A short 1080p, 2K, and where eligible 4K/48 benchmark records realtime FPS
    and peak VRAM, GPU, NVENC, NVDEC, CPU, and disk usage.
 
@@ -126,6 +129,30 @@ If a probe fails, the worker becomes `nvenc_unavailable`, records the concrete
 driver or FFmpeg error, is retired, and the job is requeued to another GPU.
 Fast never falls back to x264/x265. The render fails only after the selected
 provider policy has exhausted its viable candidates.
+
+### Implemented CUDA Route
+
+The Fast image bakes CUDA 13 and builds pinned FFmpeg with NVENC, NVDEC,
+`scale_cuda`, and NPP support rather than relying on Ubuntu's packaged FFmpeg.
+At pod boot it creates a tiny source using the selected output codec and proves
+the real chain used by Fast:
+
+```text
+NVDEC -> scale_cuda (Lanczos cover) -> hwdownload ->
+exact project-frame crop / speed / fps / trim -> final NVENC
+```
+
+The logs and `render_job_metrics.route` state whether the result is
+`gpu_decode_cuda_scale_cpu_timing_nvenc` or `cpu_filter_nvenc_fallback`.
+Crop positioning, speed, FPS conversion, trim, and final timeline ordering
+deliberately remain in the established CPU filter section because the pinned FFmpeg route
+does not have a verified CUDA equivalent for every one of those operations.
+If a real source rejects hardware decoding or the CUDA graph, Fast restarts the
+whole visual stream through the CPU-filter/NVENC path; it never mixes partial
+GPU and CPU output in one file.
+
+`RENDER_GPU_FILTER_MODE=cpu` is an emergency Worker-side switch that preserves
+the CPU-filter/NVENC route without rebuilding the image. Its default is `auto`.
 
 ## Streaming Execution
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import queue
 import shutil
@@ -23,11 +24,17 @@ WORKER_ID = os.environ.get("SCENEBUILDER_WORKER_ID", "").strip()
 CONTROL_URL = os.environ.get("SCENEBUILDER_CONTROL_URL", "").strip()
 DEFAULT_IDLE_TIMEOUT = max(0, int(os.environ.get("SCENEBUILDER_IDLE_TIMEOUT_SECONDS", "60")))
 REQUIRED_CODEC = os.environ.get("SCENEBUILDER_REQUIRED_CODEC", "").strip().lower()
+FFMPEG_FLAVOR = os.environ.get("SCENEBUILDER_FFMPEG_FLAVOR", "system-ffmpeg").strip()
+GPU_FILTER_MODE = os.environ.get("SCENEBUILDER_GPU_FILTER_MODE", "auto").strip().lower()
 MAX_ERROR_DETAIL_CHARS = 16000
 MAX_CONCURRENT_JOBS = max(1, min(4, int(os.environ.get("RENDER_GPU_MAX_CONCURRENT_JOBS", "4"))))
 
 
 class RenderError(RuntimeError):
+    pass
+
+
+class GpuPipelineError(RenderError):
     pass
 
 
@@ -39,6 +46,7 @@ class State:
         self.active_job_ids: set[str] = set()
         self.active_processes: dict[str, list[subprocess.Popen[bytes]]] = {}
         self.max_concurrent_jobs = 1
+        self.capabilities: dict[str, Any] = {}
         self.status = "starting"
         self.idle_since: float | None = None
         self.terminate_after: float | None = None
@@ -161,6 +169,26 @@ def ffmpeg_encoders() -> str:
     return command_output(["ffmpeg", "-hide_banner", "-encoders"])
 
 
+def probe_cuda_filter_pipeline(work_dir: Path, use_hevc: bool) -> tuple[bool, str]:
+    """Prove the exact CUDA cover/crop -> CPU timing handoff used by Fast."""
+    sample = work_dir / "cuda-filter-source.mp4"
+    encoder = ["-c:v", "hevc_nvenc", "-profile:v", "main10", "-pix_fmt", "p010le"] if use_hevc else ["-c:v", "h264_nvenc", "-pix_fmt", "yuv420p"]
+    try:
+        run([
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=256x144:r=24",
+            "-frames:v", "4", *encoder, str(sample),
+        ], "CUDA filter probe source")
+        run([
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-hwaccel", "cuda", "-hwaccel_output_format", "cuda", "-i", str(sample), "-map", "0:v:0", "-an",
+            "-vf", "scale_cuda=128:128:force_original_aspect_ratio=increase:force_divisible_by=2:interp_algo=lanczos:format=nv12,hwdownload,format=nv12,crop=128:128:(iw-ow)/2:(ih-oh)/2,setsar=1,fps=24,format=yuv420p",
+            "-frames:v", "2", "-f", "null", "-",
+        ], "CUDA decode/filter chain")
+        return True, "passed"
+    except Exception as exc:
+        return False, str(exc)
+
+
 def probe() -> dict[str, Any]:
     gpu = gpu_stats()
     encoders = ffmpeg_encoders()
@@ -171,6 +199,7 @@ def probe() -> dict[str, Any]:
         "ffmpegVersion": command_output(["ffmpeg", "-version"]).splitlines()[0],
         "nvdec": "cuda" in command_output(["ffmpeg", "-hide_banner", "-hwaccels"]),
         "cudaFilters": "scale_cuda" in command_output(["ffmpeg", "-hide_banner", "-filters"]),
+        "cudaFilterPipeline": False,
         "encoders": {"h264Nvenc": False, "hevcNvencMain10": False},
         "profiles": [],
     }
@@ -194,6 +223,14 @@ def probe() -> dict[str, Any]:
             except Exception as exc:
                 print(f"[GPU Render] HEVC NVENC smoke: failed: {exc}", flush=True)
                 capabilities["hevcError"] = str(exc)
+        if capabilities["nvdec"] and capabilities["cudaFilters"]:
+            required_hevc = REQUIRED_CODEC == "h265"
+            encoder_ready = capabilities["encoders"]["hevcNvencMain10"] if required_hevc else capabilities["encoders"]["h264Nvenc"]
+            if encoder_ready:
+                passed, detail = probe_cuda_filter_pipeline(Path(work), required_hevc)
+                capabilities["cudaFilterPipeline"] = passed
+                capabilities["cudaFilterPipelineDetail"] = detail
+                print(f"[GPU Render] CUDA decode/filter pipeline: {'passed' if passed else 'fallback'}: {detail}", flush=True)
     for key, width, height, fps in (("1080p-48", 1920, 1080, 48), ("2k-48", 2560, 1440, 48), ("4k-48", 3840, 2160, 48)):
         if key == "4k-48" and int(gpu.get("vramMb") or 0) < 20000:
             continue
@@ -201,7 +238,11 @@ def probe() -> dict[str, Any]:
     return capabilities
 
 
-def ffmpeg_video_decoder_args(clip: dict[str, Any], settings: dict[str, Any]) -> list[str]:
+def gpu_pipeline_for_clip(clip: dict[str, Any], use_gpu_pipeline: bool) -> bool:
+    return use_gpu_pipeline and str(clip.get("type") or "video") == "video" and bool(str(clip.get("url") or "").strip())
+
+
+def ffmpeg_video_decoder_args(clip: dict[str, Any], settings: dict[str, Any], use_gpu_pipeline: bool = False) -> list[str]:
     duration = max(0.001, float(clip.get("sceneDuration") or 0.001))
     media_type = str(clip.get("type") or "placeholder")
     source = str(clip.get("url") or "")
@@ -213,17 +254,45 @@ def ffmpeg_video_decoder_args(clip: dict[str, Any], settings: dict[str, Any]) ->
     speed = max(0.1, float(clip.get("speed") or 1))
     source_duration = duration * speed
     start = max(0, float(clip.get("startTimeOffset") or 0))
-    return ["-threads", threads, "-accurate_seek", "-ss", str(start), "-t", str(source_duration), "-i", source]
+    hardware_decode = ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"] if gpu_pipeline_for_clip(clip, use_gpu_pipeline) else []
+    return ["-threads", threads, "-accurate_seek", "-ss", str(start), "-t", str(source_duration), *hardware_decode, "-i", source]
 
 
-def video_filter(clip: dict[str, Any], settings: dict[str, Any]) -> str:
+def render_scale(value: Any) -> float:
+    """Match TimelineRender's static zoom control while keeping an exact frame crop."""
+    try:
+        return max(1.0, min(3.0, float(value if value is not None else 1)))
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def even_dimension(value: float) -> int:
+    return max(2, int(math.ceil(value / 2.0)) * 2)
+
+
+def video_filter(clip: dict[str, Any], settings: dict[str, Any], use_gpu_pipeline: bool = False) -> str:
     duration = max(0.001, float(clip.get("sceneDuration") or 0.001))
     speed = max(0.1, float(clip.get("speed") or 1))
     width, height, fps = settings["width"], settings["height"], settings["fps"]
-    filters = [
-        f"scale={width}:{height}:force_original_aspect_ratio=decrease",
-        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black",
-    ]
+    scale = render_scale(clip.get("scale"))
+    # Cover first, then crop to the exact project frame. Scaling the cover
+    # target by the static zoom matches the Timeline preview's object-fit:cover
+    # followed by its centered CSS scale transform.
+    cover_width, cover_height = even_dimension(width * scale), even_dimension(height * scale)
+    if gpu_pipeline_for_clip(clip, use_gpu_pipeline):
+        filters = [
+            f"scale_cuda={cover_width}:{cover_height}:force_original_aspect_ratio=increase:force_divisible_by=2:interp_algo=lanczos:format=nv12",
+            "hwdownload",
+            "format=nv12",
+            f"crop={width}:{height}:(iw-ow)/2:(ih-oh)/2",
+            "setsar=1",
+        ]
+    else:
+        filters = [
+            f"scale={cover_width}:{cover_height}:force_original_aspect_ratio=increase:flags=lanczos",
+            f"crop={width}:{height}:(iw-ow)/2:(ih-oh)/2",
+            "setsar=1",
+        ]
     if str(clip.get("type") or "video") == "video" and speed != 1:
         filters.append(f"setpts=PTS/{speed}")
     filters.extend([f"fps={fps}", f"trim=duration={duration}", "setpts=PTS-STARTPTS", "format=yuv420p"])
@@ -324,7 +393,7 @@ def raise_if_cancelled(job_id: str) -> None:
             raise RenderError("RENDER_CANCELLED")
 
 
-def render_video(job: dict[str, Any], audio: Path | None, work_dir: Path) -> tuple[Path, dict[str, Any]]:
+def render_video(job: dict[str, Any], audio: Path | None, work_dir: Path, use_gpu_pipeline: bool = False) -> tuple[Path, dict[str, Any]]:
     settings = job["settings"]
     clips = job["clips"]
     output = work_dir / "video.mp4"
@@ -338,40 +407,55 @@ def render_video(job: dict[str, Any], audio: Path | None, work_dir: Path) -> tup
     completed_frames = 0
     peak_gpu: dict[str, Any] = {}
     video_started = time.monotonic()
+    render_route = "gpu_decode_cuda_scale_cpu_timing_nvenc" if use_gpu_pipeline else "cpu_filter_nvenc_fallback"
+    print(f"[GPU Render] {job['jobId']} visual route: {render_route}", flush=True)
     try:
         merge_gpu_peak(peak_gpu, gpu_stats())
         for index, clip in enumerate(clips):
             raise_if_cancelled(job["jobId"])
+            clip_gpu_pipeline = gpu_pipeline_for_clip(clip, use_gpu_pipeline)
+            clip_route = "gpu_decode_cuda_scale_cpu_timing_nvenc" if clip_gpu_pipeline else "cpu_filter_nvenc_fallback"
             unit_started = time.monotonic()
             unit_expected_frames = max(1, round(max(0.001, float(clip.get("sceneDuration") or 0.001)) * settings["fps"]))
             unit_frames = 0
             last_progress_emit = 0.0
             last_gpu_sample = time.monotonic()
-            decoder = subprocess.Popen(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *ffmpeg_video_decoder_args(clip, settings), "-map", "0:v:0", "-an", "-vf", video_filter(clip, settings), "-pix_fmt", "yuv420p", "-f", "rawvideo", "pipe:1"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            decoder = subprocess.Popen(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *ffmpeg_video_decoder_args(clip, settings, use_gpu_pipeline), "-map", "0:v:0", "-an", "-vf", video_filter(clip, settings, use_gpu_pipeline), "-pix_fmt", "yuv420p", "-f", "rawvideo", "pipe:1"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             register_process(job["jobId"], decoder)
-            assert decoder.stdout is not None and encoder.stdin is not None
-            while chunk := decoder.stdout.read(1024 * 1024):
-                raise_if_cancelled(job["jobId"])
-                encoder.stdin.write(chunk)
-                unit_frames += len(chunk) // max(1, settings["width"] * settings["height"] * 3 // 2)
-                elapsed = max(0.001, time.monotonic() - unit_started)
-                if time.monotonic() - last_gpu_sample >= 1:
-                    merge_gpu_peak(peak_gpu, gpu_stats())
-                    last_gpu_sample = time.monotonic()
-                if time.monotonic() - last_progress_emit >= 1:
-                    completed = min(expected_frames, completed_frames + min(unit_expected_frames, unit_frames))
-                    progress = 20 + int((completed / expected_frames) * 70)
-                    emit("job_progress", jobId=job["jobId"], progress=progress, phase="video", clipIndex=index)
-                    emit("job_metric", jobId=job["jobId"], metric={
-                        "phase": "video", "clipIndex": index, "route": "nvenc_final_cpu_decode_filter",
-                        "renderFps": round(unit_frames / elapsed, 2), "outputFrames": completed, "expectedFrames": expected_frames,
-                        "resource": {"cpuPercent": host_cpu_percent(), **gpu_stats(), **disk_stats()},
-                    })
-                    last_progress_emit = time.monotonic()
-            stderr = decoder.stderr.read().decode("utf-8", errors="replace") if decoder.stderr else ""
-            if decoder.wait() != 0:
-                raise RenderError(f"visual unit {index} failed: {stderr[-MAX_ERROR_DETAIL_CHARS:]}")
-            unregister_process(job["jobId"], decoder)
+            try:
+                assert decoder.stdout is not None and encoder.stdin is not None
+                while chunk := decoder.stdout.read(1024 * 1024):
+                    raise_if_cancelled(job["jobId"])
+                    encoder.stdin.write(chunk)
+                    unit_frames += len(chunk) // max(1, settings["width"] * settings["height"] * 3 // 2)
+                    elapsed = max(0.001, time.monotonic() - unit_started)
+                    if time.monotonic() - last_gpu_sample >= 1:
+                        merge_gpu_peak(peak_gpu, gpu_stats())
+                        last_gpu_sample = time.monotonic()
+                    if time.monotonic() - last_progress_emit >= 1:
+                        completed = min(expected_frames, completed_frames + min(unit_expected_frames, unit_frames))
+                        progress = 20 + int((completed / expected_frames) * 70)
+                        emit("job_progress", jobId=job["jobId"], progress=progress, phase="video", clipIndex=index)
+                        emit("job_metric", jobId=job["jobId"], metric={
+                            "phase": "video", "clipIndex": index, "route": clip_route,
+                            "renderFps": round(unit_frames / elapsed, 2), "outputFrames": completed, "expectedFrames": expected_frames,
+                            "resource": {"cpuPercent": host_cpu_percent(), **gpu_stats(), **disk_stats()},
+                        })
+                        last_progress_emit = time.monotonic()
+                stderr = decoder.stderr.read().decode("utf-8", errors="replace") if decoder.stderr else ""
+                if decoder.wait() != 0:
+                    message = f"visual unit {index} failed: {stderr[-MAX_ERROR_DETAIL_CHARS:]}"
+                    if clip_gpu_pipeline:
+                        raise GpuPipelineError(message)
+                    raise RenderError(message)
+            finally:
+                if decoder.poll() is None:
+                    decoder.terminate()
+                    try:
+                        decoder.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        decoder.kill()
+                unregister_process(job["jobId"], decoder)
             sample = gpu_stats()
             merge_gpu_peak(peak_gpu, sample)
             completed_frames += unit_expected_frames
@@ -379,7 +463,7 @@ def render_video(job: dict[str, Any], audio: Path | None, work_dir: Path) -> tup
             progress = 20 + int((min(expected_frames, completed_frames) / expected_frames) * 70)
             emit("job_progress", jobId=job["jobId"], progress=progress, phase="video", clipIndex=index)
             emit("job_metric", jobId=job["jobId"], metric={
-                "phase": "video", "clipIndex": index, "route": "nvenc_final_cpu_decode_filter",
+                "phase": "video", "clipIndex": index, "route": clip_route,
                 "renderFps": round(unit_expected_frames / elapsed, 2), "outputFrames": min(expected_frames, completed_frames), "expectedFrames": expected_frames,
                 "resource": {"cpuPercent": host_cpu_percent(), **sample, **disk_stats()},
             })
@@ -387,9 +471,27 @@ def render_video(job: dict[str, Any], audio: Path | None, work_dir: Path) -> tup
         encoder.stdin.close()
         stderr = encoder.stderr.read().decode("utf-8", errors="replace") if encoder.stderr else ""
         if encoder.wait() != 0:
-            raise RenderError(f"final NVENC encode failed: {stderr[-MAX_ERROR_DETAIL_CHARS:]}")
+            message = f"final NVENC encode failed: {stderr[-MAX_ERROR_DETAIL_CHARS:]}"
+            if use_gpu_pipeline:
+                raise GpuPipelineError(message)
+            raise RenderError(message)
         merge_gpu_peak(peak_gpu, gpu_stats())
+    except BrokenPipeError as exc:
+        if use_gpu_pipeline:
+            raise GpuPipelineError(f"CUDA pipeline broke the final encoder pipe: {exc}") from exc
+        raise RenderError(f"final encoder pipe failed: {exc}") from exc
     finally:
+        if encoder.stdin is not None and not encoder.stdin.closed:
+            try:
+                encoder.stdin.close()
+            except OSError:
+                pass
+        if encoder.poll() is None:
+            encoder.terminate()
+            try:
+                encoder.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                encoder.kill()
         unregister_process(job["jobId"], encoder)
     peak_gpu["renderFps"] = round(expected_frames / max(0.001, time.monotonic() - video_started), 2)
     if audio is None:
@@ -417,7 +519,26 @@ def process_job(job: dict[str, Any]) -> None:
             work_dir = Path(temporary)
             audio = materialize_project_audio(job, work_dir) or render_canonical_audio(job["audioClips"], work_dir, job["settings"])
             emit("job_progress", jobId=job_id, progress=20, phase="audio_ready")
-            output, peak_gpu = render_video(job, audio, work_dir)
+            use_gpu_pipeline = GPU_FILTER_MODE != "cpu" and bool(STATE.capabilities.get("cudaFilterPipeline"))
+            selected_route = "gpu_decode_cuda_scale_cpu_timing_nvenc" if use_gpu_pipeline else "cpu_filter_nvenc_fallback"
+            print(f"[GPU Render] {job_id} CUDA filter probe: {'passed' if use_gpu_pipeline else 'not available'}; selected route: {selected_route}", flush=True)
+            emit("job_metric", jobId=job_id, metric={
+                "phase": "visual_route", "route": selected_route,
+                "details": {"cudaFilterPipeline": use_gpu_pipeline, "ffmpegFlavor": FFMPEG_FLAVOR},
+                "resource": {"cpuPercent": host_cpu_percent(), **gpu_stats(), **disk_stats()},
+            })
+            try:
+                output, peak_gpu = render_video(job, audio, work_dir, use_gpu_pipeline=use_gpu_pipeline)
+            except GpuPipelineError as exc:
+                # The CPU path is the established compatibility route. Restart the
+                # entire visual stream, never splice CPU frames into a failed GPU run.
+                print(f"[GPU Render] {job_id} CUDA pipeline rejected a source; restarting CPU fallback: {exc}", flush=True)
+                emit("job_metric", jobId=job_id, metric={
+                    "phase": "gpu_pipeline_fallback", "route": "cpu_filter_nvenc_fallback",
+                    "details": {"gpuPipelineError": str(exc)[-MAX_ERROR_DETAIL_CHARS:]},
+                    "resource": {"cpuPercent": host_cpu_percent(), **gpu_stats(), **disk_stats()},
+                })
+                output, peak_gpu = render_video(job, audio, work_dir, use_gpu_pipeline=False)
             raise_if_cancelled(job_id)
             emit("job_progress", jobId=job_id, progress=95, phase="uploading")
             upload(str(job["uploadUrl"]), output)
@@ -474,6 +595,21 @@ def worker_loop() -> None:
         STATE.status = "idle"
         STATE.idle_since = time.time()
     capabilities = probe()
+    with STATE.lock:
+        STATE.capabilities = capabilities
+    print(f"[GPU Render] FFmpeg flavor: {FFMPEG_FLAVOR}", flush=True)
+    print(
+        f"[GPU Render] capabilities: nvdec={bool(capabilities.get('nvdec'))} "
+        f"scale_cuda={bool(capabilities.get('cudaFilters'))} "
+        f"h264_nvenc={bool(capabilities.get('encoders', {}).get('h264Nvenc'))} "
+        f"hevc_nvenc_main10={bool(capabilities.get('encoders', {}).get('hevcNvencMain10'))}",
+        flush=True,
+    )
+    print(
+        f"[GPU Render] CUDA decode/filter pipeline: {'enabled' if capabilities.get('cudaFilterPipeline') and GPU_FILTER_MODE != 'cpu' else 'CPU fallback'} "
+        f"(mode={GPU_FILTER_MODE})",
+        flush=True,
+    )
     print(f"[GPU Render] required codec: {REQUIRED_CODEC or 'both'}", flush=True)
     emit_startup_events(capabilities)
     while True:
