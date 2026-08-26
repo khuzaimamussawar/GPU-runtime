@@ -71,6 +71,7 @@ def run(command: list[str], label: str, stdout: Any = None) -> subprocess.Comple
     if completed.returncode != 0:
         error = completed.stderr.decode("utf-8", errors="replace")[-MAX_ERROR_DETAIL_CHARS:]
         raise RenderError(f"{label} exited with {completed.returncode}: {error}")
+    print(f"[GPU Render] {label}: passed", flush=True)
     return completed
 
 
@@ -144,12 +145,14 @@ def probe() -> dict[str, Any]:
                 run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=black:s=256x256:r=1", "-frames:v", "1", "-c:v", "h264_nvenc", "-preset", "p4", h264_path], "H.264 NVENC smoke")
                 capabilities["encoders"]["h264Nvenc"] = True
             except Exception as exc:
+                print(f"[GPU Render] H.264 NVENC smoke: failed: {exc}", flush=True)
                 capabilities["error"] = str(exc)
         if hevc_listed:
             try:
                 run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=black:s=256x256:r=1", "-frames:v", "1", "-c:v", "hevc_nvenc", "-profile:v", "main10", "-pix_fmt", "p010le", "-preset", "p4", h265_path], "HEVC NVENC smoke")
                 capabilities["encoders"]["hevcNvencMain10"] = True
             except Exception as exc:
+                print(f"[GPU Render] HEVC NVENC smoke: failed: {exc}", flush=True)
                 capabilities["hevcError"] = str(exc)
     for key, width, height, fps in (("1080p-48", 1920, 1080, 48), ("2k-48", 2560, 1440, 48), ("4k-48", 3840, 2160, 48)):
         if key == "4k-48" and int(gpu.get("vramMb") or 0) < 20 * 1024:
