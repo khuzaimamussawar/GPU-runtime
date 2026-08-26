@@ -41,6 +41,8 @@ class GpuPipelineError(RenderError):
     pass
 
 
+# Retained for future acceptance-tested parallel preparation. Production Fast
+# intentionally uses the serial direct FFmpeg -> NVENC path in render_video.
 class OrderedFrameBuffer:
     """Bounded per-clip raw-frame queues consumed strictly in timeline order."""
 
@@ -705,90 +707,101 @@ def render_video(job: dict[str, Any], audio: Path | None, work_dir: Path, use_gp
     register_process(job["jobId"], encoder)
     total_duration = max(0.001, sum(max(0.001, float(clip.get("sceneDuration") or 0.001)) for clip in clips))
     completed_duration = 0.0
-    written_frames = 0
+    written_bytes = 0
     peak_gpu: dict[str, Any] = {}
     video_started = time.monotonic()
     render_route = "cpu_filter_lanczos_nvenc"
     frame_bytes = max(1, settings["width"] * settings["height"] * 3 // 2)
-    parallel_workers = min(len(clips), max(1, int(settings.get("_parallelClipWorkers") or 1)))
-    frames_per_block = min(max(1, int(settings.get("fps") or 1)), FRAME_BLOCK_FRAMES)
-    buffered_bytes_per_clip = frame_bytes * max(1, int(settings.get("fps") or 1)) * LOOKAHEAD_BUFFER_SECONDS
-    frame_buffer = OrderedFrameBuffer(len(clips), buffered_bytes_per_clip)
-    abort_event = threading.Event()
-    source_queue: queue.Queue[int] = queue.Queue()
-    for index in range(len(clips)):
-        source_queue.put(index)
-
-    def worker_loop(worker_number: int) -> None:
-        while not abort_event.is_set():
-            try:
-                index = source_queue.get_nowait()
-            except queue.Empty:
-                return
-            try:
-                prepare_visual_unit(job, index, clips[index], settings, frame_bytes, frames_per_block, frame_buffer, abort_event, worker_number)
-            finally:
-                source_queue.task_done()
-
-    preparation_threads = [
-        threading.Thread(target=worker_loop, args=(worker_number,), name=f"gpu-visual-prepare-{job['jobId'][:8]}-{worker_number}", daemon=True)
-        for worker_number in range(parallel_workers)
-    ]
     print(f"[GPU Render] {job['jobId']} visual route: {render_route}", flush=True)
     print(
-        f"[GPU Render] {job['jobId']} visual scheduler: workers={parallel_workers} "
-        f"decoder_threads={ffmpeg_threads} block_frames={frames_per_block} "
-        f"lookahead_seconds={LOOKAHEAD_BUFFER_SECONDS}",
+        f"[GPU Render] {job['jobId']} visual scheduler: serial_direct "
+        f"decoder_threads={ffmpeg_threads}",
         flush=True,
     )
     emit("job_metric", jobId=job["jobId"], metric={
         "phase": "video_scheduler", "route": render_route,
         "details": {
-            "parallelClipWorkers": parallel_workers,
+            "visualPreparationMode": "serial_direct",
+            "parallelClipWorkersConfigured": int(settings.get("_parallelClipWorkers") or 1),
+            "parallelClipWorkersActive": 1,
             "decoderThreads": int(ffmpeg_threads),
             "providerAllocatedVcpus": int(settings.get("_providerAllocatedVcpus") or 0),
             "detectedVcpus": int(settings.get("_detectedVcpus") or 0),
             "effectiveVcpus": int(settings.get("_physicalVcpus") or 0),
-            "frameBlockFrames": frames_per_block,
-            "lookaheadBufferSeconds": LOOKAHEAD_BUFFER_SECONDS,
-            "bufferedBytesPerClip": buffered_bytes_per_clip,
         },
         "resource": {"cpuPercent": host_cpu_percent(), **gpu_stats(), **disk_stats()},
     })
     try:
         merge_gpu_peak(peak_gpu, gpu_stats())
-        for thread in preparation_threads:
-            thread.start()
         for index, clip in enumerate(clips):
             raise_if_cancelled(job["jobId"])
             clip_route = "cpu_filter_lanczos_nvenc"
             unit_started = time.monotonic()
             unit_duration = max(0.001, float(clip.get("sceneDuration") or 0.001))
-            unit_frames = 0
+            unit_bytes = 0
             last_progress_emit = 0.0
             last_gpu_sample = time.monotonic()
+            source_probe = probe_visual_clip(clip)
+            source_probe["targetFps"] = int(settings["fps"])
+            emit("job_metric", jobId=job["jobId"], metric={
+                "phase": "video_source_probe", "clipIndex": index,
+                "route": clip_route, "details": source_probe,
+                "resource": {"cpuPercent": host_cpu_percent(), **disk_stats()},
+            })
+            decoder = subprocess.Popen([
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-filter_threads", ffmpeg_threads,
+                *ffmpeg_video_decoder_args(clip, settings, False),
+                "-map", "0:v:0", "-an", "-vf", video_filter(clip, settings, False),
+                "-pix_fmt", "yuv420p", "-f", "rawvideo", "pipe:1",
+            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            register_process(job["jobId"], decoder)
+            print(
+                f"[GPU Render] {job['jobId']} prepare clip={index} serial_direct "
+                f"decoder_threads={ffmpeg_threads}",
+                flush=True,
+            )
+            emit("job_metric", jobId=job["jobId"], metric={
+                "phase": "video_prepare_started", "clipIndex": index,
+                "route": clip_route,
+                "details": {"decoderThreads": int(ffmpeg_threads), "mode": "serial_direct"},
+                "resource": {"cpuPercent": host_cpu_percent(), **disk_stats()},
+            })
             assert encoder.stdin is not None
-            while block := frame_buffer.take(index, lambda: raise_if_cancelled(job["jobId"])):
-                encoder.stdin.write(block)
-                unit_frames += len(block) // frame_bytes
-                written_frames += len(block) // frame_bytes
-                elapsed = max(0.001, time.monotonic() - unit_started)
-                if time.monotonic() - last_gpu_sample >= 1:
-                    merge_gpu_peak(peak_gpu, gpu_stats())
-                    last_gpu_sample = time.monotonic()
-                if time.monotonic() - last_progress_emit >= 1:
-                    rendered_duration = min(total_duration, completed_duration + min(unit_duration, unit_frames / settings["fps"]))
-                    progress = 20 + int((rendered_duration / total_duration) * 70)
-                    emit("job_progress", jobId=job["jobId"], progress=progress, phase="video", clipIndex=index)
-                    emit("job_metric", jobId=job["jobId"], metric={
-                        "phase": "video", "clipIndex": index, "route": clip_route,
-                        "renderFps": round(unit_frames / elapsed, 2), "outputFrames": written_frames,
-                        "details": {"timelineDurationSeconds": rendered_duration, "totalDurationSeconds": total_duration},
-                        "resource": {"cpuPercent": host_cpu_percent(), **gpu_stats(), **disk_stats()},
-                    })
-                    last_progress_emit = time.monotonic()
-            if error := frame_buffer.error(index):
-                raise RenderError(error)
+            try:
+                assert decoder.stdout is not None
+                while chunk := decoder.stdout.read(1024 * 1024):
+                    raise_if_cancelled(job["jobId"])
+                    encoder.stdin.write(chunk)
+                    unit_bytes += len(chunk)
+                    written_bytes += len(chunk)
+                    elapsed = max(0.001, time.monotonic() - unit_started)
+                    if time.monotonic() - last_gpu_sample >= 1:
+                        merge_gpu_peak(peak_gpu, gpu_stats())
+                        last_gpu_sample = time.monotonic()
+                    if time.monotonic() - last_progress_emit >= 1:
+                        unit_frames = unit_bytes // frame_bytes
+                        rendered_duration = min(total_duration, completed_duration + min(unit_duration, unit_frames / settings["fps"]))
+                        progress = 20 + int((rendered_duration / total_duration) * 70)
+                        emit("job_progress", jobId=job["jobId"], progress=progress, phase="video", clipIndex=index)
+                        emit("job_metric", jobId=job["jobId"], metric={
+                            "phase": "video", "clipIndex": index, "route": clip_route,
+                            "renderFps": round(unit_frames / elapsed, 2), "outputFrames": written_bytes // frame_bytes,
+                            "details": {"timelineDurationSeconds": rendered_duration, "totalDurationSeconds": total_duration},
+                            "resource": {"cpuPercent": host_cpu_percent(), **gpu_stats(), **disk_stats()},
+                        })
+                        last_progress_emit = time.monotonic()
+                stderr = decoder.stderr.read().decode("utf-8", errors="replace") if decoder.stderr else ""
+                if decoder.wait() != 0:
+                    raise RenderError(f"visual unit {index} failed: {stderr[-MAX_ERROR_DETAIL_CHARS:]}")
+            finally:
+                if decoder.poll() is None:
+                    decoder.terminate()
+                    try:
+                        decoder.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        decoder.kill()
+                unregister_process(job["jobId"], decoder)
             sample = gpu_stats()
             merge_gpu_peak(peak_gpu, sample)
             completed_duration += unit_duration
@@ -797,7 +810,7 @@ def render_video(job: dict[str, Any], audio: Path | None, work_dir: Path, use_gp
             emit("job_progress", jobId=job["jobId"], progress=progress, phase="video", clipIndex=index)
             emit("job_metric", jobId=job["jobId"], metric={
                 "phase": "video", "clipIndex": index, "route": clip_route,
-                "renderFps": round(unit_frames / elapsed, 2), "outputFrames": written_frames,
+                "renderFps": round((unit_bytes // frame_bytes) / elapsed, 2), "outputFrames": written_bytes // frame_bytes,
                 "details": {"timelineDurationSeconds": min(total_duration, completed_duration), "totalDurationSeconds": total_duration},
                 "resource": {"cpuPercent": host_cpu_percent(), **sample, **disk_stats()},
             })
@@ -813,10 +826,7 @@ def render_video(job: dict[str, Any], audio: Path | None, work_dir: Path, use_gp
     except BrokenPipeError as exc:
         raise RenderError(f"final encoder pipe failed: {exc}") from exc
     finally:
-        abort_event.set()
         terminate_registered_processes(job["jobId"])
-        for thread in preparation_threads:
-            thread.join(timeout=10)
         if encoder.stdin is not None and not encoder.stdin.closed:
             try:
                 encoder.stdin.close()
@@ -829,7 +839,7 @@ def render_video(job: dict[str, Any], audio: Path | None, work_dir: Path, use_gp
             except subprocess.TimeoutExpired:
                 encoder.kill()
         unregister_process(job["jobId"], encoder)
-    peak_gpu["renderFps"] = round(written_frames / max(0.001, time.monotonic() - video_started), 2)
+    peak_gpu["renderFps"] = round((written_bytes // frame_bytes) / max(0.001, time.monotonic() - video_started), 2)
     if audio is None:
         return output, peak_gpu
     muxed = work_dir / "output.mp4"
