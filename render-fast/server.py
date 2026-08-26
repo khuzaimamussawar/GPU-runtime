@@ -126,15 +126,6 @@ def timeline_frame_counts(clips: list[dict[str, Any]], fps: int) -> list[int]:
     return counts
 
 
-def endpoint_frame_padding(output_frames: int, expected_frames: int, last_frame: bytes | None) -> bytes | None:
-    """Resolve one fractional endpoint tick without hiding a broken source."""
-    if output_frames == expected_frames:
-        return None
-    if output_frames == expected_frames - 1 and last_frame:
-        return last_frame
-    raise RenderError(f"produced {output_frames} frames; expected {expected_frames}")
-
-
 class State:
     def __init__(self) -> None:
         self.lock = threading.RLock()
@@ -440,7 +431,17 @@ def video_filter(clip: dict[str, Any], settings: dict[str, Any], use_gpu_pipelin
         ]
     if str(clip.get("type") or "video") == "video" and speed != 1:
         filters.append(f"setpts=PTS/{speed}")
-    filters.extend([f"fps={fps}", f"trim=duration={duration}", "setpts=PTS-STARTPTS", "format=yuv420p"])
+    # Director timing is authoritative. Some generated/upscaled masters end a
+    # few source frames before their stored Director range. Hold the final
+    # decoded frame before the exact trim so those clips fill their timeline
+    # slot without shifting every following clip.
+    filters.extend([
+        f"fps={fps}",
+        "tpad=stop_mode=clone:stop=-1",
+        f"trim=duration={duration}",
+        "setpts=PTS-STARTPTS",
+        "format=yuv420p",
+    ])
     return ",".join(filters)
 
 
@@ -563,7 +564,6 @@ def prepare_visual_unit(
     decoder_threads = str(max(1, int(settings.get("_ffmpegThreads") or 1)))
     started = time.monotonic()
     output_frames = 0
-    last_frame: bytes | None = None
 
     def should_stop() -> None:
         if abort_event.is_set():
@@ -574,9 +574,9 @@ def prepare_visual_unit(
     try:
         # The rawvideo muxer otherwise preserves a source's native cadence on
         # some builds. Make the unit output contract explicit: one CFR frame
-        # for every frame reserved by this timeline clip. If a source ends on
-        # a fractional output-frame boundary, the worker copies its last raw
-        # frame once after FFmpeg finishes; -frames:v remains the hard cap.
+        # for every frame reserved by this timeline clip. The filter extends
+        # an exhausted source's final frame before trimming to Director time;
+        # -frames:v remains the hard cap.
         unit_filter = video_filter(clip, settings, False)
         decoder = subprocess.Popen([
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
@@ -605,15 +605,11 @@ def prepare_visual_unit(
                 raise RenderError(f"visual unit {index} emitted an incomplete raw frame block")
             frame_buffer.put(index, block, should_stop)
             output_frames += len(block) // frame_bytes
-            last_frame = block[-frame_bytes:]
         stderr = decoder.stderr.read().decode("utf-8", errors="replace") if decoder.stderr else ""
         if decoder.wait() != 0:
             raise RenderError(f"visual unit {index} failed: {stderr[-MAX_ERROR_DETAIL_CHARS:]}")
-        endpoint_frame = endpoint_frame_padding(output_frames, expected_frames, last_frame)
-        if endpoint_frame is not None:
-            frame_buffer.put(index, endpoint_frame, should_stop)
-            output_frames += 1
-            print(f"[GPU Render] {job_id} endpoint-padded clip={index} to {output_frames} frames", flush=True)
+        if output_frames != expected_frames:
+            raise RenderError(f"visual unit {index} produced {output_frames} frames; expected {expected_frames}")
         frame_buffer.close(index)
         elapsed = max(0.001, time.monotonic() - started)
         print(

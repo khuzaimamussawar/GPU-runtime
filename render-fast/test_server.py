@@ -21,11 +21,15 @@ class RenderFastSchedulerTests(unittest.TestCase):
         self.assertEqual(SERVER.timeline_frame_counts(clips, 48), [83, 15])
         self.assertEqual(sum(SERVER.timeline_frame_counts(clips, 48)), round(2.033 * 48))
 
-    def test_endpoint_padding_allows_only_one_missing_frame(self) -> None:
-        self.assertEqual(SERVER.endpoint_frame_padding(82, 83, b"last"), b"last")
-        self.assertIsNone(SERVER.endpoint_frame_padding(83, 83, b"last"))
-        with self.assertRaisesRegex(SERVER.RenderError, "produced 81 frames; expected 83"):
-            SERVER.endpoint_frame_padding(81, 83, b"last")
+    def test_video_filter_extends_source_before_exact_director_trim(self) -> None:
+        clip = {"type": "video", "sceneDuration": 1.75, "speed": 1}
+        settings = {"width": 1920, "height": 1080, "fps": 48}
+        filters = SERVER.video_filter(clip, settings).split(",")
+        fps_index = filters.index("fps=48")
+        pad_index = filters.index("tpad=stop_mode=clone:stop=-1")
+        trim_index = filters.index("trim=duration=1.75")
+        self.assertLess(fps_index, pad_index)
+        self.assertLess(pad_index, trim_index)
 
     def test_parallel_worker_profile_table(self) -> None:
         expected = {
@@ -119,7 +123,9 @@ class RenderFastSchedulerTests(unittest.TestCase):
         self.assertEqual(command[command.index("-fps_mode") + 1], "cfr")
         self.assertEqual(command[command.index("-r") + 1], "48")
         self.assertEqual(command[command.index("-frames:v") + 1], "72")
-        self.assertNotIn("tpad=", command[command.index("-vf") + 1])
+        unit_filter = command[command.index("-vf") + 1]
+        self.assertIn("tpad=stop_mode=clone:stop=-1", unit_filter)
+        self.assertLess(unit_filter.index("tpad="), unit_filter.index("trim=duration="))
 
 
 if __name__ == "__main__":
