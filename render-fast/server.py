@@ -466,11 +466,15 @@ def prepare_visual_unit(
 
     decoder: subprocess.Popen[bytes] | None = None
     try:
+        # The rawvideo muxer otherwise preserves a source's native cadence on
+        # some builds. Make the unit output contract explicit: one CFR frame
+        # for every frame reserved by this timeline clip.
         decoder = subprocess.Popen([
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
             "-filter_threads", decoder_threads,
             *ffmpeg_video_decoder_args(clip, settings, False),
             "-map", "0:v:0", "-an", "-vf", video_filter(clip, settings, False),
+            "-fps_mode", "cfr", "-r", str(settings["fps"]), "-frames:v", str(expected_frames),
             "-pix_fmt", "yuv420p", "-f", "rawvideo", "pipe:1",
         ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         register_process(job_id, decoder)

@@ -38,6 +38,9 @@ RUN curl -fsSL "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" -o 
     && /opt/ffmpeg/bin/ffmpeg -hide_banner -protocols | grep -qE '(^|[[:space:]])https([[:space:]]|$)' \
     && /opt/ffmpeg/bin/ffmpeg -hide_banner -encoders | grep -q h264_nvenc \
     && /opt/ffmpeg/bin/ffmpeg -hide_banner -encoders | grep -q hevc_nvenc \
+    && /opt/ffmpeg/bin/ffmpeg -hide_banner -loglevel error -y -f lavfi -i testsrc2=s=16x16:r=25 -t 1 -vf fps=48 -pix_fmt yuv420p -f rawvideo /tmp/fps-check.yuv \
+    && test "$(stat -c%s /tmp/fps-check.yuv)" -eq $((16 * 16 * 3 / 2 * 48)) \
+    && rm -f /tmp/fps-check.yuv \
     && rm -rf "/tmp/ffmpeg-${FFMPEG_VERSION}" /tmp/ffmpeg.tar.xz
 
 FROM nvidia/cuda:13.0.0-devel-ubuntu22.04

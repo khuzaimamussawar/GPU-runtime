@@ -84,6 +84,23 @@ class RenderFastSchedulerTests(unittest.TestCase):
         self.assertIsNone(buffer.take(0, lambda: None))
         self.assertIn("ffmpeg unavailable", buffer.error(0) or "")
 
+    def test_visual_unit_requests_exact_cfr_frame_budget(self) -> None:
+        buffer = SERVER.OrderedFrameBuffer(1, 1024)
+        job = {"jobId": "test-job"}
+        clip = {"type": "video", "url": "https://example.invalid/source.mp4", "sceneDuration": 1.5, "speed": 1}
+        settings = {"width": 2, "height": 2, "fps": 48, "_ffmpegThreads": 1}
+        process = mock.Mock()
+        process.stdout.read.side_effect = [b"",]
+        process.stderr.read.return_value = b""
+        process.wait.return_value = 0
+        process.poll.return_value = 0
+        with mock.patch.object(SERVER.subprocess, "Popen", return_value=process) as popen:
+            SERVER.prepare_visual_unit(job, 0, clip, settings, 6, 1, buffer, threading.Event(), 0)
+        command = popen.call_args.args[0]
+        self.assertEqual(command[command.index("-fps_mode") + 1], "cfr")
+        self.assertEqual(command[command.index("-r") + 1], "48")
+        self.assertEqual(command[command.index("-frames:v") + 1], "72")
+
 
 if __name__ == "__main__":
     unittest.main()
