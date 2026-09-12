@@ -90,17 +90,15 @@ class ImagePodRuntimeHardeningTests(unittest.TestCase):
             with self.assertRaises(media.ImageMediaError):
                 media.materialize_user_loras([with_size])
 
-    def test_krea_worker_materializes_random_seed(self):
+    def test_krea_worker_rejects_random_mode_without_resolved_seed(self):
         adapter = Krea2Adapter()
-        with mock.patch("src.image_pod.adapters.krea2.secrets.randbelow", return_value=123456789):
-            settings = adapter._normalize_settings({
+        with self.assertRaisesRegex(ValueError, "SceneBuilder must resolve random seed"):
+            adapter._normalize_settings({
                 "settings": {
                     "seedMode": "random",
                     "seed": None,
                 }
             })
-        self.assertEqual(settings["seedMode"], "random")
-        self.assertEqual(settings["seed"], 123456789)
 
     def test_krea_worker_preserves_fixed_seed(self):
         adapter = Krea2Adapter()
@@ -113,17 +111,15 @@ class ImagePodRuntimeHardeningTests(unittest.TestCase):
         self.assertEqual(settings["seedMode"], "fixed")
         self.assertEqual(settings["seed"], 424242)
 
-    def test_krea_worker_explicit_seed_wins_over_stale_random_mode(self):
+    def test_krea_worker_preserves_scene_resolved_random_seed(self):
         adapter = Krea2Adapter()
-        with mock.patch("src.image_pod.adapters.krea2.secrets.randbelow") as random_seed:
-            settings = adapter._normalize_settings({
-                "settings": {
-                    "seedMode": "random",
-                    "seed": 987654321,
-                }
-            })
-        random_seed.assert_not_called()
-        self.assertEqual(settings["seedMode"], "fixed")
+        settings = adapter._normalize_settings({
+            "settings": {
+                "seedMode": "random",
+                "seed": 987654321,
+            }
+        })
+        self.assertEqual(settings["seedMode"], "random")
         self.assertEqual(settings["seed"], 987654321)
 
     def test_krea_worker_preserves_legacy_explicit_seed_as_fixed(self):
@@ -134,8 +130,13 @@ class ImagePodRuntimeHardeningTests(unittest.TestCase):
 
     def test_krea_worker_rejects_fixed_seed_without_value(self):
         adapter = Krea2Adapter()
-        with self.assertRaisesRegex(ValueError, "fixed seed requires seed"):
+        with self.assertRaisesRegex(ValueError, "seed is required"):
             adapter._normalize_settings({"settings": {"seedMode": "fixed", "seed": None}})
+
+    def test_krea_worker_rejects_missing_seed_without_mode(self):
+        adapter = Krea2Adapter()
+        with self.assertRaisesRegex(ValueError, "seed is required"):
+            adapter._normalize_settings({"settings": {}})
 
     def test_idle_renew_extends_idle_and_recent_idle_expiry_only(self):
         state = server.ImagePodState()

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import secrets
 import subprocess
 import threading
 import time
@@ -11,7 +10,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable
 
-from krea2.runtime.workflow_builder import MAX_SAFE_SEED, load_and_prepare
+from krea2.runtime.workflow_builder import load_and_prepare
 from src.image_pod.media import (
     cleanup_job_inputs,
     finalize_image_outputs,
@@ -275,15 +274,12 @@ class Krea2Adapter:
         has_explicit_seed = seed_value is not None and not (
             isinstance(seed_value, str) and not seed_value.strip()
         )
-        if has_explicit_seed:
-            # An explicit seed always wins. This keeps manual user seeds deterministic
-            # even if an older/stale client accidentally leaves seedMode='random'.
-            settings["seedMode"] = "fixed"
-        elif seed_mode == "fixed":
-            raise ValueError("fixed seed requires seed")
-        else:
-            settings["seedMode"] = "random"
-            settings["seed"] = secrets.randbelow(MAX_SAFE_SEED + 1)
+        if not has_explicit_seed:
+            raise ValueError("seed is required; SceneBuilder must resolve random seed before pod submission")
+
+        # SceneBuilder owns seed resolution. The pod must consume the exact durable
+        # seed it receives and must never generate or replace one.
+        settings["seedMode"] = seed_mode or "fixed"
 
         if settings.get("width") is None:
             settings.pop("width", None)
