@@ -14,11 +14,9 @@ This file is the source of truth for the Krea 2 implementation. Runtime/provider
 
 - Primary model: **Krea 2 Turbo INT8 ConvRot**.
 - Runtime: **native ComfyUI Krea 2 support**; do not build a parallel Diffusers service for v1.
-- Text encoder: **Qwen3-VL-4B BF16**.
-  - Native Comfy Krea 2 explicitly uses Qwen3-VL-4B with Krea-specific hidden-state taps.
-  - Comfy-Org publishes `qwen3vl_4b_bf16.safetensors`; BF16 is therefore a supported/native encoder file, not a guessed conversion.
-  - Keep FP8 as a possible later memory profile, not the v1 default.
 - Diffusion checkpoint: `krea2_turbo_int8_convrot.safetensors`.
+- Text encoder: **Qwen3-VL-4B BF16** (`qwen3vl_4b_bf16.safetensors`).
+- Qwen3-VL-4B is the native Krea 2 text encoder family in the pinned Comfy build and supports image inputs as well as text.
 - Minimum GPU: **20 GB VRAM**.
 - One generation at a time per GPU for v1.
 - Providers: **RunPod Pods + Novita GPU instances**.
@@ -30,12 +28,12 @@ This file is the source of truth for the Krea 2 implementation. Runtime/provider
 - **No network disk.**
 - **No provider-mounted model storage.**
 - Runtime gets exactly **35 GB container/root filesystem disk**.
-- Model/encoder/VAE files are baked into the Docker image layers.
-- LoRAs are NOT baked into Docker and are NOT written to container disk.
-- LoRAs are read from R2 into CPU RAM and applied in memory.
-- Generated images use normal temporary runtime output only long enough to upload to project R2; do not create a persistent cache.
+- Krea model, Qwen encoder and VAEs are baked into Docker layers.
+- User/style LoRAs are **not baked into Docker**.
+- LoRAs may be cached on the 35 GB container disk after first R2 download.
+- Generated output may use normal temporary container files long enough to upload to project R2, then is cleaned.
 
-Provider configuration must therefore use:
+Provider configuration:
 
 ```text
 KREA2_POD_DISK_GB = 35
@@ -45,7 +43,16 @@ Novita: networkStorages = []
 RunPod: no network volume / volume mount
 ```
 
-A build-size gate is mandatory because 35 GB is hard, not aspirational. Target the final unpacked root filesystem at **<=31 GB** so approximately 4 GB remains for writable runtime state, Comfy temporary output, Python caches that escape cleanup, and safety headroom.
+Because LoRA cache now legitimately uses local container disk, do **not** reserve the entire remaining space for an imaginary persistent-free policy. Instead the final baked image must leave enough space for:
+
+```text
+Comfy input/output/temp
+one or more cached LoRAs
+atomic R2 downloads
+logs / small runtime scratch
+```
+
+Use a disk watermark/LRU policy rather than an absolute assumption that LoRAs never touch disk.
 
 ### VAE
 
@@ -53,20 +60,20 @@ User can select:
 
 ```text
 qwen_image   -> qwen_image_vae.safetensors
-wan_2_1      -> wan_2.1_vae.safetensors
+wan_2_1      -> selected Wan 2.1 VAE checkpoint
 ```
 
 Rules:
 
-- `qwen_image` is the default because it is the official/native Comfy Krea 2 VAE path.
-- `wan_2_1` is the alternate path and must pass our matched-seed canary before production exposure.
-- Use the compact ~254 MB Wan 2.1 VAE build, not a larger FP32 duplicate, unless the canary proves a reason to do otherwise.
-- The Qwen3-VL text encoder is independent from VAE choice. The same BF16 Qwen3-VL-4B conditioning can feed a job decoded with either supported VAE; VAE selection is a latent decode choice, not a text-encoder mode.
+- `qwen_image` is default because it is the official/native Krea 2 path.
+- `wan_2_1` is alternate and must pass matched-seed validation before normal production exposure.
+- The Qwen3-VL text encoder is independent from the VAE selection.
+- The same text conditioning can be used while choosing either supported VAE decode path.
 
 ### LoRAs
 
-- **0 to 3 LoRAs per generation.**
-- Existing R2 files stay exactly where they are:
+- **0 to 3 user-selected LoRAs per normal text-to-image generation.**
+- Existing R2 objects stay exactly where they are:
 
 ```text
 models/lora/krea2/MinimalisticVectorArtKrea2.safetensors
@@ -80,43 +87,41 @@ models/lora/krea2/minimalist_vector_art_thumbnail.png
 models/lora/krea2/dark_church_style_thumbnail.png
 ```
 
-- GPU runtime never downloads thumbnails.
-- GPU runtime never selects a LoRA by display name, slug or filename.
-- Every LoRA gets an immutable **D1 `lora_id`** (UUID/text primary key).
-- Browser/API requests use `loraId` only because two LoRAs may legitimately have the same visible name.
+- GPU runtime never identifies a LoRA by display name.
+- Every LoRA gets an immutable D1 `lora_id` (UUID/text primary key).
+- Browser/API requests use `loraId` because two LoRAs may have the same visible name.
 - Display names are explicitly **not unique**.
-- R2 object key identifies the physical asset after the Worker resolves a trusted D1 row.
-- Optional SHA-256 metadata may exist for integrity/debugging, but it is not the ID, filename or R2 naming scheme and is not required for the two existing objects.
+- R2 object key identifies the physical asset only after the Worker resolves a trusted D1 row.
+- Optional SHA-256 may exist as integrity/debug metadata; it is not the identity or naming scheme.
 
 ---
 
-## 2. Native ComfyUI Krea 2 facts we rely on
+## 2. Native ComfyUI Krea 2 baseline
 
-The pinned ComfyUI revision already used by H3 contains native Krea 2 support:
+Use the same tested Comfy revision currently used by H3 unless a Krea-specific canary proves a deliberate upgrade is required:
 
 ```text
 COMFYUI_COMMIT = 2a68ce33b4c9ea6ee4283e618a74560cefb32694
-Comfy revision label used by H3: v0.31.0-9-g2a68ce33
+H3 label: v0.31.0-9-g2a68ce33
 comfy-kitchen = 0.2.28
 ```
 
-That exact revision already contains:
+That revision already contains:
 
 - native `Krea2` model detection/model class;
 - native `CLIPType.KREA2`;
-- native Krea 2 Qwen3-VL-4B text encoder implementation;
+- Krea-specific Qwen3-VL-4B hidden-state conditioning;
+- Qwen3-VL image preprocessing;
 - INT8/ConvRot quantization support through `comfy-kitchen`;
-- CUDA backend path that expects cu130 or newer for the optimized quantized operations.
+- CUDA 13 optimized quantized backend support.
 
-Therefore v1 should use **the exact same pinned Comfy source artifact as H3**, not current moving `master`, unless a Krea-specific canary proves that we need to advance the shared pin.
-
-Do not install an older Comfy source from the base layer and call it final. Apply the immutable H3-style Comfy overlay **after the heavy Krea/Qwen/VAE layers**, as described below.
+Do not follow moving Comfy `master` in production.
 
 ---
 
 ## 3. CUDA / PyTorch / Python baseline
 
-Use the same proven software family as H3:
+Start with the same proven software family as H3:
 
 ```text
 CUDA: 13.0 / cu130
@@ -125,98 +130,84 @@ Python: 3.13 target
 Ubuntu: 24.04
 ```
 
-This is not just consistency: the pinned Comfy quantization code explicitly enables the optimized CUDA `comfy-kitchen` path on CUDA 13+ and warns that cu130 or newer is required for those optimized operations.
+Pinned Comfy quantization code enables the optimized `comfy-kitchen` CUDA path on CUDA 13+.
 
-### Final-image size rule
+Final image must be measured against the real 35 GB provider rootfs. Build stages may use a CUDA devel image if required, but prefer a matching CUDA 13 runtime image for the final stage when the ConvRot canary proves it works.
 
-The H3 base currently starts from a CUDA `devel` image. Krea has a hard 35 GB container disk and carries roughly:
+Remove build-only caches/artifacts from final layers:
 
 ```text
-Krea 2 Turbo INT8 ConvRot  ~13.5 GB
-Qwen3-VL-4B BF16           ~8.9 GB
-Qwen Image VAE             ~0.25 GB
-Wan 2.1 VAE                ~0.25 GB
------------------------------------
-model payload               ~22.9 GB
+apt lists
+pip cache
+HF cache
+git history
+compiler/build scratch
 ```
-
-So the Krea build should use a **multi-stage strategy**:
-
-- compilation/build stages may use CUDA 13 `devel` when required;
-- the final runtime should prefer the matching CUDA 13 cuDNN **runtime** base if the Krea/Comfy/comfy-kitchen canary passes;
-- PyTorch remains 2.13/cu130;
-- never trade correctness for size: if the slim runtime base fails a real ConvRot canary, retain the required runtime libraries and reduce size elsewhere;
-- remove apt lists, pip cache, git history, HF cache and builder artifacts from final layers.
-
-The 35 GB requirement never changes into a network-volume workaround.
 
 ---
 
-## 4. Docker layering: Comfy comes after the heavy Krea lineage
+## 4. Docker layering — simple Krea chain, no H3 two-Comfy workaround
 
-Use the same successful pattern as H3 `pod-models`: build an immutable Comfy artifact separately, then apply it after the heavyweight model lineage. This prevents a Comfy source update from forcing all model files to rebuild/redownload.
+Krea does **not** need H3's historical `comfyui-artifact -> core overlay` workaround. H3 needed that because Comfy had already been hard-coded too early in the old lineage and later had to be overlaid after the heavyweight model chain.
 
-Recommended graph:
+For Krea, place Comfy in the correct position from day one:
 
 ```text
 00 krea2-base
-   CUDA 13 + Python 3.13 + PyTorch 2.13/cu130 + system/runtime packages
-   NO final Comfy source dependency
+   CUDA 13 + Python + PyTorch 2.13/cu130 + system/runtime packages
 
-10 krea2-comfyui-artifact          (parallel small artifact)
-   fetch exact H3 COMFYUI_COMMIT
-   archive tracked Comfy source overlay
-   preserve/pin matching requirements incl. comfy-kitchen 0.2.28
-
-20 krea2-model-int8
+10 krea2-model-int8
    FROM krea2-base
-   add krea2_turbo_int8_convrot.safetensors
+   add Krea 2 Turbo INT8 ConvRot
 
-30 krea2-vaes
+20 krea2-vaes
    FROM krea2-model-int8
-   add qwen_image_vae.safetensors
-   add wan_2.1_vae.safetensors
+   add Qwen Image VAE
+   add selected Wan 2.1 VAE
 
-40 krea2-qwen-bf16
+30 krea2-qwen-bf16
    FROM krea2-vaes
-   add qwen3vl_4b_bf16.safetensors
+   add Qwen3-VL-4B BF16
 
-50 krea2-core
+40 krea2-comfyui
    FROM krea2-qwen-bf16
-   COPY/APPLY krea2-comfyui-artifact overlay here
-   install the pinned Comfy requirements
-   verify native Krea2 + ConvRot + KREA2 CLIP type
+   install/apply the exact pinned H3 Comfy commit
+   install matching requirements incl. comfy-kitchen 0.2.28
+   verify native Krea2 + KREA2 CLIP + ConvRot
 
-60 krea2-nodes
-   only SceneBuilder/Krea helper nodes actually required
-   includes in-memory R2 LoRA helper if implemented as a node
+50 krea2-nodes
+   only custom/helper nodes actually needed by Krea/SceneBuilder
+
+60 krea2-workflow
+   baked API workflows + manifests only
 
 70 krea2-runtime
-   job contract, R2 client, workflow patcher, output upload,
-   progress, cancellation, RAM cleanup
-
-80 krea2-workflow
-   baked API workflow + manifest only
-
-90 krea2-pod
-   HTTP pod server, readiness, lifecycle
+   LAST layer
+   pod HTTP server
+   job contract
+   R2 client
+   workflow patching
+   output upload
+   LoRA cache manager
+   memory cleanup/offload policy
+   progress/cancellation/readiness/idle lifecycle
 ```
 
-Consequences:
+Why:
 
-- Comfy update rebuilds `core` and later layers but **not** Krea/Qwen/VAE weight layers.
-- Node change rebuilds only `nodes` and later layers.
-- Runtime change rebuilds only `runtime` and later layers.
-- Workflow change rebuilds only `workflow` + `pod`.
-- LoRA addition/change rebuilds **nothing**.
+- changing Comfy does not redownload/rebuild Krea/Qwen/VAE parent layers;
+- changing nodes rebuilds only nodes/workflow/runtime;
+- changing workflow rebuilds workflow + runtime;
+- changing runtime rebuilds only the final runtime layer;
+- LoRA additions change D1/R2 only and rebuild nothing.
 
-Final image:
+This intentionally follows the useful part of the current H3 pod ordering — nodes, then workflows, then the final pod/runtime layer — without copying H3's two-Comfy retrofit structure.
+
+Final image target:
 
 ```text
 khuxaima/scenebuilder-krea2-pod:latest
 ```
-
-Add a final CI/build check that starts the final image, records `du`/filesystem use, and fails if the rootfs leaves insufficient headroom inside the 35 GB provider disk.
 
 ---
 
@@ -229,7 +220,7 @@ Add a dedicated workflow:
 krea2/scripts/remote_build.sh
 ```
 
-Mirror H3/Enhancer temporary builder behavior:
+Mirror H3/Enhancer temporary-builder behavior:
 
 ```text
 target
@@ -248,51 +239,78 @@ Recommended targets:
 
 ```text
 base
-comfyui-artifact
 model-int8
 vaes
 qwen-bf16
-core
+comfyui
 nodes
-runtime
 workflow
-pod
+runtime
 ```
 
-Push every successful parent to Docker Hub so later attempts reuse published parents instead of repeating heavyweight downloads.
+Push every successful parent to Docker Hub so later attempts reuse the heavyweight published parents.
 
 ---
 
 ## 6. Resolution contract
 
-SceneBuilder should use exact project-friendly 16:9 / 9:16 presets rather than expose Comfy's raw megapixel calculator to normal users.
+### What Krea 2 actually supports
 
-Lock these product presets initially:
+Krea 2 is not locked to one fixed image shape. The official open inference path accepts variable width/height in the 1K-to-2K operating range and pads dimensions to a multiple of 16 when needed. Native Comfy also exposes Krea 2 through a megapixel/aspect-ratio selector rather than a fixed 1024x1024-only graph.
+
+For SceneBuilder Storyboard, exact 16:9 / 9:16 and 16-pixel alignment are more important than reproducing Comfy's approximate 1.0 MP number exactly.
+
+### Recommended SceneBuilder presets
+
+Use:
 
 ```text
 1K landscape: 1280 x 720
 1K portrait:   720 x 1280
 
-2K landscape: 1920 x 1080
-2K portrait:  1080 x 1920
+2K landscape: 2048 x 1152
+2K portrait:  1152 x 2048
 ```
 
-Why:
+Reasons:
 
-- exact 16:9 / 9:16, matching Storyboard/project framing;
-- 1280x720 is the practical SceneBuilder "1K class" widescreen preset;
-- 1920x1080 is ~2.07 MP and stays under Krea's 2048-per-side practical 2K envelope;
-- both are multiples of 8 and avoid a post-generation crop just to restore project ratio.
+- all four are exact 16:9 / 9:16;
+- all four dimensions are divisible by 16, matching Krea's native padding/alignment expectation;
+- `1280x720` is ~0.92 MP and is a clean practical 1K-class Storyboard frame;
+- `2048x1152` is the clean true-2K-long-edge 16:9 preset;
+- no hidden 8/16-pixel pad is needed just to satisfy the model;
+- no post-generation crop is needed to restore Storyboard framing.
 
-For reference only, native Comfy's `ResolutionSelector` defines 1.0 MP as `1024*1024` total pixels. At 16:9 that calculator lands around 1368x768, and 2.0 MP around 1928x1088. SceneBuilder deliberately uses the cleaner exact-video presets above instead.
+### Why not 1368x768 as the product default
 
-Worker validates only approved presets for normal UI. Advanced/admin support for additional Krea-native aspect ratios can be added later without changing the runtime contract.
+Comfy's built-in megapixel selector calculates approximately `1368x768` for 16:9 around its 1.0 MP target because that utility rounds to its configured grid. That is a calculator artifact, not a special Krea training resolution.
+
+`1368x768` is also not an exact 16:9 16-pixel-aligned pair: 1368 is not divisible by 16. Krea can pad it internally, but SceneBuilder gains nothing from that hidden padding.
+
+Therefore:
+
+```text
+normal SceneBuilder 1K default = 1280x720 / 720x1280
+```
+
+Canary both `1280x720` and the Comfy-style ~1 MP shape once for quality comparison. If an actual quality regression appears at 1280x720, reconsider `1536x864` rather than adopting a slightly-off-ratio padded size.
+
+### Optional 2K performance preset
+
+If `2048x1152` is too slow/OOM-prone on qualified 20 GB cards, an intermediate exact 16:9 aligned preset can be exposed later:
+
+```text
+1792 x 1008
+1008 x 1792
+```
+
+Do not silently replace the requested 2K tier; route/escalate according to GPU policy.
 
 ---
 
-## 7. Sampling/settings contract: user controls the generation
+## 7. Sampling/settings contract — user controls generation
 
-Native Turbo defaults remain:
+Native Turbo defaults:
 
 ```text
 steps:     8
@@ -302,16 +320,15 @@ scheduler: simple
 denoise:   1.0
 seed:      random unless pinned
 VAE:       qwen_image
-LoRAs:     none
 ```
 
-These are defaults, **not hard-coded hidden constants**. The user can control:
+These are defaults, not hidden constants. Expose:
 
 ```text
 prompt
 prompt enhancement on/off
 negative prompt
-resolution tier / portrait-landscape preset
+resolution tier/orientation
 seed / random seed
 steps
 CFG
@@ -319,100 +336,108 @@ sampler
 scheduler
 denoise
 VAE
-0-3 LoRAs
+0-3 user LoRAs OR style-reference images
 strength for every selected LoRA
 ```
 
-### UI/API ranges
-
-Initial v1 advanced controls:
+Initial advanced ranges:
 
 ```text
 steps:       1-50, default 8
 cfg:         configurable, default 1.0
-sampler:     dropdown from our canary-approved Comfy sampler allowlist; Euler guaranteed
-scheduler:   dropdown from our canary-approved scheduler allowlist; simple guaranteed
+sampler:     tested allowlist; Euler guaranteed
+scheduler:   tested allowlist; simple guaranteed
 denoise:     0.0-1.0, default 1.0
 seed:        explicit integer or random
-VAE:         qwen_image | wan_2_1 after Wan canary passes
+VAE:         qwen_image | wan_2_1 after Wan canary
 ```
-
-Do not silently accept arbitrary sampler/scheduler strings. The user controls them through an allowlisted dropdown so saved jobs stay reproducible on our pinned image.
 
 ### Negative prompt
 
-The official/native Turbo graph uses:
+Native Turbo default uses zeroed negative conditioning. At `CFG=1`, a text negative prompt is effectively inactive.
 
-```text
-positive conditioning
-  -> ConditioningZeroOut
-  -> KSampler negative
-```
+SceneBuilder can expose negative prompt as advanced:
 
-At default `CFG = 1.0`, negative guidance is effectively inactive; this is the native Turbo/no-guidance behavior.
+- CFG 1 -> show it as inactive/no effect;
+- CFG > 1 -> encode supplied negative text and use it as guided negative conditioning;
+- benchmark this separately because Turbo is distilled around the native low/no-guidance behavior.
 
-SceneBuilder can still expose a negative-prompt field as an advanced control:
+### Prompt enhancement
 
-- at CFG 1, show it as **inactive / no effect**;
-- when the user raises CFG above the native default, the runtime may encode the supplied negative text with the same Krea text encoder and feed it to KSampler;
-- this guided/negative mode must be included in the Krea canary matrix because Turbo is distilled for the low/no-guidance path and higher CFG can change quality.
-
-Do not pretend negative prompting is a native-default Turbo feature when CFG is 1.
-
-### Prompt control
-
-Always send the raw user prompt in the durable job snapshot.
-
-If we enable native Krea/Comfy prompt enhancement, expose it explicitly:
-
-```text
-promptEnhance: true | false
-```
-
-Do not overwrite the user's stored raw prompt with an enhanced string. Store both raw prompt and effective/enhanced prompt in execution metadata when enhancement is used so regeneration is reproducible.
+Always persist the raw user prompt. If enhancement is enabled, also persist the effective/enhanced prompt in execution metadata. Regeneration must never lose the original prompt.
 
 ---
 
-## 8. LoRA IDs, compatibility and steps
+## 8. Two mutually exclusive style paths in v1
 
-Browser payload uses immutable D1 IDs:
-
-```json
-"loras": [
-  { "loraId": "7c5d...uuid...", "strength": 0.8 },
-  { "loraId": "1a03...uuid...", "strength": 0.65 }
-]
-```
-
-Never use this as identity:
+SceneBuilder v1 uses one of two style modes per generation:
 
 ```text
-display name
-slug
-filename
-thumbnail name
-R2 key supplied by browser
+A. user LoRA mode
+   1-3 user-selected D1 LoRA IDs
+   no style-reference images
+
+B. style-reference mode
+   no user-selected LoRA
+   1-3 style-reference images
+   runtime uses the dedicated internal Krea style-reference adapter/workflow
 ```
 
-### Important: "LoRA steps"
+This matches the product rule: **if there is no user LoRA, style images may be sent instead.**
 
-For v1, LoRAs use native/model patching at a constant strength for the whole generation. There is **no invented per-LoRA start-step/end-step scheduler**.
+Do not combine arbitrary user LoRAs + style-reference images in v1; add that only after a dedicated memory/quality canary.
 
-D1 stores:
+### Internal style-reference adapter
 
-```text
-min_steps
-max_steps
-recommended_steps
-```
+The official/native Krea style-reference workflow uses `krea2_style_reference.safetensors` internally. Treat it as a hidden/system LoRA:
 
-These describe which **global generation `steps` value** the LoRA is validated for. The user controls the global steps field. The LoRA picker can show the recommended value/range and the Worker validates the combination.
-
-If we later want per-LoRA start/end sampling schedules, that is a separate feature requiring a tested scheduling patch/node and should not be confused with compatibility metadata.
+- not visible as a user-selectable style LoRA;
+- not baked into Docker;
+- registered as an internal D1 `lora` row or trusted runtime asset;
+- downloaded from R2 and cached on container disk like other LoRAs;
+- automatically applied by the style-reference workflow;
+- does not count as one of the user's 0-3 visible LoRA selections because style-reference mode requires zero user LoRAs.
 
 ---
 
-## 9. Generic D1 LoRA catalog
+## 9. Style-reference image dimensions
+
+Style images do **not** need to match:
+
+```text
+each other
+output resolution
+output aspect ratio
+```
+
+Do not stretch/crop every reference to `1280x720` or `2048x1152` just because that is the output frame.
+
+Native Qwen3-VL image preprocessing handles every image independently. In the pinned Comfy implementation the Krea Qwen3-VL path uses patch size 16 and the generic Qwen vision preprocessing rounds each image independently to its required grid while approximately preserving its source aspect ratio. Native Krea also processes reference latents individually before concatenating their tokens.
+
+Runtime policy:
+
+```text
+1. EXIF-orient
+2. convert to RGB
+3. preserve source aspect ratio
+4. do not force output aspect ratio
+5. only downscale if source is unreasonably large for our 20 GB policy
+6. let the pinned native Krea/Comfy workflow perform its own model alignment
+```
+
+Initial safety cap for very large uploaded references should be canary-driven. Start by testing 1-3 mixed references such as:
+
+```text
+square + landscape + portrait
+1024x1024 + 1280x720 + 720x1280
+odd user dimensions that are not multiples of 16/32
+```
+
+The acceptance condition is that mixed-size references work without pre-cropping and without avoidable OOM.
+
+---
+
+## 10. Generic D1 LoRA catalog
 
 Create one generic catalog for future image and video LoRAs.
 
@@ -438,6 +463,7 @@ CREATE TABLE IF NOT EXISTS lora (
 
     enabled INTEGER NOT NULL DEFAULT 1,
     visibility TEXT NOT NULL DEFAULT 'private',
+    is_internal INTEGER NOT NULL DEFAULT 0,
 
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
@@ -446,17 +472,16 @@ CREATE TABLE IF NOT EXISTS lora (
 
 Notes:
 
-- `id` is an immutable generated UUID/text ID and is what UI/API jobs persist.
+- `id` is immutable generated UUID/text and is what UI/API jobs persist.
 - `display_name` is **not unique**.
-- Two or twenty LoRAs may share the same visible name.
-- `r2_object_key` is unique because it identifies the physical stored asset.
+- two LoRAs may have the same visible name.
+- `r2_object_key` identifies one physical stored asset.
 - `thumbnail_object_key` is UI-only.
-- `sha256` is optional metadata, not identity.
+- `sha256` is optional integrity metadata, not identity.
 - `lora_type`: `image | video | both`.
+- `is_internal=1` hides system adapters such as Krea style-reference from normal UI catalogs.
 
 ### `lora_model_support`
-
-Normalize quantization into the compatibility key instead of hiding it in a JSON list:
 
 ```sql
 CREATE TABLE IF NOT EXISTS lora_model_support (
@@ -481,81 +506,192 @@ CREATE TABLE IF NOT EXISTS lora_model_support (
 );
 ```
 
-Examples for `quantization`:
+This allows one physical R2 asset to support multiple models/quantizations without duplication.
 
-```text
-int8_convrot
-bf16
-fp8_scaled
-*
-```
-
-Examples for `apply_target`:
-
-```text
-model_only
-clip_only
-model_and_clip
-```
-
-This allows the same physical R2 file to support multiple future models/quantizations without duplicating it.
-
-Seed the two existing Krea files with two newly generated immutable `lora.id` values. Do not infer the IDs from their display names.
+Seed the two existing user LoRAs with generated immutable IDs. Also register the Krea style-reference adapter as hidden/internal if style-reference mode is enabled.
 
 ---
 
-## 10. LoRA runtime: R2 -> CPU RAM -> Comfy patch
+## 11. LoRA disk + RAM cache policy
 
-Hard requirement: **no LoRA safetensors file on container disk**.
+The earlier RAM-only assumption is removed.
 
-Flow:
+### Disk cache
+
+Use container disk as a bounded local LoRA cache:
+
+```text
+/opt/scenebuilder-krea2/cache/loras/<lora_id>.safetensors
+```
+
+Use D1 `lora_id` for cache identity, not display name or original filename, so same-name LoRAs cannot collide.
+
+Flow on first use:
 
 ```text
 browser loraId
-  -> SceneBuilder D1 lora row
-  -> D1 lora_model_support row
-  -> validate model/quantization/steps/strength/enabled
-  -> Worker sends trusted descriptor with exact R2 object key
-  -> Pod R2 GetObject
-  -> bytes in host RAM
-  -> safetensors.torch.load(bytes)
-  -> CPU tensors/state dict
-  -> comfy.sd.load_lora_for_models(...)
-  -> patched MODEL (and CLIP only if catalog explicitly requires it)
+ -> Worker resolves D1 row/support
+ -> pod gets trusted loraId + R2 object key
+ -> if valid cached file exists: reuse
+ -> otherwise R2 GetObject to temporary .part file
+ -> verify expected size and optional sha256 when available
+ -> atomic rename to <lora_id>.safetensors
+ -> load tensors/state dict
 ```
 
-For normal Krea style LoRAs, default:
+The browser never supplies a filesystem path or arbitrary R2 key.
+
+### Hot RAM cache
+
+Keep the currently useful LoRA tensor/state dict in CPU RAM when a job completes if memory pressure is acceptable.
+
+Key hot cache by the immutable asset identity/version, e.g.:
 
 ```text
-model strength = requested strength
-clip strength = 0
-apply_target = model_only
+lora_id + object version/etag or sha256 when known
 ```
 
-Apply at most three in deterministic request order.
+Do **not** key by strength. The same parsed LoRA tensors can be reapplied at a different strength on the next job.
 
-After patch creation:
+If the next job uses the same LoRA set:
 
-- release raw object byte buffers;
-- release unneeded temporary dictionaries;
-- allow Comfy's model/offload machinery to retain only the CPU patch tensors needed by the current model;
-- clear job-owned LoRA state on cancellation/failure;
-- optional warm in-process RAM cache is allowed only with a strict RAM cap/LRU; it is never correctness-critical.
+```text
+reuse hot CPU tensors
+avoid rereading from disk/R2
+repatch at requested strengths
+```
 
-If a future Comfy API absolutely requires a path, `/dev/shm`/tmpfs is the only fallback. Normal implementation is direct memory loading.
+If the next job uses different LoRAs:
+
+```text
+release old LoRA tensors from RAM as needed
+leave their safetensors in bounded disk cache
+load new LoRA from disk cache or R2
+```
+
+### Disk eviction
+
+Because root disk is only 35 GB, use disk watermarks/LRU:
+
+```text
+never evict baked model/encoder/VAE assets
+never evict an active job's LoRA
+prefer deleting oldest unused LoRA cache files first
+redownload from R2 later when needed
+```
+
+Exact cache budget is set after final-image size is measured. It must be dynamic from actual free disk, not a hard-coded fantasy capacity.
 
 ---
 
-## 11. Native workflow / manifest
+## 12. Model/encoder/VAE warm-memory policy
 
-Files:
+The expensive **Krea model and Qwen text encoder are what we mean by CPU offload**.
+
+Goal after a completed job:
+
+```text
+VRAM: job-specific allocations cleared / mostly idle
+CPU RAM: keep reusable Krea model + Qwen encoder + selected VAE/model objects where safe
+Disk: baked checkpoints remain; LoRA safetensors cache remains
+```
+
+Do not reload 13+ GB Krea and ~9 GB Qwen from container storage for every job if the pod remains warm.
+
+### Job sequence on constrained GPU
+
+```text
+1. obtain Qwen from warm CPU state or load once from baked disk
+2. move required encoder portions to GPU
+3. encode prompt and optional style-reference image conditioning
+4. move/offload Qwen back to CPU RAM
+5. clear reclaimable CUDA allocator cache
+6. obtain Krea from warm CPU state or load once from baked disk
+7. move/stream required Krea weights to GPU under Comfy memory manager
+8. obtain user/internal LoRAs from hot RAM or local disk/R2 cache
+9. patch Krea model
+10. sample
+11. activate selected VAE, decode
+12. upload result
+13. remove job temp input/output
+14. retain reusable model objects/weights in CPU RAM
+15. retain useful hot LoRA tensors in CPU RAM if within cap
+16. clear job-specific GPU allocations/cache
+```
+
+### Comfy cleanup semantics
+
+Do **not** use a cleanup action equivalent to `unload_models=true` after every job because that defeats warm reuse and can unload model state from RAM.
+
+Desired idle cleanup is equivalent to:
+
+```text
+free cached/reclaimable GPU memory
+keep reusable model objects/offload state
+```
+
+Use the pinned Comfy memory manager and, where appropriate, `/free` with `free_memory=true` but **without** `unload_models=true`. Canary the exact behavior on the pinned revision and add a small helper if we need an explicit GPU->CPU offload while preserving warm host state.
+
+On real host-memory pressure, evict in this order:
+
+```text
+old hot LoRA tensors
+inactive VAE state
+text encoder warm state
+Krea warm state last
+```
+
+All baked assets remain available on container disk for reload.
+
+---
+
+## 13. Enhancer engine pattern to copy
+
+Enhancer's TensorRT runtime already demonstrates the warm-worker pattern we want conceptually:
+
+```text
+_ENGINE_CACHE
+  keeps deserialized TensorRT engine objects across jobs
+
+_EXECUTION_CACHE
+  keeps job/use execution context + CUDA stream
+```
+
+At job end Enhancer releases the execution contexts/CuPy pool and calls `torch.cuda.empty_cache()`, but it does **not** evict the process-level `_ENGINE_CACHE`. The next job therefore avoids downloading/deserializing the same engine again while job-specific GPU workspace is reclaimed.
+
+Krea analogue:
+
+```text
+persistent/warm CPU cache:
+  Krea model object/weights
+  Qwen model object/weights
+  VAE objects
+  current LoRA tensor states
+
+job-specific GPU state:
+  activations
+  execution tensors
+  sampler state
+  temporary patches/workspaces
+```
+
+At job completion, reclaim the second category while preserving the first as host RAM allows.
+
+---
+
+## 14. Native workflows / manifests
+
+Use two explicit API workflows rather than dynamically mutating one giant graph:
 
 ```text
 krea2/workflows/krea2_turbo.json
+krea2/workflows/krea2_style_reference.json
+
 krea2/workflows/manifests/krea2_turbo.json
+krea2/workflows/manifests/krea2_style_reference.json
 ```
 
-Baseline graph:
+### Normal text/LoRA workflow
 
 ```text
 UNETLoader
@@ -565,45 +701,39 @@ CLIPLoader
   qwen3vl_4b_bf16.safetensors
   type = krea2
 
-SceneBuilder in-memory MODEL LoRA patch chain (0-3)
-
+SceneBuilder MODEL LoRA patch chain (0-3)
 CLIPTextEncode positive
-optional CLIPTextEncode negative when guided advanced mode is active
-otherwise ConditioningZeroOut for native Turbo default
-
+optional guided negative encode, otherwise ConditioningZeroOut
 EmptyLatentImage
 KSampler
-VAELoader / selected VAE
+VAELoader selected VAE
 VAEDecode
 SaveImage / runtime output
 ```
 
-Manifest patch points:
+### Style-reference workflow
+
+Start from the official/native Krea style-reference graph behavior:
 
 ```text
-prompt
-negativePrompt / negative mode
-width
-height
-seed
-steps
-cfg
-sampler
-scheduler
-denoise
-diffusionModel
-textEncoder
-vae
-outputPrefix
+1-3 style images
+internal krea2_style_reference adapter
+Krea INT8 model
+Qwen3-VL-4B BF16
+selected VAE
+prompt / optional prompt enhancement
+seed / width / height
+native reference latent conditioning
+sampling / decode / output
 ```
 
-LoRA descriptors are resolved before workflow execution and never expose arbitrary filenames to the browser.
+Do not rewrite the reference algorithm before reproducing the official workflow successfully.
 
 ---
 
-## 12. Provider-neutral payload
+## 15. Provider-neutral payload
 
-Example:
+Normal LoRA example:
 
 ```json
 {
@@ -616,9 +746,9 @@ Example:
   "width": 1280,
   "height": 720,
   "settings": {
+    "styleMode": "lora",
     "resolutionTier": "1k",
     "seed": 12345,
-    "randomSeed": false,
     "steps": 8,
     "cfg": 1.0,
     "sampler": "euler",
@@ -637,28 +767,60 @@ Example:
 }
 ```
 
-The Worker writes the immutable request snapshot into the existing durable image job metadata before dispatch.
+Style-reference example:
+
+```json
+{
+  "jobId": "job_124",
+  "projectId": "proj_123",
+  "taskFamily": "krea2_image",
+  "model": "krea-2-turbo",
+  "prompt": "...",
+  "width": 1280,
+  "height": 720,
+  "settings": {
+    "styleMode": "reference_images",
+    "seed": 12345,
+    "steps": 8,
+    "cfg": 1.0,
+    "sampler": "euler",
+    "scheduler": "simple",
+    "denoise": 1.0,
+    "vae": "qwen_image",
+    "loras": []
+  },
+  "inputs": {
+    "styleImages": [
+      { "objectKey": "projects/proj_123/style/a.png" },
+      { "objectKey": "projects/proj_123/style/b.jpg" }
+    ],
+    "outputPrefix": "projects/proj_123/images/generated"
+  }
+}
+```
+
+Worker validates `styleMode`: user LoRAs and style images are mutually exclusive in v1.
 
 ---
 
-## 13. Attention implementation: no SageAttention / FlashAttention dependency in v1
+## 16. Attention implementation
 
-Do **not** add SageAttention, FlashAttention or a special attention custom node to the Krea v1 image.
+Do **not** add SageAttention, FlashAttention or special Krea attention nodes in v1.
 
-Native Comfy Krea 2 calls Comfy's core `optimized_attention_masked` path. With PyTorch 2.13/cu130 and the pinned Comfy stack, use the normal Comfy/PyTorch optimized attention selection plus `comfy-kitchen` for INT8 ConvRot.
+Native Krea 2 uses Comfy's core optimized attention path. Start with:
 
-Reasons:
+```text
+PyTorch 2.13/cu130
+pinned Comfy
+comfy-kitchen INT8 ConvRot
+native Comfy attention selection
+```
 
-- no Krea-specific Sage/Flash requirement exists in the native model path;
-- fewer compiled packages means less image size and fewer GPU-architecture compatibility problems;
-- 35 GB disk budget benefits from avoiding unnecessary compiled stacks;
-- we already need per-GPU ConvRot qualification; do not add another optimization variable before baseline measurements.
-
-Only add an alternate attention backend later if a controlled benchmark proves a meaningful benefit on the exact RunPod/Novita GPU classes and it does not break portability.
+Only add an alternate backend after controlled benchmarks on actual RunPod/Novita GPU classes prove a benefit.
 
 ---
 
-## 14. GPU policy
+## 17. GPU policy
 
 Reuse the Enhancer GPU catalog and nominal-VRAM tolerance.
 
@@ -670,7 +832,7 @@ Eligible RunPod classes begin with existing >=20 GB catalog entries such as RTX 
 
 Current Novita candidates are 4090, 5090, RTX 6000 Ada and L40S.
 
-Every GPU class still requires a Krea canary because INT8 ConvRot speed/behavior can differ by architecture.
+Every GPU class requires a Krea canary because INT8 ConvRot behavior varies by architecture.
 
 OOM escalation:
 
@@ -678,36 +840,13 @@ OOM escalation:
 20 GB -> 24 GB -> 32 GB -> 48 GB
 ```
 
-Never repeat the same failed VRAM tier indefinitely.
+Do not repeatedly retry the same failed tier.
+
+Host RAM matters because warm CPU offload is intentional. Initial qualification target remains >=32 GB host RAM, with larger RAM preferred when available.
 
 ---
 
-## 15. VRAM / host-RAM sequence
-
-BF16 Qwen3-VL-4B is intentionally larger than the FP8 encoder, so constrained GPUs must not keep everything resident unnecessarily.
-
-Sequence:
-
-```text
-1. prepare Qwen3-VL-4B BF16
-2. encode positive prompt (and negative only if guided mode is active)
-3. finish optional prompt-enhancement work
-4. offload/unload text encoder from VRAM
-5. free reclaimable CUDA cache
-6. load/activate Krea INT8 model
-7. fetch/apply requested LoRAs from R2 into CPU RAM
-8. sample
-9. load/activate selected VAE as required
-10. decode
-11. upload output
-12. clear job-specific RAM/VRAM state while leaving reusable base model state where safe
-```
-
-Initial host-RAM target remains at least 32 GB; prefer larger host RAM where provider inventory makes it cheap, especially because LoRAs are intentionally RAM-only.
-
----
-
-## 16. RunPod / Novita lifecycle
+## 18. RunPod / Novita lifecycle
 
 Follow H3/Enhancer GPU-instance provisioning rather than older endpoint-per-GPU serverless routing.
 
@@ -750,6 +889,7 @@ allocating
 cold_start
 preparing_model
 loading_loras
+loading_style_references
 encoding_prompt
 generating
 decoding
@@ -759,11 +899,11 @@ failed
 cancelled
 ```
 
-One active job per GPU for v1. Warm workers can accept later Krea jobs until idle expiry.
+One active job per GPU for v1. Warm workers accept later Krea jobs until idle expiry.
 
 ---
 
-## 17. SceneBuilder2 integration
+## 19. SceneBuilder2 integration
 
 Reuse the current image-generation path:
 
@@ -781,47 +921,35 @@ CharacterScreen / Storyboard
 
 Do not create a second browser polling protocol.
 
-Extend `image_generation_jobs` only with generic GPU-routing/snapshot fields if missing, such as:
-
-```text
-requested_provider
-actual_provider
-pod_worker_id
-settings_json
-provider_detail_json
-attempt_log_json
-started_at
-heartbeat_at
-```
-
-Persist in `settings_json`:
+Persist an immutable settings snapshot containing:
 
 ```text
 model key + quantization
 resolution tier + width/height
 raw prompt
 promptEnhance flag
-effective/enhanced prompt when used
+effective/enhanced prompt
 negative prompt
-seed/random-seed
+seed
 steps/cfg/sampler/scheduler/denoise
 VAE
 text encoder profile
-ordered loraId + strength list
+styleMode
+ordered user loraId + strength list OR style image object keys
 requested compute backend
 ```
 
-Shared UI component:
+Shared UI LoRA component:
 
 ```text
 <LoraSelector modelKey="krea-2-turbo" maxSelected={3} />
 ```
 
-Catalog results return `id` plus display metadata. The UI renders names/thumbnails but persists IDs.
+When at least one user LoRA is selected, style-image controls are disabled for v1. When zero user LoRAs are selected, the user may choose/upload 1-3 style images.
 
 ---
 
-## 18. D1/catalog API behavior
+## 20. D1/catalog API behavior
 
 Conceptual query:
 
@@ -829,7 +957,7 @@ Conceptual query:
 GET /api/loras?model=krea-2-turbo&quantization=int8_convrot&type=image
 ```
 
-Return:
+Return normal user-visible rows only:
 
 ```text
 id
@@ -845,24 +973,24 @@ maxSteps
 recommendedSteps
 ```
 
-Never return runtime credentials. Never let browser-provided `displayName` or R2 key control which safetensors object is loaded.
+Internal adapters are excluded from normal catalog response.
 
-Worker resolves `loraId` again at dispatch time so a stale/forged browser payload cannot bypass compatibility rules.
+Worker resolves `loraId` again at dispatch time so stale/forged browser data cannot bypass compatibility rules.
 
 ---
 
-## 19. Tests / canaries
+## 21. Tests / canaries
 
 ### Build/runtime
 
 ```text
-final rootfs fits 35 GB disk with >=4 GB target headroom
+35 GB rootfs policy respected
 no network volume configured
 CUDA 13 visible
 PyTorch 2.13 + cu130
-same pinned H3 Comfy commit applied after heavy layers
+pinned H3 Comfy commit installed after heavy Krea/Qwen/VAE layers
 comfy-kitchen 0.2.28 present
-native Krea2 model recognized
+native Krea2 recognized
 Qwen3-VL-4B KREA2 CLIP recognized
 ConvRot backend works
 no SageAttention/FlashAttention dependency
@@ -875,53 +1003,76 @@ Matched prompt/seed/settings:
 ```text
 1280x720
 720x1280
-1920x1080
-1080x1920
+1368x768 comparison only
+2048x1152
+1152x2048
+1792x1008 fallback/performance comparison
 ```
 
-Record VRAM, RAM, generation time and decode time.
+Record quality, VRAM, RAM, generation time and hidden padding behavior.
+
+### Style-reference matrix
+
+```text
+1 style image
+2 style images
+3 style images
+square + landscape + portrait in same request
+mixed dimensions
+odd non-aligned dimensions
+zero user LoRAs enforced
+internal style-reference adapter auto-loaded
+```
+
+Verify references are not stretched/cropped to output aspect ratio unless the native workflow itself requires it.
 
 ### VAE matrix
-
-Same seed/prompt/resolution:
 
 ```text
 Qwen Image VAE
 Wan 2.1 VAE
 ```
 
-Compare correctness, color, detail, artifacts, decode time and memory. Wan is not exposed to normal users until this passes.
+Same prompt/seed/resolution. Compare correctness, color, detail, artifacts, decode time and memory.
 
-### Settings matrix
-
-At minimum verify:
-
-```text
-8 / CFG1 / Euler / simple / denoise1 native default
-custom seed
-random seed
-custom steps
-custom CFG
-approved alternate sampler/scheduler entries
-negative prompt inactive at CFG1
-guided negative-prompt mode when CFG is raised
-prompt enhancement on/off if enabled
-```
-
-### LoRA matrix
+### LoRA cache matrix
 
 ```text
 0 LoRA
 MinimalisticVectorArt only
 Darkchurch only
-both existing LoRAs together
-3-LoRA test when a third compatible asset exists
-same display name on two different D1 IDs -> correct asset selected by ID
+both together
+3-LoRA test when available
+same display name on two different D1 IDs -> correct asset selected
 invalid ID rejected
-4 LoRAs rejected
-step incompatibility rejected/warned according to catalog policy
-strength outside allowed range rejected
-no LoRA safetensors written to container disk
+4 user LoRAs rejected
+first R2 download -> disk cache
+second same-LoRA job -> hot RAM reuse when available
+same asset different strength -> reuse tensors, repatch strength
+new LoRA -> old hot tensors evictable, disk cache retained
+cache watermark/LRU deletes oldest unused file when needed
+```
+
+### Warm-memory lifecycle
+
+After every job record:
+
+```text
+VRAM allocated/reserved
+host RAM
+which model objects remain warm
+which LoRA states remain hot
+local disk cache bytes
+```
+
+Verify:
+
+```text
+job-specific GPU memory is released
+Krea/Qwen do not reload from disk unnecessarily on warm next job
+same LoRA can reuse CPU tensors
+new LoRA can replace hot tensors without losing disk cache
+memory pressure can evict warm states safely
 ```
 
 ### Provider matrix
@@ -949,78 +1100,88 @@ R2 output upload failure
 20 -> 24 -> 32 -> 48 OOM escalation
 warm reuse
 idle deletion
-RAM cleanup after cancelled/failed LoRA job
+GPU cleanup without destroying useful host-RAM warm cache
 ```
 
 ---
 
-## 20. Rollout order
+## 22. Rollout order
 
-### Phase 1 - image/runtime proof
+### Phase 1 — base runtime
 
-1. Build slim CUDA 13/PyTorch 2.13 Krea base.
-2. Build the parallel pinned Comfy artifact using the exact H3 Comfy commit.
-3. Build Krea INT8 -> both VAEs -> BF16 Qwen heavy chain.
-4. Apply the pinned Comfy overlay after those heavy layers.
-5. Verify final image fits the 35 GB disk policy.
-6. Reproduce native Turbo 8 / CFG1 / Euler / simple / denoise1.
-7. Test all four SceneBuilder resolution presets.
-8. Pass a 20 GB worker canary with Qwen offload.
+1. Build CUDA 13/PyTorch 2.13 base.
+2. Build Krea INT8 -> both VAEs -> BF16 Qwen heavy chain.
+3. Add the pinned H3 Comfy revision **after** the heavy model layers.
+4. Add nodes -> workflow -> final runtime.
+5. Verify final image fits 35 GB provider disk with usable LoRA/temp headroom.
+6. Reproduce native Turbo defaults.
+7. Canary `1280x720`, `720x1280`, `2048x1152`, `1152x2048`.
+8. Pass 20 GB worker canary with CPU offload.
 
-### Phase 2 - RAM-only LoRAs
+### Phase 2 — warm memory lifecycle
+
+1. Keep Krea/Qwen/VAE model objects warm in CPU RAM after jobs.
+2. Clear job GPU allocations/cache without full model unload.
+3. Validate second-job warm latency and host RAM.
+4. Add pressure-aware CPU eviction policy.
+
+### Phase 3 — D1 + LoRA cache
 
 1. Create generic `lora` + `lora_model_support` schema.
-2. Seed the two existing R2 LoRAs with immutable UUID IDs.
-3. Implement R2 -> RAM -> `load_lora_for_models`.
-4. Test 0-3 LoRAs and name collisions.
-5. Prove no LoRA file appears on container disk.
+2. Seed two existing R2 LoRAs with immutable IDs.
+3. Implement trusted R2 -> local disk cache.
+4. Implement hot CPU tensor cache for current LoRAs.
+5. Add dynamic disk watermark/LRU.
+6. Test 0-3 user LoRAs and same-name collision.
 
-### Phase 3 - provider pods
+### Phase 4 — style-reference mode
 
-1. Add Krea pod server/lifecycle.
-2. Hard-code provider disk request to 35 GB.
-3. Explicitly configure no network volume/storage.
-4. Reuse H3 auth and provider/R2 vars.
-5. Add RunPod/Novita allocation, readiness, warm reuse, OOM escalation and deletion.
+1. Register/internalize `krea2_style_reference` adapter outside normal user catalog.
+2. Reproduce official native style-reference workflow.
+3. Support 1-3 mixed-size style images when zero user LoRAs are selected.
+4. Validate no forced output-resolution resize is needed.
 
-### Phase 4 - SceneBuilder control plane
+### Phase 5 — provider pods
 
-1. Add `krea-2-turbo` provider path to existing image jobs.
-2. Preserve current async status/cancel/finalization APIs.
-3. Add full immutable settings snapshot.
-4. Add LoRA catalog endpoint by model/quantization/type.
+1. Add RunPod/Novita lifecycle.
+2. Hard-set provider disk to 35 GB and no network storage.
+3. Reuse H3 auth/provider/R2 vars.
+4. Add readiness, warm reuse, OOM escalation and deletion.
 
-### Phase 5 - UI
+### Phase 6 — SceneBuilder UI/control plane
 
-1. Add Krea 2 Turbo to CharacterScreen and Storyboard.
-2. Add 1K/2K portrait/landscape presets.
-3. Add shared max-3 LoRA selector using IDs.
-4. Add Advanced controls for seed, steps, CFG, sampler, scheduler, denoise, negative prompt, VAE and prompt enhancement.
-5. Keep native defaults easy while allowing the user to change them.
+1. Add `krea-2-turbo` to existing image jobs.
+2. Preserve async polling/cancel/finalization APIs.
+3. Add LoRA catalog by immutable ID.
+4. Add LoRA-or-style-images mutually exclusive controls.
+5. Add advanced generation controls.
 
 ---
 
-## 21. Guardrails
+## 23. Guardrails
 
 - No network volume/network disk.
 - Container/root disk is 35 GB.
-- No LoRA persistent-disk cache.
+- LoRAs are not baked into Docker.
+- Local LoRA disk cache is allowed and bounded by LRU/watermarks.
 - Never identify LoRAs by display name.
-- D1 immutable `lora_id` is the API/job identity.
-- Never accept an arbitrary browser R2 object key/path.
-- Maximum 3 LoRAs.
-- User controls generation settings, but sampler/scheduler values come from the tested allowlist.
+- D1 immutable `lora_id` is API/job/cache identity.
+- Never accept arbitrary browser R2 object keys for LoRA selection.
+- Maximum 3 user-selected LoRAs.
+- Style-reference mode uses zero user LoRAs in v1.
+- Style images may have different dimensions/aspects; do not force them to output dimensions.
+- Keep Krea/Qwen warm in CPU RAM where host memory allows.
+- Clear job GPU state without blindly unloading all model RAM state.
 - Native Turbo defaults remain 8 / CFG1 / Euler / simple / denoise1.
-- Negative prompt is clearly inactive at CFG1 native mode.
 - No SageAttention or FlashAttention dependency in v1.
 - Use the same pinned Comfy commit as H3 unless a Krea canary forces a deliberate upgrade.
-- Apply Comfy after Krea/Qwen/VAE heavyweight layers so Comfy changes do not invalidate them.
+- Krea layering is simple: heavy models -> Comfy -> nodes -> workflow -> runtime.
 - No separate browser polling system for Krea.
 - No separate Krea auth master secret.
 
 ---
 
-## 22. First implementation milestone
+## 24. First implementation milestone
 
 ```text
 35 GB container disk only
@@ -1029,28 +1190,30 @@ CUDA 13 / PyTorch 2.13 cu130
 Krea 2 Turbo INT8 ConvRot
 Qwen3-VL-4B BF16
 Qwen Image VAE + Wan 2.1 VAE baked
-same pinned H3 Comfy commit applied after heavy model layers
+pinned H3 Comfy installed after heavy layers
+nodes -> workflow -> runtime
 no Sage/FlashAttention
 1280x720 / 720x1280
-1920x1080 / 1080x1920
+2048x1152 / 1152x2048
 8 steps / CFG1 / Euler / simple / denoise1 defaults
 one RunPod >=20 GB canary
-no LoRA in milestone 1
+warm CPU offload lifecycle proven
 ```
 
 Acceptance criteria:
 
 ```text
-final image/rootfs passes 35 GB size gate
 Comfy boots
-native Krea2 + Qwen KREA2 CLIP load
-BF16 encoder conditions successfully
-encoder offloads before constrained-GPU diffusion
-both VAE files load; Qwen is default
-all four resolution presets generate
+native Krea2 + KREA2 Qwen CLIP load
+BF16 encoder works
+Krea/Qwen can move between GPU and CPU/offload state on 20 GB worker
+job GPU allocations are cleared after completion
+warm second job avoids unnecessary checkpoint reload
+both VAEs load; Qwen is default
+1K and 2K aligned presets generate
 seed/steps/CFG/sampler/scheduler/denoise are runtime-patchable
 output uploads to R2
-pod remains reusable for a second job
+pod remains reusable
 ```
 
-Then add D1-ID-based RAM-only LoRAs before frontend rollout.
+Then add D1-ID LoRA disk/hot-RAM cache and style-reference mode before frontend rollout.
