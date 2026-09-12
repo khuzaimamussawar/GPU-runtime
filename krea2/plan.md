@@ -204,6 +204,24 @@ H3 label: v0.31.0-9-g2a68ce33
 comfy-kitchen = 0.2.28
 ```
 
+This pin was independently verified against the local H3 Windows portable installation on 2026-09-12:
+
+```text
+git rev-parse HEAD
+2a68ce33b4c9ea6ee4283e618a74560cefb32694
+
+git describe --tags --always --dirty
+v0.31.0-9-g2a68ce33
+
+git status --short
+<no output; clean Comfy working tree>
+
+comfy-kitchen
+0.2.28
+```
+
+Therefore the Krea Docker image must use this exact Comfy source revision and `comfy-kitchen==0.2.28`; there are no hidden local Comfy source edits that need to be reproduced.
+
 That revision already contains native Krea 2 support, `CLIPType.KREA2`, Qwen3-VL-4B conditioning, Krea image preprocessing and INT8 ConvRot support through `comfy-kitchen`.
 
 Do not follow moving Comfy `master` in production.
@@ -214,16 +232,27 @@ No SageAttention or FlashAttention dependency in v1. Use native Comfy/PyTorch op
 
 ## 6. CUDA / PyTorch / Python baseline
 
-Start from the same proven family as H3:
+Production Krea Docker remains locked to:
 
 ```text
 CUDA: 13.0 / cu130
-PyTorch: 2.13.0
+PyTorch: 2.13.0 built for cu130
 Python: 3.13 target
 Ubuntu: 24.04
 ```
 
-Build stages may use a CUDA devel base if required. The final image should prefer the corresponding CUDA runtime base if the real ConvRot smoke test succeeds.
+The local H3 Windows portable verification reported:
+
+```text
+PyTorch: 2.13.0+cu126
+torch.version.cuda: 12.6
+```
+
+That **does not** change the production Krea CUDA decision. The Windows portable bundles a PyTorch wheel compiled against CUDA 12.6; the pinned Comfy source revision itself is not tied to CUDA 12.6. We are reusing the exact Comfy source + `comfy-kitchen` pin while running it on the production CUDA 13 / cu130 PyTorch stack.
+
+Do **not** downgrade the Krea Docker image to CUDA 12.6 merely to match the local portable bundle. The CUDA 13 production image must instead prove the exact pinned Comfy + `comfy-kitchen` combination with a real ConvRot smoke test.
+
+Build stages may use a CUDA 13 devel base if required. The final image should prefer the corresponding CUDA 13 runtime base if the real ConvRot smoke test succeeds.
 
 Strip apt, pip, Hugging Face, git and compiler/build caches from final layers.
 
@@ -269,8 +298,8 @@ Recommended linear chain:
    baked krea2_style_reference.safetensors
 
 40 image-krea2-comfyui
-   one pinned Comfy revision
-   pinned requirements/comfy-kitchen
+   exact commit 2a68ce33b4c9ea6ee4283e618a74560cefb32694
+   comfy-kitchen==0.2.28
    extra model paths -> /opt/scenebuilder-models/krea2
 
 50 image-krea2-nodes
@@ -1359,12 +1388,14 @@ worker not draining
 35 GB rootfs policy respected
 no network storage
 CUDA 13 visible
-PyTorch 2.13/cu130
+PyTorch 2.13/cu130 (not the local Windows cu126 wheel)
+Comfy commit exactly 2a68ce33b4c9ea6ee4283e618a74560cefb32694
+Comfy describe target v0.31.0-9-g2a68ce33
+comfy-kitchen exactly 0.2.28
 single pinned Comfy discovers external baked model root
-comfy-kitchen 0.2.28
 native Krea2 recognized
 Qwen KREA2 CLIP recognized
-ConvRot works
+ConvRot works on CUDA 13/cu130
 baked style adapter discovered
 no Sage/Flash dependency
 ```
@@ -1475,14 +1506,15 @@ runtime version rollout drains old workers
 
 ### Phase 1 — Krea image runtime
 
-1. Build CUDA13/PyTorch2.13 base.
+1. Build CUDA13/PyTorch2.13 cu130 base.
 2. Bake Krea INT8, VAEs, Qwen BF16 and system style adapter under `/opt/scenebuilder-models/krea2`.
-3. Install one pinned Comfy layer afterward.
+3. Install exact Comfy commit `2a68ce33b4c9ea6ee4283e618a74560cefb32694` + `comfy-kitchen==0.2.28` afterward.
 4. Add Krea workflows and generic final runtime.
 5. Enforce 35 GB rootfs gate.
-6. Prove 720p/1080p landscape+portrait paths.
-7. Prove warm Krea/Qwen CPU offload.
-8. Prove pod-side final resize + thumbnail upload.
+6. Prove the pinned Comfy/ConvRot stack on CUDA13/cu130; do not substitute the local Windows cu126 runtime.
+7. Prove 720p/1080p landscape+portrait paths.
+8. Prove warm Krea/Qwen CPU offload.
+9. Prove pod-side final resize + thumbnail upload.
 
 ### Phase 2 — generic D1 worker/control-plane lifecycle
 
@@ -1549,6 +1581,9 @@ runtime version rollout drains old workers
 - Normal post-job cleanup frees GPU job state without blindly unloading reusable host model state.
 - Native Turbo defaults remain 8 / CFG1 / Euler / simple / denoise1.
 - No SageAttention or FlashAttention dependency in v1.
+- Comfy is locked to commit `2a68ce33b4c9ea6ee4283e618a74560cefb32694` / `v0.31.0-9-g2a68ce33` with `comfy-kitchen==0.2.28`.
+- The verified local Windows H3 portable uses PyTorch `2.13.0+cu126` / CUDA 12.6 only as a local bundle detail; it is not the production Krea CUDA target.
+- Production Krea remains CUDA 13 / PyTorch 2.13 cu130. Do not downgrade to cu126 merely to match Windows portable.
 - One pinned Comfy installation; no H3-style two-Comfy retrofit.
 - Generic worker table is `image_pod_workers`, never Krea-specific.
 - Reuse the H3 pod auth master secret; no Krea-only secret.
@@ -1562,6 +1597,8 @@ runtime version rollout drains old workers
 35 GB container disk only
 no network storage
 CUDA 13 / PyTorch 2.13 cu130
+Comfy 2a68ce33b4c9ea6ee4283e618a74560cefb32694
+comfy-kitchen 0.2.28
 Krea 2 Turbo INT8 ConvRot
 Qwen3-VL-4B BF16
 Qwen Image + Wan 2.1 VAE baked
@@ -1582,6 +1619,9 @@ warm Krea/Qwen CPU offload proven
 Acceptance criteria:
 
 ```text
+runtime reports PyTorch 2.13 cu130 / CUDA 13, not the local Windows cu126 bundle
+runtime Comfy commit is exactly 2a68ce33b4c9ea6ee4283e618a74560cefb32694
+runtime comfy-kitchen is exactly 0.2.28
 Comfy boots and discovers baked external model root
 native Krea2 + KREA2 Qwen CLIP load
 BF16 encoder works
