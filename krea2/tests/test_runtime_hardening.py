@@ -4,11 +4,12 @@ import io
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
 from src.image_pod import media, server
-from src.image_pod.adapters.krea2 import Krea2Adapter
+from src.image_pod.adapters.krea2 import Krea2Adapter, _verify_lora_graph
 
 
 class _FakeHandler:
@@ -89,6 +90,99 @@ class ImagePodRuntimeHardeningTests(unittest.TestCase):
             with_size = {**base, "fileSizeBytes": 123}
             with self.assertRaises(media.ImageMediaError):
                 media.materialize_user_loras([with_size])
+
+    def test_krea_lora_graph_audit_verifies_two_lora_chain_and_logs_identity(self):
+        manifest = {
+            "runtimeGraphPatching": {
+                "userLoras": {
+                    "baseModelNode": "30:10",
+                    "consumerNode": "30:3",
+                    "consumerInput": "model",
+                    "loaderClass": "LoraLoaderModelOnly",
+                    "nameInput": "lora_name",
+                    "strengthInput": "strength_model",
+                }
+            }
+        }
+        loras = [
+            {
+                "loraId": "krea2-darkchurch-style",
+                "fileName": "krea2-darkchurch-style.safetensors",
+                "strength": 1.11,
+            },
+            {
+                "loraId": "krea2-minimalistic-vector-art",
+                "fileName": "krea2-minimalistic-vector-art.safetensors",
+                "strength": 0.22,
+            },
+        ]
+        workflow = {
+            "30:10": {"class_type": "UNETLoader", "inputs": {}},
+            "sb_lora_01": {
+                "class_type": "LoraLoaderModelOnly",
+                "inputs": {
+                    "lora_name": "krea2-darkchurch-style.safetensors",
+                    "strength_model": 1.11,
+                    "model": ["30:10", 0],
+                },
+            },
+            "sb_lora_02": {
+                "class_type": "LoraLoaderModelOnly",
+                "inputs": {
+                    "lora_name": "krea2-minimalistic-vector-art.safetensors",
+                    "strength_model": 0.22,
+                    "model": ["sb_lora_01", 0],
+                },
+            },
+            "30:3": {"class_type": "KSampler", "inputs": {"model": ["sb_lora_02", 0]}},
+        }
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            loaded = _verify_lora_graph("job-1", workflow, manifest, loras)
+
+        self.assertEqual([item["loraId"] for item in loaded], [
+            "krea2-darkchurch-style",
+            "krea2-minimalistic-vector-art",
+        ])
+        self.assertEqual(loaded[0]["strength"], 1.11)
+        self.assertEqual(loaded[1]["strength"], 0.22)
+        logs = output.getvalue()
+        self.assertIn("id=krea2-darkchurch-style", logs)
+        self.assertIn("id=krea2-minimalistic-vector-art", logs)
+        self.assertIn("graph verified count=2", logs)
+
+    def test_krea_lora_graph_audit_fails_closed_when_second_lora_is_missing(self):
+        manifest = {
+            "runtimeGraphPatching": {
+                "userLoras": {
+                    "baseModelNode": "30:10",
+                    "consumerNode": "30:3",
+                    "consumerInput": "model",
+                    "loaderClass": "LoraLoaderModelOnly",
+                    "nameInput": "lora_name",
+                    "strengthInput": "strength_model",
+                }
+            }
+        }
+        loras = [
+            {"loraId": "one", "fileName": "one.safetensors", "strength": 1.0},
+            {"loraId": "two", "fileName": "two.safetensors", "strength": 0.5},
+        ]
+        workflow = {
+            "30:10": {"class_type": "UNETLoader", "inputs": {}},
+            "sb_lora_01": {
+                "class_type": "LoraLoaderModelOnly",
+                "inputs": {
+                    "lora_name": "one.safetensors",
+                    "strength_model": 1.0,
+                    "model": ["30:10", 0],
+                },
+            },
+            "30:3": {"class_type": "KSampler", "inputs": {"model": ["sb_lora_01", 0]}},
+        }
+        with self.assertRaisesRegex(RuntimeError, "missing expected node sb_lora_02"):
+            _verify_lora_graph("job-2", workflow, manifest, loras)
 
     def test_krea_worker_rejects_random_mode_without_resolved_seed(self):
         adapter = Krea2Adapter()
