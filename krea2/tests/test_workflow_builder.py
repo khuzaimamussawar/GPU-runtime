@@ -101,6 +101,7 @@ class Krea2WorkflowBuilderTests(unittest.TestCase):
         self.assertEqual(prepared["30:61"]["inputs"]["width"], 1152)
         self.assertEqual(prepared["30:64"]["inputs"]["height"], 2048)
         self.assertEqual(prepared["30:63"]["inputs"]["noise_seed"], 123)
+        self.assertEqual(prepared["30:64"]["inputs"]["model"], ["30:15", 0])
 
     def test_style_requires_one_to_ten_refs(self):
         with self.assertRaises(WorkflowBuildError):
@@ -112,12 +113,35 @@ class Krea2WorkflowBuilderTests(unittest.TestCase):
                 reference_images=[f"{i}.png" for i in range(11)],
             )
 
-    def test_style_rejects_user_lora(self):
+    def test_style_combines_refs_with_three_user_loras_after_system_adapter(self):
+        loras = [
+            {"loraId": "a", "fileName": "a.safetensors", "strength": 0.25, "minStrength": 0.0, "maxStrength": 1.0},
+            {"loraId": "b", "fileName": "b.safetensors", "strength": 0.50, "minStrength": 0.0, "maxStrength": 1.0},
+            {"loraId": "c", "fileName": "c.safetensors", "strength": 0.75, "minStrength": 0.0, "maxStrength": 1.0},
+        ]
+        prepared = prepare_krea2_workflow(
+            self.style,
+            self.style_manifest,
+            user_loras=loras,
+            reference_images=["style-1.png", "style-2.png"],
+        )
+        self.assertEqual(prepared["30:15"]["inputs"]["model"], ["30:10", 0])
+        self.assertEqual(prepared["sb_lora_01"]["inputs"]["model"], ["30:15", 0])
+        self.assertEqual(prepared["sb_lora_02"]["inputs"]["model"], ["sb_lora_01", 0])
+        self.assertEqual(prepared["sb_lora_03"]["inputs"]["model"], ["sb_lora_02", 0])
+        self.assertEqual(prepared["30:64"]["inputs"]["model"], ["sb_lora_03", 0])
+        self.assertEqual(prepared["30:52"]["inputs"]["image1"], ["69", 0])
+        self.assertEqual(prepared["30:52"]["inputs"]["image2"], ["sb_ref_02", 0])
+
+    def test_style_four_user_loras_is_rejected(self):
         with self.assertRaises(WorkflowBuildError):
             prepare_krea2_workflow(
                 self.style,
                 self.style_manifest,
-                user_loras=[{"fileName": "x.safetensors", "strength": 1.0}],
+                user_loras=[
+                    {"fileName": f"{i}.safetensors", "strength": 1.0}
+                    for i in range(4)
+                ],
                 reference_images=["style.png"],
             )
 
