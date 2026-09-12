@@ -112,6 +112,30 @@ class Krea2WorkflowBuilderTests(unittest.TestCase):
         with self.assertRaises(WorkflowBuildError):
             prepare_krea2_workflow(self.t2i, self.t2i_manifest, settings={"cfg": 1.51})
 
+    def test_krea_steps_are_limited_to_product_range(self):
+        for steps in (4, 8, 12):
+            prepared = prepare_krea2_workflow(self.t2i, self.t2i_manifest, settings={"steps": steps})
+            self.assertEqual(prepared["30:3"]["inputs"]["steps"], steps)
+        for steps in (3, 13):
+            with self.assertRaises(WorkflowBuildError):
+                prepare_krea2_workflow(self.t2i, self.t2i_manifest, settings={"steps": steps})
+
+    def test_prompt_enhancement_is_forced_off_for_krea(self):
+        t2i = prepare_krea2_workflow(
+            self.t2i,
+            self.t2i_manifest,
+            settings={"promptEnhance": True},
+        )
+        self.assertFalse(t2i["30:24"]["inputs"]["value"])
+
+        style = prepare_krea2_workflow(
+            self.style,
+            self.style_manifest,
+            settings={"promptEnhance": True},
+            reference_images=["style.png"],
+        )
+        self.assertFalse(style["30:24"]["inputs"]["value"])
+
     def test_negative_prompt_is_guided_only_for_t2i(self):
         native = prepare_krea2_workflow(
             self.t2i,
