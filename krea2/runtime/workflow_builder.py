@@ -144,12 +144,11 @@ def _patch_common(workflow: dict[str, Any], manifest: dict[str, Any], settings: 
     if "prompt" in settings:
         _set_path(workflow, _required_path(manifest, "prompt"), str(settings.get("prompt") or ""))
 
-    if "promptEnhance" in settings:
-        _set_path(
-            workflow,
-            _required_path(manifest, "promptEnhance"),
-            _as_bool(settings.get("promptEnhance"), field="promptEnhance"),
-        )
+    # Krea prompt enhancement is intentionally disabled. SceneBuilder shapes the
+    # effective prompt before dispatch, and the pod must never expand it again.
+    prompt_enhance_path = (manifest.get("requiredPaths") or {}).get("promptEnhance")
+    if prompt_enhance_path:
+        _set_path(workflow, str(prompt_enhance_path), False)
 
     width = settings.get("width")
     height = settings.get("height")
@@ -188,7 +187,7 @@ def _patch_common(workflow: dict[str, Any], manifest: dict[str, Any], settings: 
         _set_path(
             workflow,
             _required_path(manifest, "steps"),
-            _as_int(settings.get("steps"), field="steps", minimum=1, maximum=50),
+            _as_int(settings.get("steps"), field="steps", minimum=4, maximum=12),
         )
     if "cfg" in settings:
         _set_path(
