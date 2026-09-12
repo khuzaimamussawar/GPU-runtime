@@ -6,7 +6,6 @@ import os
 import shutil
 import time
 import urllib.parse
-import urllib.request
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -16,6 +15,8 @@ COMFY_ROOT = Path(os.environ.get("COMFY_ROOT", "/opt/ComfyUI"))
 COMFY_INPUT = COMFY_ROOT / "input"
 COMFY_OUTPUT = COMFY_ROOT / "output"
 LORA_CACHE = Path(os.environ.get("IMAGE_LORA_CACHE_DIR", str(IMAGE_ROOT / "cache" / "loras")))
+STYLE_REFERENCE_PREFIXES = ("projects/", "temp/", "style/", "styles/", "images/")
+LORA_PREFIXES = ("models/lora/",)
 
 
 class ImageMediaError(RuntimeError):
@@ -59,19 +60,11 @@ def _media_ref(value: Any) -> dict[str, Any]:
     raise ImageMediaError(f"unsupported media reference: {type(value).__name__}")
 
 
-def _object_key_from_url(value: Any) -> str | None:
+def _object_key_from_url(value: Any, allowed_prefixes: tuple[str, ...]) -> str | None:
     text = str(value or "").strip()
     if not text:
         return None
     direct = text.lstrip("/")
-    allowed_prefixes = (
-        "projects/",
-        "temp/",
-        "style/",
-        "styles/",
-        "images/",
-        "models/lora/",
-    )
     if direct.startswith(allowed_prefixes):
         return direct
     try:
@@ -82,53 +75,52 @@ def _object_key_from_url(value: Any) -> str | None:
     return key if key.startswith(allowed_prefixes) else None
 
 
-def _download_ref_to_path(value: Any, target: Path) -> Path:
+def _download_ref_to_path(
+    value: Any,
+    target: Path,
+    *,
+    allowed_prefixes: tuple[str, ...],
+    max_bytes: int,
+) -> Path:
     ref = _media_ref(value)
     target.parent.mkdir(parents=True, exist_ok=True)
     url = str(ref.get("url") or "").strip() or None
-    object_key = (
-        str(ref.get("objectKey") or ref.get("key") or "").strip().lstrip("/")
-        or _object_key_from_url(url)
-        or None
-    )
-    if not object_key and not url:
-        raise ImageMediaError("media reference requires objectKey/key or url")
+    explicit_key = str(ref.get("objectKey") or ref.get("key") or "").strip().lstrip("/")
+    object_key = explicit_key or _object_key_from_url(url, allowed_prefixes)
+    if not object_key or not object_key.startswith(allowed_prefixes):
+        raise ImageMediaError("media reference must resolve to a trusted SceneBuilder R2 object")
+
+    client, bucket = _r2_client()
+    if client is None or not bucket:
+        raise ImageMediaError(
+            "R2 download requires R2_BUCKET_NAME, R2_ENDPOINT, R2_ACCESS_KEY and R2_SECRET_KEY"
+        )
 
     tmp = target.with_suffix(target.suffix + ".part")
     tmp.unlink(missing_ok=True)
-    r2_error: Exception | None = None
-
-    if object_key:
-        client, bucket = _r2_client()
-        if client is not None and bucket:
-            try:
-                client.download_file(bucket, object_key, str(tmp))
-                os.replace(tmp, target)
-                return target
-            except Exception as exc:
-                r2_error = exc
-                tmp.unlink(missing_ok=True)
-        elif not url:
+    try:
+        metadata = client.head_object(Bucket=bucket, Key=object_key)
+        content_length = int(metadata.get("ContentLength") or 0)
+        if content_length <= 0:
+            raise ImageMediaError(f"R2 object is empty: {object_key}")
+        if content_length > max_bytes:
             raise ImageMediaError(
-                "private objectKey download requires R2_BUCKET_NAME, R2_ENDPOINT, R2_ACCESS_KEY and R2_SECRET_KEY"
+                f"R2 object exceeds runtime limit: {content_length} > {max_bytes} bytes ({object_key})"
             )
-
-    if url:
-        try:
-            request = urllib.request.Request(url, headers={"User-Agent": "SceneBuilder-Image-Pod/1.0"})
-            with urllib.request.urlopen(request, timeout=120) as response, tmp.open("wb") as handle:
-                shutil.copyfileobj(response, handle, length=8 * 1024 * 1024)
-            os.replace(tmp, target)
-            return target
-        except Exception as exc:
-            tmp.unlink(missing_ok=True)
-            if r2_error is not None:
-                raise ImageMediaError(
-                    f"failed R2 object download and fallback URL: R2={r2_error}; URL={exc}"
-                ) from exc
-            raise ImageMediaError(f"failed media download: {exc}") from exc
-
-    raise ImageMediaError(f"failed R2 object download: {r2_error}")
+        client.download_file(bucket, object_key, str(tmp))
+        actual = tmp.stat().st_size
+        if actual != content_length:
+            raise ImageMediaError(
+                f"R2 download size mismatch: expected {content_length}, got {actual} ({object_key})"
+            )
+        os.replace(tmp, target)
+        return target
+    except ImageMediaError:
+        tmp.unlink(missing_ok=True)
+        raise
+    except Exception as exc:
+        tmp.unlink(missing_ok=True)
+        raise ImageMediaError(f"failed trusted R2 download for {object_key}: {exc}") from exc
 
 
 def _hash_file(path: Path) -> str:
@@ -143,7 +135,6 @@ def _hash_file(path: Path) -> str:
 
 
 def _cache_limits() -> tuple[int, int]:
-    # Keep room inside the locked 35 GiB provider disk for Comfy temp/output.
     max_bytes = int(float(os.environ.get("IMAGE_LORA_CACHE_MAX_GB", "4")) * 1024**3)
     min_free_bytes = int(float(os.environ.get("IMAGE_LORA_CACHE_MIN_FREE_GB", "3")) * 1024**3)
     return max(0, max_bytes), max(0, min_free_bytes)
@@ -183,43 +174,64 @@ def materialize_user_loras(values: Iterable[dict[str, Any]] | None) -> list[dict
     protected: set[Path] = set()
 
     for item in raw_values:
-        lora_id = safe_name(item.get("loraId") or item.get("lora_id"))
-        if not lora_id:
+        raw_lora_id = str(item.get("loraId") or item.get("lora_id") or "").strip()
+        if not raw_lora_id:
             raise ImageMediaError("LoRA loraId is required")
+        lora_id = safe_name(raw_lora_id)
         object_key = str(item.get("objectKey") or item.get("r2ObjectKey") or "").strip().lstrip("/")
-        if not object_key.startswith("models/lora/"):
-            raise ImageMediaError(f"LoRA {lora_id} has invalid trusted R2 object key")
+        if not object_key.startswith(LORA_PREFIXES):
+            raise ImageMediaError(f"LoRA {raw_lora_id} has invalid trusted R2 object key")
+
+        expected_size_raw = item.get("fileSizeBytes", item.get("file_size_bytes"))
+        if expected_size_raw in {None, ""}:
+            raise ImageMediaError(f"LoRA {raw_lora_id} requires trusted fileSizeBytes")
+        try:
+            expected_size = int(expected_size_raw)
+        except (TypeError, ValueError) as exc:
+            raise ImageMediaError(f"LoRA {raw_lora_id} has invalid fileSizeBytes") from exc
+        if expected_size <= 0:
+            raise ImageMediaError(f"LoRA {raw_lora_id} has invalid fileSizeBytes")
+
+        expected_sha = str(item.get("sha256") or "").strip().lower()
+        if len(expected_sha) != 64 or any(ch not in "0123456789abcdef" for ch in expected_sha):
+            raise ImageMediaError(f"LoRA {raw_lora_id} requires a valid trusted SHA256")
+
+        min_strength = item.get("minStrength", item.get("min_strength"))
+        max_strength = item.get("maxStrength", item.get("max_strength"))
+        if min_strength is None or max_strength is None:
+            raise ImageMediaError(f"LoRA {raw_lora_id} requires trusted min/max strength")
 
         target = LORA_CACHE / f"{lora_id}.safetensors"
-        expected_size_raw = item.get("fileSizeBytes", item.get("file_size_bytes"))
-        expected_size = int(expected_size_raw) if expected_size_raw not in {None, ""} else None
-        expected_sha = str(item.get("sha256") or "").strip().lower() or None
-
         valid = target.exists()
-        if valid and expected_size is not None and target.stat().st_size != expected_size:
+        if valid and target.stat().st_size != expected_size:
             valid = False
-        if valid and expected_sha is not None and _hash_file(target) != expected_sha:
+        if valid and _hash_file(target) != expected_sha:
             valid = False
         if not valid:
             target.unlink(missing_ok=True)
-            _download_ref_to_path({"objectKey": object_key}, target)
-            if expected_size is not None and target.stat().st_size != expected_size:
+            _download_ref_to_path(
+                {"objectKey": object_key},
+                target,
+                allowed_prefixes=LORA_PREFIXES,
+                max_bytes=expected_size,
+            )
+            if target.stat().st_size != expected_size:
                 target.unlink(missing_ok=True)
-                raise ImageMediaError(f"LoRA size mismatch for {lora_id}")
-            if expected_sha is not None and _hash_file(target) != expected_sha:
+                raise ImageMediaError(f"LoRA size mismatch for {raw_lora_id}")
+            if _hash_file(target) != expected_sha:
                 target.unlink(missing_ok=True)
-                raise ImageMediaError(f"LoRA SHA256 mismatch for {lora_id}")
+                raise ImageMediaError(f"LoRA SHA256 mismatch for {raw_lora_id}")
 
         now = time.time()
         os.utime(target, (now, target.stat().st_mtime))
         protected.add(target)
         resolved.append(
             {
-                "loraId": str(item.get("loraId") or item.get("lora_id") or lora_id),
+                "loraId": raw_lora_id,
                 "fileName": target.name,
                 "strength": item.get("strength"),
-                "minStrength": item.get("minStrength", item.get("min_strength")),
-                "maxStrength": item.get("maxStrength", item.get("max_strength")),
+                "minStrength": min_strength,
+                "maxStrength": max_strength,
             }
         )
 
@@ -247,11 +259,17 @@ def stage_style_references(job_id: str, values: Iterable[Any] | None) -> tuple[l
     job_dir = COMFY_INPUT / "scenebuilder" / safe_name(job_id) / "style_refs"
     job_dir.mkdir(parents=True, exist_ok=True)
     max_dim = max(256, int(os.environ.get("KREA2_REFERENCE_MAX_DIM", "4096")))
+    max_bytes = max(1024 * 1024, int(os.environ.get("KREA2_REFERENCE_MAX_BYTES", str(25 * 1024 * 1024))))
     filenames: list[str] = []
 
     for index, ref in enumerate(refs, start=1):
         source = job_dir / f"source_{index:02d}{_image_suffix(ref)}"
-        _download_ref_to_path(ref, source)
+        _download_ref_to_path(
+            ref,
+            source,
+            allowed_prefixes=STYLE_REFERENCE_PREFIXES,
+            max_bytes=max_bytes,
+        )
         output = job_dir / f"reference_{index:02d}.png"
         try:
             with Image.open(source) as opened:
@@ -289,12 +307,7 @@ def _upload_file(path: Path, object_key: str, content_type: str) -> dict[str, An
     client, bucket = _r2_client()
     public_url = os.environ.get("R2_PUBLIC_URL", "").rstrip("/")
     if client is None or not bucket:
-        return {
-            "objectKey": object_key,
-            "localPath": str(path),
-            "uploaded": False,
-            "url": f"{public_url}/{object_key}" if public_url else None,
-        }
+        raise ImageMediaError("R2 upload configuration is required for production image finalization")
 
     client.upload_file(
         str(path),
