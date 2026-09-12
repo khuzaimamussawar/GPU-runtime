@@ -92,6 +92,22 @@ class ImagePodState:
             loadedFamily=self.loaded_family,
         )
 
+    def renew_idle(self) -> dict[str, Any] | None:
+        now = time.time()
+        with self.lock:
+            if self.draining or self.worker_status != "idle" or self.current_job_id is not None:
+                return None
+            self.idle_since = now
+            self.terminate_after = now + self.idle_timeout_seconds
+            return {
+                "ok": True,
+                "status": "idle",
+                "idleSince": self.idle_since,
+                "idleTimeoutSeconds": self.idle_timeout_seconds,
+                "terminateAfter": self.terminate_after,
+                "loadedFamily": self.loaded_family,
+            }
+
     def mark_unhealthy(self, reason: str) -> None:
         with self.lock:
             self.current_job_id = None
@@ -475,6 +491,21 @@ class Handler(BaseHTTPRequestHandler):
         if not self._require_auth():
             return
         path = self.path.split("?", 1)[0]
+        if path == "/idle/renew":
+            payload = STATE.renew_idle()
+            if payload is None:
+                self._send_json(
+                    HTTPStatus.CONFLICT,
+                    {
+                        "error": "worker_not_idle",
+                        "status": STATE.worker_status,
+                        "currentJobId": STATE.current_job_id,
+                    },
+                )
+            else:
+                self._send_json(HTTPStatus.OK, payload)
+            return
+
         if path == "/jobs":
             try:
                 payload = self._read_json()
