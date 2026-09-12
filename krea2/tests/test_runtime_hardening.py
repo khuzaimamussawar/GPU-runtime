@@ -89,6 +89,29 @@ class ImagePodRuntimeHardeningTests(unittest.TestCase):
             with self.assertRaises(media.ImageMediaError):
                 media.materialize_user_loras([with_size])
 
+    def test_idle_renew_only_extends_a_current_idle_window(self):
+        state = server.ImagePodState()
+        state.worker_status = "idle"
+        state.current_job_id = None
+        state.draining = False
+        state.idle_timeout_seconds = 90
+
+        with mock.patch.object(server.time, "time", return_value=1000.0):
+            renewed = state.renew_idle()
+        self.assertIsNotNone(renewed)
+        self.assertEqual(renewed["status"], "idle")
+        self.assertEqual(renewed["idleSince"], 1000.0)
+        self.assertEqual(renewed["terminateAfter"], 1090.0)
+
+        state.worker_status = "busy"
+        state.current_job_id = "job-1"
+        self.assertIsNone(state.renew_idle())
+
+        state.worker_status = "idle"
+        state.current_job_id = None
+        state.draining = True
+        self.assertIsNone(state.renew_idle())
+
 
 if __name__ == "__main__":
     unittest.main()
