@@ -4,3 +4,7 @@ scenebuilder_krea2:
   text_encoders: text_encoders
   vae: vae
   loras: loras
+
+scenebuilder_krea2_user_cache:
+  base_path: /opt/scenebuilder-image/cache
+  loras: loras
