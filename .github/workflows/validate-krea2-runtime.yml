@@ -1,0 +1,52 @@
+name: Validate Krea2 Runtime
+
+on:
+  pull_request:
+    paths:
+      - "krea2/**"
+      - "src/image_pod/**"
+      - "docker/Dockerfile.krea2-*"
+      - "scripts/validate_workflows.py"
+      - ".github/workflows/validate-krea2-runtime.yml"
+  push:
+    branches: [main]
+    paths:
+      - "krea2/**"
+      - "src/image_pod/**"
+      - "docker/Dockerfile.krea2-*"
+      - "scripts/validate_workflows.py"
+      - ".github/workflows/validate-krea2-runtime.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Validate workflow manifests
+        run: |
+          python scripts/validate_workflows.py \
+            --workflow krea2/workflows/krea2_turbo.json \
+            --manifest krea2/workflows/manifests/krea2_turbo.json
+          python scripts/validate_workflows.py \
+            --workflow krea2/workflows/krea2_style_reference.json \
+            --manifest krea2/workflows/manifests/krea2_style_reference.json
+
+      - name: Compile runtime code
+        run: |
+          python -m py_compile \
+            krea2/runtime/workflow_builder.py \
+            src/image_pod/registry.py \
+            src/image_pod/adapters/krea2.py \
+            src/image_pod/server.py
+
+      - name: Test graph patching
+        run: python -m unittest discover -s krea2/tests -p 'test_*.py' -v
