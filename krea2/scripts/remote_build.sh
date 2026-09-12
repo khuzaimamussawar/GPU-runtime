@@ -12,7 +12,7 @@ export REGISTRY_NAMESPACE="${REGISTRY_NAMESPACE:-${DOCKERHUB_USERNAME}}"
 repo_dir="/opt/scenebuilder-gpu-runtime"
 docker_build_attempts="${DOCKER_BUILD_ATTEMPTS:-2}"
 min_free_disk_gb="${MIN_FREE_DISK_GB:-45}"
-provider_disk_gb="${IMAGE_POD_DISK_GB:-35}"
+provider_disk_gb="${IMAGE_POD_DISK_GB:-40}"
 min_runtime_headroom_gb="${MIN_RUNTIME_HEADROOM_GB:-5}"
 
 ALL_TARGETS=(
