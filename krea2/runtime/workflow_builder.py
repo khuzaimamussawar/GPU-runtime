@@ -26,7 +26,8 @@ APPROVED_RENDER_SIZES = {
 ALLOWED_SAMPLERS = {"euler"}
 ALLOWED_SCHEDULERS = {"simple"}
 MAX_SAFE_SEED = 9_007_199_254_740_991
-MAX_CFG = 5.0
+MIN_CFG = 1.0
+MAX_CFG = 1.5
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -193,7 +194,7 @@ def _patch_common(workflow: dict[str, Any], manifest: dict[str, Any], settings: 
         _set_path(
             workflow,
             _required_path(manifest, "cfg"),
-            _as_float(settings.get("cfg"), field="cfg", minimum=0.0, maximum=MAX_CFG),
+            _as_float(settings.get("cfg"), field="cfg", minimum=MIN_CFG, maximum=MAX_CFG),
         )
     if "sampler" in settings:
         sampler = _clean_string(settings.get("sampler"), field="sampler")
@@ -358,7 +359,7 @@ def _patch_negative_prompt(
     workflow[consumer_node].setdefault("inputs", {})[consumer_input] = [zero_node, 0]
 
     negative = str(settings.get("negativePrompt", settings.get("negative_prompt", "")) or "").strip()
-    cfg = _as_float(settings.get("cfg", 1.0), field="cfg", minimum=0.0, maximum=MAX_CFG)
+    cfg = _as_float(settings.get("cfg", 1.0), field="cfg", minimum=MIN_CFG, maximum=MAX_CFG)
     if not negative or cfg <= 1.0:
         return
 
