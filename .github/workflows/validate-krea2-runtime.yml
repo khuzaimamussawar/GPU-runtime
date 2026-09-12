@@ -40,6 +40,9 @@ jobs:
             --workflow krea2/workflows/krea2_style_reference.json \
             --manifest krea2/workflows/manifests/krea2_style_reference.json
 
+      - name: Validate Krea2 build script syntax
+        run: bash -n krea2/scripts/remote_build.sh
+
       - name: Compile runtime code
         run: |
           python -m py_compile \
