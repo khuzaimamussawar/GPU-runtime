@@ -75,22 +75,44 @@ class ImagePodState:
         self.terminate_after: float | None = None
         self.idle_timeout_seconds = DEFAULT_IDLE_TIMEOUT
 
-    def mark_idle(self) -> None:
-        now = time.time()
+    def mark_idle(self, job_id: str | None = None) -> None:
+        timestamp = time.time()
         with self.lock:
             if self.draining or self.worker_status == "unhealthy":
                 return
             self.current_job_id = None
             self.worker_status = "idle"
-            self.idle_since = now
-            self.terminate_after = now + self.idle_timeout_seconds
-        emit_event(
-            "worker_idle",
-            idleSince=now,
-            idleTimeoutSeconds=self.idle_timeout_seconds,
-            terminateAfter=now + self.idle_timeout_seconds,
-            loadedFamily=self.loaded_family,
-        )
+            self.idle_since = timestamp
+            self.terminate_after = timestamp + self.idle_timeout_seconds
+            terminate_after = self.terminate_after
+        fields: dict[str, Any] = {
+            "idleSince": timestamp,
+            "idleTimeoutSeconds": self.idle_timeout_seconds,
+            "terminateAfter": terminate_after,
+            "loadedFamily": self.loaded_family,
+        }
+        if job_id:
+            fields["jobId"] = job_id
+        emit_event("worker_idle", **fields)
+
+    def renew_idle(self) -> dict[str, Any] | None:
+        timestamp = time.time()
+        with self.lock:
+            if self.current_job_id is not None or self.worker_status == "unhealthy":
+                return None
+            if self.worker_status not in {"idle", "draining"}:
+                return None
+            self.draining = False
+            self.worker_status = "idle"
+            self.idle_since = timestamp
+            self.terminate_after = timestamp + self.idle_timeout_seconds
+            return {
+                "ok": True,
+                "status": self.worker_status,
+                "idleSince": self.idle_since,
+                "terminateAfter": self.terminate_after,
+                "idleTimeoutSeconds": self.idle_timeout_seconds,
+            }
 
     def mark_unhealthy(self, reason: str) -> None:
         with self.lock:
@@ -277,7 +299,7 @@ def process_job(payload: dict[str, Any], record: JobRecord) -> None:
         if fatal:
             STATE.mark_unhealthy(record.error["message"] if record.error else "fatal runtime error")
         else:
-            STATE.mark_idle()
+            STATE.mark_idle(record.job_id)
 
 
 def idle_watchdog() -> None:
@@ -285,8 +307,10 @@ def idle_watchdog() -> None:
         time.sleep(1)
         expired = False
         deadline = None
+        idle_since = None
         with STATE.lock:
             deadline = STATE.terminate_after
+            idle_since = STATE.idle_since
             if (
                 not STATE.draining
                 and STATE.worker_status == "idle"
@@ -297,7 +321,12 @@ def idle_watchdog() -> None:
                 STATE.worker_status = "draining"
                 expired = True
         if expired:
-            emit_event("idle_expired", terminateAfter=deadline, loadedFamily=STATE.loaded_family)
+            emit_event(
+                "idle_expired",
+                idleSince=idle_since,
+                terminateAfter=deadline,
+                loadedFamily=STATE.loaded_family,
+            )
 
 
 def heartbeat_loop() -> None:
@@ -475,6 +504,18 @@ class Handler(BaseHTTPRequestHandler):
         if not self._require_auth():
             return
         path = self.path.split("?", 1)[0]
+
+        if path == "/idle/renew":
+            renewed = STATE.renew_idle()
+            if renewed is None:
+                self._send_json(
+                    HTTPStatus.CONFLICT,
+                    {"error": "worker_not_idle", "status": STATE.worker_status, "currentJobId": STATE.current_job_id},
+                )
+            else:
+                self._send_json(HTTPStatus.OK, renewed)
+            return
+
         if path == "/jobs":
             try:
                 payload = self._read_json()
