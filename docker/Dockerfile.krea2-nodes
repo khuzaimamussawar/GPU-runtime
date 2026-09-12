@@ -14,4 +14,22 @@ RUN set -eux; \
     python3 -m py_compile \
       /opt/ComfyUI/custom_nodes/SceneBuilderKrea2/__init__.py \
       /opt/ComfyUI/custom_nodes/SceneBuilderKrea2/nodes.py; \
-    test -f /opt/ComfyUI/custom_nodes/SceneBuilderKrea2/nodes.py
+    test -f /opt/ComfyUI/custom_nodes/SceneBuilderKrea2/nodes.py; \
+    cd /opt/ComfyUI; \
+    python3 - <<'PY'
+import importlib.util
+import sys
+
+root = "/opt/ComfyUI/custom_nodes/SceneBuilderKrea2"
+spec = importlib.util.spec_from_file_location(
+    "SceneBuilderKrea2",
+    f"{root}/__init__.py",
+    submodule_search_locations=[root],
+)
+assert spec is not None and spec.loader is not None
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+assert "SceneBuilderKrea2StyleEncode10" in module.NODE_CLASS_MAPPINGS
+print("SceneBuilderKrea2 custom node import OK")
+PY
