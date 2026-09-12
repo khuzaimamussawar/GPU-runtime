@@ -120,13 +120,19 @@ class Krea2WorkflowBuilderTests(unittest.TestCase):
             with self.assertRaises(WorkflowBuildError):
                 prepare_krea2_workflow(self.t2i, self.t2i_manifest, settings={"steps": steps})
 
-    def test_prompt_enhancement_is_forced_off_for_krea(self):
+    def test_prompt_enhancement_nodes_are_absent_for_krea(self):
+        enhancer_nodes = {"30:16", "30:17", "30:18", "30:20", "30:21", "30:24"}
+        self.assertTrue(enhancer_nodes.isdisjoint(self.t2i))
+        self.assertTrue(enhancer_nodes.isdisjoint(self.style))
+        self.assertNotIn("promptEnhance", self.t2i_manifest.get("requiredPaths", {}))
+        self.assertNotIn("promptEnhance", self.style_manifest.get("requiredPaths", {}))
+
         t2i = prepare_krea2_workflow(
             self.t2i,
             self.t2i_manifest,
             settings={"promptEnhance": True},
         )
-        self.assertFalse(t2i["30:24"]["inputs"]["value"])
+        self.assertEqual(t2i["30:6"]["inputs"]["text"], ["30:19", 0])
 
         style = prepare_krea2_workflow(
             self.style,
@@ -134,7 +140,7 @@ class Krea2WorkflowBuilderTests(unittest.TestCase):
             settings={"promptEnhance": True},
             reference_images=["style.png"],
         )
-        self.assertFalse(style["30:24"]["inputs"]["value"])
+        self.assertEqual(style["30:52"]["inputs"]["prompt"], ["30:19", 0])
 
     def test_negative_prompt_is_guided_only_for_t2i(self):
         native = prepare_krea2_workflow(
