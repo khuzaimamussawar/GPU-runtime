@@ -113,6 +113,19 @@ class ImagePodRuntimeHardeningTests(unittest.TestCase):
         self.assertEqual(settings["seedMode"], "fixed")
         self.assertEqual(settings["seed"], 424242)
 
+    def test_krea_worker_explicit_seed_wins_over_stale_random_mode(self):
+        adapter = Krea2Adapter()
+        with mock.patch("src.image_pod.adapters.krea2.secrets.randbelow") as random_seed:
+            settings = adapter._normalize_settings({
+                "settings": {
+                    "seedMode": "random",
+                    "seed": 987654321,
+                }
+            })
+        random_seed.assert_not_called()
+        self.assertEqual(settings["seedMode"], "fixed")
+        self.assertEqual(settings["seed"], 987654321)
+
     def test_krea_worker_preserves_legacy_explicit_seed_as_fixed(self):
         adapter = Krea2Adapter()
         settings = adapter._normalize_settings({"settings": {"seed": 77}})
