@@ -1,0 +1,17 @@
+# syntax=docker/dockerfile:1.7
+ARG REGISTRY_NAMESPACE
+ARG IMAGE_TAG=latest
+FROM ${REGISTRY_NAMESPACE}/scenebuilder-image-krea2-comfyui:${IMAGE_TAG}
+
+LABEL org.opencontainers.image.title="scenebuilder-image-krea2-nodes"
+LABEL scene_builder.layer="image-krea2-nodes"
+LABEL scene_builder.task_families="krea2_image"
+
+RUN rm -rf /opt/ComfyUI/custom_nodes/SceneBuilderKrea2
+COPY krea2/custom_nodes/SceneBuilderKrea2/ /opt/ComfyUI/custom_nodes/SceneBuilderKrea2/
+
+RUN set -eux; \
+    python3 -m py_compile \
+      /opt/ComfyUI/custom_nodes/SceneBuilderKrea2/__init__.py \
+      /opt/ComfyUI/custom_nodes/SceneBuilderKrea2/nodes.py; \
+    test -f /opt/ComfyUI/custom_nodes/SceneBuilderKrea2/nodes.py
