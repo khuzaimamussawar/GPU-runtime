@@ -361,10 +361,17 @@ def finalize_image_outputs(
             image = image.resize((output_w, output_h), Image.Resampling.LANCZOS)
         image.save(final_path, "PNG", optimize=True)
 
-    prefix = str(output_prefix or "").strip("/")
-    if not prefix:
-        prefix = f"projects/{safe_name(project_id or 'unknown')}/scene_images"
-    full_key = f"{prefix}/original/{safe_name(job_id)}.png"
+    canonical_image_prefix = str(settings.get("outputImagePrefix") or "").strip("/")
+    canonical_thumbnail_prefix = str(settings.get("outputThumbnailPrefix") or "").strip("/")
+    canonical_layout = bool(canonical_image_prefix and canonical_thumbnail_prefix)
+
+    if canonical_layout:
+        full_key = f"{canonical_image_prefix}/{safe_name(job_id)}.png"
+    else:
+        prefix = str(output_prefix or "").strip("/")
+        if not prefix:
+            prefix = f"projects/{safe_name(project_id or 'unknown')}/scene_images"
+        full_key = f"{prefix}/original/{safe_name(job_id)}.png"
     full = _upload_file(final_path, full_key, "image/png")
 
     thumbnail_status = "completed"
@@ -378,7 +385,10 @@ def finalize_image_outputs(
                 height = max(1, round(thumb.height * (700 / thumb.width)))
                 thumb = thumb.resize((700, height), Image.Resampling.LANCZOS)
             thumb.save(thumb_path, "JPEG", quality=80, optimize=True)
-        thumb_key = f"{prefix}/thumbnail/{safe_name(job_id)}.jpg"
+        if canonical_layout:
+            thumb_key = f"{canonical_thumbnail_prefix}/{safe_name(job_id)}.jpg"
+        else:
+            thumb_key = f"{prefix}/thumbnail/{safe_name(job_id)}.jpg"
         thumbnail = _upload_file(thumb_path, thumb_key, "image/jpeg")
     except Exception as exc:
         thumbnail_status = "failed"
