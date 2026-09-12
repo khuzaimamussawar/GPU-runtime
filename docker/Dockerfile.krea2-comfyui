@@ -1,0 +1,45 @@
+# syntax=docker/dockerfile:1.7
+ARG REGISTRY_NAMESPACE
+ARG IMAGE_TAG=latest
+FROM ${REGISTRY_NAMESPACE}/scenebuilder-image-krea2-system-adapters:${IMAGE_TAG}
+
+ARG COMFYUI_COMMIT=2a68ce33b4c9ea6ee4283e618a74560cefb32694
+ARG COMFY_KITCHEN_VERSION=0.2.28
+
+LABEL org.opencontainers.image.title="scenebuilder-image-krea2-comfyui"
+LABEL scene_builder.layer="image-krea2-comfyui"
+LABEL scene_builder.comfyui.commit="${COMFYUI_COMMIT}"
+LABEL scene_builder.comfy_kitchen="${COMFY_KITCHEN_VERSION}"
+
+RUN set -eux; \
+    rm -rf /opt/ComfyUI; \
+    mkdir -p /opt/ComfyUI; \
+    git -C /opt/ComfyUI init; \
+    git -C /opt/ComfyUI remote add origin https://github.com/Comfy-Org/ComfyUI.git; \
+    git -C /opt/ComfyUI fetch --depth 1 origin "${COMFYUI_COMMIT}"; \
+    git -C /opt/ComfyUI checkout --detach FETCH_HEAD; \
+    test "$(git -C /opt/ComfyUI rev-parse HEAD)" = "${COMFYUI_COMMIT}"; \
+    python3 -m pip install --no-cache-dir -r /opt/ComfyUI/requirements.txt; \
+    python3 -m pip install --no-cache-dir "comfy-kitchen==${COMFY_KITCHEN_VERSION}"; \
+    rm -rf /root/.cache/pip
+
+COPY krea2/extra_model_paths.yaml /opt/scenebuilder-image/extra_model_paths.yaml
+
+ENV PYTHONPATH=/opt/ComfyUI:/opt/scenebuilder-image
+ENV COMFY_ROOT=/opt/ComfyUI
+ENV COMFY_EXTRA_MODEL_PATHS=/opt/scenebuilder-image/extra_model_paths.yaml
+
+RUN set -eux; \
+    test -f /opt/ComfyUI/comfy/ldm/krea2/model.py; \
+    test -f /opt/ComfyUI/comfy_extras/nodes_qwen.py; \
+    python3 - <<'PY'
+import importlib.metadata as metadata
+import torch
+assert torch.__version__.startswith("2.13.0"), torch.__version__
+assert torch.version.cuda == "13.0", torch.version.cuda
+assert metadata.version("comfy-kitchen") == "0.2.28", metadata.version("comfy-kitchen")
+print("torch", torch.__version__, "cuda", torch.version.cuda)
+print("comfy-kitchen", metadata.version("comfy-kitchen"))
+PY
+
+WORKDIR /opt/ComfyUI
