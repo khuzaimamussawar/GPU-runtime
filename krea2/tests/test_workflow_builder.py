@@ -4,7 +4,11 @@ import json
 import unittest
 from pathlib import Path
 
-from krea2.runtime.workflow_builder import WorkflowBuildError, prepare_krea2_workflow
+from krea2.runtime.workflow_builder import (
+    MAX_SAFE_SEED,
+    WorkflowBuildError,
+    prepare_krea2_workflow,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -14,6 +18,16 @@ WORKFLOW_ROOT = ROOT / "krea2" / "workflows"
 def load_json(path: Path):
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def lora(name: str, strength: float = 1.0):
+    return {
+        "loraId": name,
+        "fileName": f"{name}.safetensors",
+        "strength": strength,
+        "minStrength": 0.0,
+        "maxStrength": 1.0,
+    }
 
 
 class Krea2WorkflowBuilderTests(unittest.TestCase):
@@ -36,11 +50,7 @@ class Krea2WorkflowBuilderTests(unittest.TestCase):
         self.assertNotIn("sb_lora_01", prepared)
 
     def test_t2i_three_loras_form_ordered_chain(self):
-        loras = [
-            {"loraId": "a", "fileName": "a.safetensors", "strength": 0.25, "minStrength": 0.0, "maxStrength": 1.0},
-            {"loraId": "b", "fileName": "b.safetensors", "strength": 0.50, "minStrength": 0.0, "maxStrength": 1.0},
-            {"loraId": "c", "fileName": "c.safetensors", "strength": 0.75, "minStrength": 0.0, "maxStrength": 1.0},
-        ]
+        loras = [lora("a", 0.25), lora("b", 0.50), lora("c", 0.75)]
         prepared = prepare_krea2_workflow(self.t2i, self.t2i_manifest, user_loras=loras)
         self.assertEqual(prepared["sb_lora_01"]["inputs"]["model"], ["30:10", 0])
         self.assertEqual(prepared["sb_lora_02"]["inputs"]["model"], ["sb_lora_01", 0])
@@ -48,19 +58,19 @@ class Krea2WorkflowBuilderTests(unittest.TestCase):
         self.assertEqual(prepared["30:3"]["inputs"]["model"], ["sb_lora_03", 0])
 
     def test_lora_strength_outside_catalog_range_is_rejected(self):
+        with self.assertRaisesRegex(WorkflowBuildError, "INVALID_LORA_STRENGTH"):
+            prepare_krea2_workflow(
+                self.t2i,
+                self.t2i_manifest,
+                user_loras=[lora("bad", 1.5)],
+            )
+
+    def test_lora_requires_catalog_range(self):
         with self.assertRaises(WorkflowBuildError):
             prepare_krea2_workflow(
                 self.t2i,
                 self.t2i_manifest,
-                user_loras=[
-                    {
-                        "loraId": "bad",
-                        "fileName": "bad.safetensors",
-                        "strength": 1.5,
-                        "minStrength": 0.0,
-                        "maxStrength": 1.0,
-                    }
-                ],
+                user_loras=[{"loraId": "x", "fileName": "x.safetensors", "strength": 0.5}],
             )
 
     def test_t2i_four_loras_is_rejected(self):
@@ -68,11 +78,56 @@ class Krea2WorkflowBuilderTests(unittest.TestCase):
             prepare_krea2_workflow(
                 self.t2i,
                 self.t2i_manifest,
-                user_loras=[
-                    {"fileName": f"{i}.safetensors", "strength": 1.0}
-                    for i in range(4)
-                ],
+                user_loras=[lora(str(i)) for i in range(4)],
             )
+
+    def test_only_approved_render_sizes_are_allowed(self):
+        for width, height in ((1280, 720), (720, 1280), (2048, 1152), (1152, 2048)):
+            prepared = prepare_krea2_workflow(
+                self.t2i,
+                self.t2i_manifest,
+                settings={"width": width, "height": height},
+            )
+            self.assertEqual(prepared["30:5"]["inputs"]["width"], width)
+            self.assertEqual(prepared["30:5"]["inputs"]["height"], height)
+
+        with self.assertRaises(WorkflowBuildError):
+            prepare_krea2_workflow(
+                self.t2i,
+                self.t2i_manifest,
+                settings={"width": 1920, "height": 1080},
+            )
+        with self.assertRaises(WorkflowBuildError):
+            prepare_krea2_workflow(self.t2i, self.t2i_manifest, settings={"width": 1280})
+
+    def test_sampler_scheduler_seed_and_cfg_limits(self):
+        with self.assertRaises(WorkflowBuildError):
+            prepare_krea2_workflow(self.t2i, self.t2i_manifest, settings={"sampler": "random_sampler"})
+        with self.assertRaises(WorkflowBuildError):
+            prepare_krea2_workflow(self.t2i, self.t2i_manifest, settings={"scheduler": "random_scheduler"})
+        with self.assertRaises(WorkflowBuildError):
+            prepare_krea2_workflow(self.t2i, self.t2i_manifest, settings={"seed": MAX_SAFE_SEED + 1})
+        with self.assertRaises(WorkflowBuildError):
+            prepare_krea2_workflow(self.t2i, self.t2i_manifest, settings={"cfg": 5.01})
+
+    def test_negative_prompt_is_guided_only_for_t2i(self):
+        native = prepare_krea2_workflow(
+            self.t2i,
+            self.t2i_manifest,
+            settings={"cfg": 1.0, "negativePrompt": "blurry"},
+        )
+        self.assertNotIn("sb_negative", native)
+        self.assertEqual(native["30:3"]["inputs"]["negative"], ["30:13", 0])
+
+        guided = prepare_krea2_workflow(
+            self.t2i,
+            self.t2i_manifest,
+            settings={"cfg": 2.0, "negativePrompt": "blurry"},
+        )
+        self.assertEqual(guided["sb_negative"]["class_type"], "CLIPTextEncode")
+        self.assertEqual(guided["sb_negative"]["inputs"]["text"], "blurry")
+        self.assertEqual(guided["sb_negative"]["inputs"]["clip"], ["30:11", 0])
+        self.assertEqual(guided["30:3"]["inputs"]["negative"], ["sb_negative", 0])
 
     def test_style_supports_ten_reference_images(self):
         refs = [f"style-{i}.png" for i in range(1, 11)]
@@ -114,11 +169,7 @@ class Krea2WorkflowBuilderTests(unittest.TestCase):
             )
 
     def test_style_combines_refs_with_three_user_loras_after_system_adapter(self):
-        loras = [
-            {"loraId": "a", "fileName": "a.safetensors", "strength": 0.25, "minStrength": 0.0, "maxStrength": 1.0},
-            {"loraId": "b", "fileName": "b.safetensors", "strength": 0.50, "minStrength": 0.0, "maxStrength": 1.0},
-            {"loraId": "c", "fileName": "c.safetensors", "strength": 0.75, "minStrength": 0.0, "maxStrength": 1.0},
-        ]
+        loras = [lora("a", 0.25), lora("b", 0.50), lora("c", 0.75)]
         prepared = prepare_krea2_workflow(
             self.style,
             self.style_manifest,
@@ -133,15 +184,22 @@ class Krea2WorkflowBuilderTests(unittest.TestCase):
         self.assertEqual(prepared["30:52"]["inputs"]["image1"], ["69", 0])
         self.assertEqual(prepared["30:52"]["inputs"]["image2"], ["sb_ref_02", 0])
 
+    def test_style_guided_negative_prompt(self):
+        guided = prepare_krea2_workflow(
+            self.style,
+            self.style_manifest,
+            settings={"cfg": 2.0, "negativePrompt": "text artifacts"},
+            reference_images=["style.png"],
+        )
+        self.assertEqual(guided["30:57"]["inputs"]["negative"], ["sb_negative", 0])
+        self.assertEqual(guided["sb_negative"]["inputs"]["clip"], ["30:11", 0])
+
     def test_style_four_user_loras_is_rejected(self):
         with self.assertRaises(WorkflowBuildError):
             prepare_krea2_workflow(
                 self.style,
                 self.style_manifest,
-                user_loras=[
-                    {"fileName": f"{i}.safetensors", "strength": 1.0}
-                    for i in range(4)
-                ],
+                user_loras=[lora(str(i)) for i in range(4)],
                 reference_images=["style.png"],
             )
 
