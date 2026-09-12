@@ -108,7 +108,9 @@ class Krea2WorkflowBuilderTests(unittest.TestCase):
         with self.assertRaises(WorkflowBuildError):
             prepare_krea2_workflow(self.t2i, self.t2i_manifest, settings={"seed": MAX_SAFE_SEED + 1})
         with self.assertRaises(WorkflowBuildError):
-            prepare_krea2_workflow(self.t2i, self.t2i_manifest, settings={"cfg": 5.01})
+            prepare_krea2_workflow(self.t2i, self.t2i_manifest, settings={"cfg": 0.99})
+        with self.assertRaises(WorkflowBuildError):
+            prepare_krea2_workflow(self.t2i, self.t2i_manifest, settings={"cfg": 1.51})
 
     def test_negative_prompt_is_guided_only_for_t2i(self):
         native = prepare_krea2_workflow(
@@ -122,7 +124,7 @@ class Krea2WorkflowBuilderTests(unittest.TestCase):
         guided = prepare_krea2_workflow(
             self.t2i,
             self.t2i_manifest,
-            settings={"cfg": 2.0, "negativePrompt": "blurry"},
+            settings={"cfg": 1.2, "negativePrompt": "blurry"},
         )
         self.assertEqual(guided["sb_negative"]["class_type"], "CLIPTextEncode")
         self.assertEqual(guided["sb_negative"]["inputs"]["text"], "blurry")
@@ -188,7 +190,7 @@ class Krea2WorkflowBuilderTests(unittest.TestCase):
         guided = prepare_krea2_workflow(
             self.style,
             self.style_manifest,
-            settings={"cfg": 2.0, "negativePrompt": "text artifacts"},
+            settings={"cfg": 1.2, "negativePrompt": "text artifacts"},
             reference_images=["style.png"],
         )
         self.assertEqual(guided["30:57"]["inputs"]["negative"], ["sb_negative", 0])
