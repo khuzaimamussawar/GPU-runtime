@@ -2,9 +2,9 @@
 
 Status: **architecture / implementation plan**
 
-Scope: add Krea 2 Turbo image generation to SceneBuilder Storyboard and CharacterScreen, while building a **generic image-generation pod/control-plane layer** that can host more image models later. Krea 2 is the first image family, not the name or boundary of the pod infrastructure.
+Scope: add Krea 2 Turbo image generation to SceneBuilder Storyboard and CharacterScreen while creating a **generic image-generation pod/control-plane layer** that can host additional image models later. Krea 2 is the first image family; it must not become the name or boundary of the reusable pod infrastructure.
 
-This file is the source of truth for the Krea 2 implementation and the reusable image-pod architecture around it.
+This file is the source of truth for the Krea 2 runtime, generic image-pod lifecycle, D1 scheduling, LoRA catalog, and Storyboard/Character integration.
 
 ---
 
@@ -16,10 +16,16 @@ This file is the source of truth for the Krea 2 implementation and the reusable 
 - Diffusion checkpoint: `krea2_turbo_int8_convrot.safetensors`.
 - Runtime: **native ComfyUI Krea 2 support**.
 - Text encoder: **Qwen3-VL-4B BF16** (`qwen3vl_4b_bf16.safetensors`).
-- Qwen3-VL-4B is used for text conditioning and native image/style-reference conditioning.
+- Qwen3-VL-4B handles normal text conditioning and native image/style-reference conditioning.
+- Default production resolution: **2048x1152 landscape / 1152x2048 portrait**.
+- Optional fast/1K preset: **1280x720 landscape / 720x1280 portrait**.
 - Minimum GPU: **20 GB VRAM**.
-- One active generation at a time per GPU for v1.
 - Providers: **RunPod Pods + Novita GPU instances**.
+- One pod runs **one image generation at a time**. No concurrent images inside one GPU pod.
+- A warm pod is reusable immediately after an image finishes.
+- Pods are a **global compatible pool**, not owned by one project.
+- Maximum **5 simultaneously active/reserved image pods per project**.
+- New capacity target: **1 pod per 3 ready queued images**, capped at 5 pods per project.
 - Reuse the same RunPod/Novita/R2 variables and H3 pod-auth master secret already used by the existing GPU control plane.
 
 ### Storage
@@ -28,9 +34,9 @@ This file is the source of truth for the Krea 2 implementation and the reusable 
 - **No network disk.**
 - **No provider-mounted model storage.**
 - Provider root/container disk: **35 GB**.
-- Krea model, Qwen encoder and VAEs are baked into Docker image layers.
-- User/style LoRAs are not baked into Docker.
-- LoRAs may be downloaded from R2 and cached on the 35 GB local container disk.
+- Krea model, Qwen encoder, VAEs, and the native Krea style-reference adapter are baked into Docker image layers.
+- User-selectable LoRAs are **not** baked into Docker.
+- User LoRAs may be downloaded from R2 and cached on the local 35 GB container disk.
 - Generated inputs/outputs may use temporary local files during a job, then are cleaned after upload/finalization.
 
 Provider configuration:
@@ -43,18 +49,82 @@ Novita: networkStorages = []
 RunPod: no network volume / volume mount
 ```
 
-The image-size gate must leave enough writable space for:
+The final image must leave writable headroom for:
 
 ```text
 Comfy input/output/temp
-atomic LoRA downloads
-bounded LoRA cache
-logs / small runtime scratch
+atomic user-LoRA downloads
+bounded user-LoRA cache
+logs / runtime scratch
 ```
 
-Use measured free-space watermarks rather than assuming a fixed LoRA-cache capacity before the final image size is known.
+Use measured free-space watermarks instead of assuming a fixed cache capacity before the final image is measured.
 
-### VAE
+---
+
+## 2. Native Krea decisions from official + community evidence
+
+### Resolution: lock 2048x1152 / 1152x2048 as the normal default
+
+Do **not** use `1368x768` as the product default.
+
+Official Krea 2 Turbo is designed for roughly **1K through 2K** generation, and the official sampler pads width/height upward to its required alignment when a dimension is not aligned. The distilled Turbo checkpoint is explicitly intended for high-quality few-step inference up to the 2K range.
+
+For SceneBuilder 16:9 / 9:16, use:
+
+```text
+NORMAL / QUALITY
+landscape: 2048 x 1152
+portrait:  1152 x 2048
+
+FAST / 1K OPTIONAL
+landscape: 1280 x 720
+portrait:  720 x 1280
+```
+
+Why the normal default is `2048x1152` rather than `1280x720` or `1368x768`:
+
+- `2048x1152` is exact 16:9 and both dimensions are divisible by 16.
+- `1152x2048` is the exact portrait equivalent.
+- the long edge is exactly the official 2K ceiling;
+- it avoids hidden alignment padding;
+- recent community Krea 2 Turbo usage repeatedly uses `2048x1152` / `1152x2048` successfully;
+- community reports also tend to show stronger detail/diversity at higher native Krea 2 Turbo resolutions;
+- `1368x768` is only a near-1MP calculator shape and `1368` is not divisible by 16, so the runtime would pad it anyway;
+- `1280x720` works technically and is useful as a faster/lower-memory option, but it is not the quality default.
+
+There is **no resolution A/B benchmark requirement** in the rollout plan. The production decision is already made:
+
+```text
+DEFAULT = 2048x1152 / 1152x2048
+FAST    = 1280x720 / 720x1280
+```
+
+The runtime still performs a functional smoke test at both tiers to prove memory/runtime correctness, not to choose between them.
+
+### Turbo sampler baseline
+
+Native/production baseline:
+
+```text
+steps:     8
+cfg:       1.0 in Comfy UI contract / effectively no-guidance Turbo path
+sampler:   euler
+scheduler: simple
+denoise:   1.0
+mu:        native Turbo behavior / 1.15 where the workflow exposes it
+seed:      random unless user pins one
+```
+
+These are defaults, not hard-coded limits. User advanced controls remain available.
+
+### INT8 ConvRot choice
+
+Keep **INT8 ConvRot** as the v1 checkpoint. Recent community comparisons put it among the strongest quality/speed quantized Krea 2 Turbo options and it fits the direction already chosen for SceneBuilder. Do not introduce INT4/GGUF as a second v1 variable.
+
+---
+
+## 3. VAE
 
 User-selectable:
 
@@ -66,10 +136,16 @@ wan_2_1    -> selected Wan 2.1 VAE checkpoint
 Rules:
 
 - `qwen_image` is the default/native Krea 2 path.
-- `wan_2_1` remains selectable only after matched-seed runtime validation.
+- `wan_2_1` is the alternate selectable VAE.
 - Qwen text conditioning is independent of the selected VAE decode path.
+- Both VAE files are baked into the image.
+- Runtime validation only needs to prove both decode correctly on the final pinned stack; no quality tournament is required.
 
-### LoRAs
+---
+
+## 4. User LoRAs and baked style-reference adapter
+
+### User LoRAs
 
 - Normal LoRA mode supports **0-3 user-selected LoRAs**.
 - Existing R2 objects remain unchanged:
@@ -86,17 +162,44 @@ models/lora/krea2/minimalist_vector_art_thumbnail.png
 models/lora/krea2/dark_church_style_thumbnail.png
 ```
 
-- Every LoRA gets an immutable D1 `lora_id`.
+- Every user LoRA gets an immutable D1 `lora_id`.
 - Browser/API/job identity is `loraId`, never display name or filename.
 - Display names are intentionally not unique.
 - D1 resolves `lora_id -> trusted exact R2 object key` before dispatch.
 - Optional SHA-256/ETag metadata is integrity/version metadata, not identity.
 
+### Native style-reference adapter is baked
+
+The native Comfy Krea 2 style-reference workflow requires:
+
+```text
+krea2_style_reference.safetensors
+```
+
+Bake this system adapter into the Docker image. It is approximately 457 MB and is a fixed runtime dependency, so there is no benefit in fetching it from R2 for every fresh pod.
+
+Bake it at:
+
+```text
+/opt/scenebuilder-models/krea2/loras/krea2_style_reference.safetensors
+```
+
+Comfy sees it through the configured extra model paths.
+
+Rules:
+
+- it is a **system/internal runtime asset**, not a user catalog LoRA;
+- it is not returned by `GET /api/loras`;
+- it does not consume one of the user's 0-3 LoRA slots;
+- style-reference mode uses it automatically;
+- do not create an R2 runtime download/cache path for it;
+- no D1 `lora` row is required for the baked system adapter; its version/checksum belongs in runtime build metadata if we want observability.
+
 ---
 
-## 2. Native ComfyUI baseline
+## 5. Native ComfyUI baseline
 
-Use the same tested Comfy revision currently used by H3 unless a Krea-specific canary proves that a deliberate upgrade is required:
+Use the same tested Comfy revision currently used by H3 unless a real Krea runtime incompatibility requires a deliberate shared-pin upgrade:
 
 ```text
 COMFYUI_COMMIT = 2a68ce33b4c9ea6ee4283e618a74560cefb32694
@@ -117,7 +220,7 @@ Do not follow moving Comfy `master` in production.
 
 ---
 
-## 3. CUDA / PyTorch / Python baseline
+## 6. CUDA / PyTorch / Python baseline
 
 Start with the same proven software family as H3:
 
@@ -128,9 +231,9 @@ Python: 3.13 target
 Ubuntu: 24.04
 ```
 
-The pinned Comfy quantization path enables optimized `comfy-kitchen` CUDA operations on CUDA 13+.
+The pinned Comfy quantization path supports the optimized `comfy-kitchen` CUDA operations required by the selected INT8 ConvRot route.
 
-Build stages may use CUDA devel when required. Prefer a matching CUDA 13 runtime image for the final stage if the real ConvRot canary passes.
+Build stages may use CUDA devel when required. Prefer a matching CUDA 13 runtime image for the final stage if the real ConvRot smoke test passes.
 
 Strip build-only artifacts from final layers:
 
@@ -146,13 +249,13 @@ No SageAttention or FlashAttention dependency in v1. Start with native Comfy/PyT
 
 ---
 
-## 4. Docker layer order and why Comfy can come after the heavy weights
+## 7. Docker layer order and why Comfy can come after the heavy weights
 
 It is safe for the **Docker build lineage** to add Krea/Qwen/VAE files before installing Comfy. Docker layer order is not runtime execution order: the final container filesystem contains every lower layer before the runtime starts.
 
-The only thing that would be unsafe is placing model files inside `/opt/ComfyUI` before cloning/installing Comfy into that same non-empty directory.
+The unsafe pattern would be putting model files inside `/opt/ComfyUI` before cloning/installing Comfy into that same non-empty directory.
 
-Therefore heavy weight layers must use a Comfy-independent model root:
+Use a Comfy-independent model root:
 
 ```text
 /opt/scenebuilder-models/krea2/
@@ -163,17 +266,19 @@ Therefore heavy weight layers must use a Comfy-independent model root:
   vae/
     qwen_image_vae.safetensors
     <wan-2.1-vae>.safetensors
+  loras/
+    krea2_style_reference.safetensors
 ```
 
-Then the single Comfy layer installs into:
+Then install the single Comfy copy into:
 
 ```text
 /opt/ComfyUI
 ```
 
-and wires the baked SceneBuilder model root using Comfy `extra_model_paths.yaml` (or equivalent stable folder-path registration) so native loaders see the files in the normal categories.
+and wire `/opt/scenebuilder-models/krea2` through Comfy `extra_model_paths.yaml` or equivalent stable folder-path registration.
 
-This means **we do not need H3's historical two-Comfy/core-overlay retrofit**.
+We do **not** copy H3's historical two-Comfy/core-overlay retrofit.
 
 Recommended linear chain:
 
@@ -182,22 +287,25 @@ Recommended linear chain:
    CUDA 13 + Python + PyTorch 2.13/cu130 + common runtime packages
 
 10 image-krea2-model-int8
-   add Krea 2 Turbo INT8 under /opt/scenebuilder-models/krea2
+   Krea 2 Turbo INT8
 
 20 image-krea2-vaes
-   add Qwen Image + selected Wan 2.1 VAE
+   Qwen Image + Wan 2.1 VAE
 
 30 image-krea2-qwen-bf16
-   add Qwen3-VL-4B BF16
+   Qwen3-VL-4B BF16
+
+35 image-krea2-system-adapters
+   baked krea2_style_reference.safetensors
 
 40 image-krea2-comfyui
-   install the single pinned Comfy revision into /opt/ComfyUI
-   install matching requirements/comfy-kitchen
-   configure extra model paths to /opt/scenebuilder-models/krea2
-   verify Krea2 + KREA2 CLIP + ConvRot discovery
+   one pinned Comfy revision
+   matching requirements/comfy-kitchen
+   extra model paths -> /opt/scenebuilder-models/krea2
+   verify Krea2 + KREA2 CLIP + ConvRot + system LoRA discovery
 
 50 image-krea2-nodes
-   only custom/helper nodes actually required
+   only helper/custom nodes actually required
 
 60 image-krea2-workflow
    API workflows + manifests
@@ -206,35 +314,35 @@ Recommended linear chain:
    LAST layer
    generic image pod HTTP server
    model-family adapter registry
-   R2 + output handling
-   LoRA cache manager
+   R2/output handling
+   user-LoRA cache manager
    workflow patching
    cancellation/progress/readiness
    memory cleanup/offload
-   idle/draining lifecycle
+   global-pool idle/draining lifecycle
 ```
 
 Consequences:
 
-- changing Comfy does not redownload the parent Krea/Qwen/VAE layers;
+- changing Comfy does not redownload parent Krea/Qwen/VAE/system-adapter layers;
 - changing nodes rebuilds nodes/workflow/runtime only;
 - changing workflows rebuilds workflow/runtime only;
-- changing runtime rebuilds only the last layer;
-- adding LoRAs changes D1/R2 only.
+- changing runtime rebuilds only the final layer;
+- adding/changing user LoRAs changes D1/R2 only.
 
-The Krea final image can still be named specifically, for example:
+Final image may still be model-specific:
 
 ```text
 khuxaima/scenebuilder-krea2-pod:latest
 ```
 
-while the **control-plane table and pod protocol remain generic image infrastructure**.
+while the control-plane tables/protocol stay generic.
 
 ---
 
-## 5. Hetzner layer-by-layer build
+## 8. Hetzner layer-by-layer build
 
-Add a dedicated Krea build workflow:
+Add:
 
 ```text
 .github/workflows/hetzner-krea2-build.yml
@@ -256,72 +364,27 @@ debug_keep_minutes
 docker_build_attempts
 ```
 
-Recommended targets:
+Targets:
 
 ```text
 base
 model-int8
 vaes
 qwen-bf16
+system-adapters
 comfyui
 nodes
 workflow
 runtime
 ```
 
-Push each successful parent so later retries reuse published heavyweight layers.
+Push each successful parent so later retries reuse the published heavyweight layers.
 
 ---
 
-## 6. Resolution contract
+## 9. Sampling/settings contract
 
-Krea 2 is not restricted to one fixed image shape. Use exact SceneBuilder aspect-ratio presets aligned to a 16-pixel grid.
-
-Initial normal presets:
-
-```text
-1K landscape: 1280 x 720
-1K portrait:   720 x 1280
-
-2K landscape: 2048 x 1152
-2K portrait:  1152 x 2048
-```
-
-Why not `1368x768` as the normal product default:
-
-- it is a ~1 MP calculator result, not a special Krea training resolution;
-- `1368` is not divisible by 16;
-- the model can pad it, but SceneBuilder gets no benefit from hidden padding;
-- `1280x720` is exact 16:9, fully aligned and cheaper on 20 GB GPUs.
-
-Canary `1368x768` once against `1280x720`. If the larger pixel count gives a meaningful quality gain, compare an aligned exact-ratio alternative such as `1536x864` rather than making a slightly misaligned size the default.
-
-Optional 2K performance fallback to benchmark:
-
-```text
-1792 x 1008
-1008 x 1792
-```
-
-Do not silently downgrade a requested 2K job; use GPU routing/escalation policy.
-
----
-
-## 7. Sampling/settings contract
-
-Native Turbo defaults:
-
-```text
-steps:     8
-cfg:       1.0
-sampler:   euler
-scheduler: simple
-denoise:   1.0
-seed:      random unless pinned
-VAE:       qwen_image
-```
-
-These are defaults, not hidden constants. User-controllable fields:
+User controls:
 
 ```text
 prompt
@@ -336,65 +399,60 @@ scheduler
 denoise
 VAE
 0-3 user LoRAs OR style-reference images
-strength for each selected LoRA
+strength for each selected user LoRA
 ```
 
 Initial advanced ranges:
 
 ```text
 steps:       1-50, default 8
-cfg:         configurable, default 1.0
-sampler:     tested allowlist; Euler guaranteed
-scheduler:   tested allowlist; simple guaranteed
+cfg:         configurable, default 1.0 in Comfy contract
+sampler:     allowlisted; Euler guaranteed
+scheduler:   allowlisted; simple guaranteed
 denoise:     0.0-1.0, default 1.0
 seed:        explicit integer or random
-VAE:         qwen_image | wan_2_1 after Wan canary
+VAE:         qwen_image | wan_2_1
+resolution:  quality 2048x1152 or fast 1280x720, orientation mirrored
 ```
+
+Do not silently accept arbitrary sampler/scheduler strings. Persist exact selected values in the durable job snapshot.
 
 ### Negative prompt
 
-Native Turbo default uses zeroed negative conditioning. At `CFG=1`, a typed negative prompt is effectively inactive.
+Native Turbo/no-guidance behavior effectively makes a typed negative prompt inactive at the default no-guidance/CFG1 Comfy path.
 
 UI/runtime behavior:
 
-- CFG 1: show negative prompt as inactive/no effect;
-- CFG > 1: encode supplied negative text and feed it as guided negative conditioning;
-- validate higher-CFG behavior separately because Turbo is distilled for low/no guidance.
+- default native path: show negative prompt as inactive/no effect;
+- if the user intentionally enables guided/higher-CFG mode, encode supplied negative text with the same Krea text encoder;
+- persist both the chosen guidance mode and negative text.
 
 ### Prompt enhancement
 
-Always store the raw user prompt. If enhancement is enabled, also store the effective/enhanced prompt in execution metadata so regeneration is reproducible.
+Always store the raw user prompt. If enhancement is enabled, also store the effective/enhanced prompt in execution metadata.
 
 ---
 
-## 8. Two style paths
+## 10. Two style paths
 
 Per generation choose one of:
 
 ```text
-A. user LoRA mode
-   1-3 user-selected D1 LoRA IDs
+A. USER LoRA mode
+   0-3 user-selected D1 LoRA IDs
    no style-reference images
 
-B. style-reference mode
+B. STYLE REFERENCE mode
    zero user-selected LoRAs
    1-3 style-reference images
-   hidden/internal Krea style-reference adapter/workflow
+   baked krea2_style_reference.safetensors is applied automatically
 ```
 
 Do not combine arbitrary user LoRAs and style-reference images in v1.
 
-The native Krea style-reference workflow uses an internal `krea2_style_reference.safetensors` adapter. Treat it as a hidden/system LoRA:
-
-- not visible in normal UI LoRA selection;
-- stored in R2, not baked into Docker;
-- represented by an internal D1 LoRA row (`is_internal=1`) or an equivalent trusted system-asset row;
-- cached locally like other LoRAs;
-- automatically selected by style-reference mode.
-
 ---
 
-## 9. Style-reference image dimensions
+## 11. Style-reference image dimensions
 
 Style references do **not** need to match:
 
@@ -406,32 +464,24 @@ output aspect ratio
 
 Do not stretch all references to the output shape.
 
-Runtime preprocessing policy:
+Runtime preprocessing:
 
 ```text
 1. EXIF-orient
 2. convert to RGB
 3. preserve source aspect ratio
-4. do not force the output aspect ratio
-5. only downscale inputs that are too large for the qualified memory policy
+4. do not force output aspect ratio
+5. only downscale an input when it exceeds the runtime safety cap
 6. let pinned native Qwen/Krea preprocessing align each image to its own patch grid
 ```
 
-Canary mixed references:
-
-```text
-1024x1024
-1280x720
-720x1280
-odd non-16/32-aligned user sizes
-all three together
-```
+Functional tests must include square + landscape + portrait references and odd user dimensions. This is a compatibility smoke test, not a visual benchmark.
 
 ---
 
-## 10. Generic D1 LoRA catalog
+## 12. Generic D1 LoRA catalog
 
-Create one catalog that can serve future image and video models.
+Create one catalog for future image and video LoRAs.
 
 ### `lora`
 
@@ -455,7 +505,6 @@ CREATE TABLE IF NOT EXISTS lora (
 
     enabled INTEGER NOT NULL DEFAULT 1,
     visibility TEXT NOT NULL DEFAULT 'private',
-    is_internal INTEGER NOT NULL DEFAULT 0,
 
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
@@ -464,11 +513,11 @@ CREATE TABLE IF NOT EXISTS lora (
 
 Rules:
 
-- `id` is the immutable API/cache/job identity.
-- `display_name` is not unique.
+- `id` is immutable API/cache/job identity.
+- `display_name` is **not unique**.
 - `thumbnail_object_key` is UI-only.
 - `lora_type`: `image | video | both`.
-- `is_internal=1` hides system adapters from normal UI catalogs.
+- this table is for catalog/dynamic assets; the baked Krea style-reference system adapter does not need a row.
 
 ### `lora_model_support`
 
@@ -495,11 +544,11 @@ CREATE TABLE IF NOT EXISTS lora_model_support (
 );
 ```
 
-The same physical R2 file can support multiple future model keys/quantizations without duplication.
+One physical R2 asset can support multiple future model keys/quantizations without duplication.
 
 ---
 
-## 11. LoRA local disk + hot RAM policy
+## 13. User-LoRA local disk + hot RAM policy
 
 Local cache path:
 
@@ -507,60 +556,42 @@ Local cache path:
 /opt/scenebuilder-image/cache/loras/<lora_id>.safetensors
 ```
 
-Use immutable `lora_id`, never display name, as the filename/cache key.
+Use immutable `lora_id`, never display name, as cache filename/key.
 
 First use:
 
 ```text
 browser loraId
  -> Worker resolves D1 asset + compatibility
- -> pod receives trusted loraId + R2 object key + optional integrity metadata
+ -> pod receives trusted loraId + R2 key + integrity metadata
  -> cache hit: reuse local file
  -> cache miss: R2 -> <lora_id>.part -> validate -> atomic rename
  -> parse LoRA tensors
  -> apply model patch at requested strength
 ```
 
-### Hot CPU cache
-
-Keep the currently useful parsed LoRA state/tensors in CPU RAM when memory allows.
-
-Cache identity should include asset version when available:
+Hot CPU cache:
 
 ```text
-lora_id + etag/version/sha256
+identity = lora_id + asset version/etag/sha256 when known
 ```
 
-Strength is **not** part of cache identity; the same parsed LoRA can be repatched with a different strength.
+Strength is not part of cache identity. The same parsed tensors can be repatched at another strength.
 
-If the next job uses the same LoRA set:
+If the next job uses the same LoRA set, reuse hot CPU tensors. If it uses a different set, old tensors are evictable from RAM while the safetensors file remains in bounded local disk cache.
 
-```text
-reuse hot CPU tensors
-avoid disk/R2 read
-repatch at requested strengths
-```
+Disk eviction rules:
 
-If the next job uses a different set:
-
-```text
-release old hot tensors as needed
-leave old safetensors in bounded disk cache
-load new set from disk cache or R2
-```
-
-Disk eviction:
-
-- never evict baked model/Qwen/VAE assets;
-- never evict an active job's LoRA;
-- delete oldest unused LoRA cache files first;
-- redownload later from R2 when needed.
+- never evict baked model/Qwen/VAE/system-adapter assets;
+- never evict an active job's user LoRA;
+- delete oldest unused cached user LoRAs first;
+- redownload from R2 if needed later.
 
 ---
 
-## 12. Krea/Qwen/VAE warm CPU offload policy
+## 14. Krea/Qwen/VAE warm CPU offload policy
 
-The main CPU-offload target is the expensive **Krea model + Qwen text encoder**, not the LoRA file itself.
+The main CPU-offload targets are the expensive **Krea model + Qwen text encoder**, not the LoRA file.
 
 Desired post-job state:
 
@@ -573,49 +604,49 @@ CPU RAM:
   Krea model object/weights retained where safe
   Qwen encoder object/weights retained where safe
   VAE object retained where useful
-  current LoRA tensors retained if within hot-cache budget
+  current user-LoRA tensors retained if within hot-cache budget
 
 Container disk:
-  baked checkpoints remain
-  bounded LoRA safetensors cache remains
+  baked checkpoints + baked style adapter remain
+  bounded dynamic user-LoRA cache remains
 ```
 
 Constrained-GPU sequence:
 
 ```text
-1. get Qwen from warm CPU state or load once from baked checkpoint
+1. get Qwen from warm CPU state or baked checkpoint
 2. move required encoder state to GPU
 3. encode prompt + optional style images
 4. offload Qwen back to CPU
 5. free reclaimable GPU cache
-6. get Krea from warm CPU state or load once
+6. get Krea from warm CPU state or baked checkpoint
 7. activate Krea under Comfy memory management
-8. get required LoRAs from hot RAM / disk / R2
-9. patch model
-10. sample
+8. get user LoRAs from hot RAM / disk / R2 when LoRA mode is used
+9. apply user LoRAs OR baked style-reference adapter path
+10. sample one image
 11. activate selected VAE and decode
 12. upload result
 13. delete job temp media
 14. retain reusable model objects in CPU RAM
-15. retain useful LoRA tensors under RAM cap
+15. retain useful dynamic LoRA tensors under RAM cap
 16. release job-specific GPU memory
 ```
 
-Do **not** call an end-of-job cleanup equivalent to `unload_models=true` for every job. That defeats warm reuse.
+Do **not** run `unload_models=true` after every normal successful job. That destroys warm reuse.
 
-Normal same-family idle cleanup should free reclaimable GPU memory while preserving reusable host-side/offloaded model state. A full model unload is appropriate for:
+Normal same-family cleanup frees reclaimable GPU memory while preserving reusable host/offloaded model state. Full model unload is appropriate for:
 
 ```text
-model-family switch
-fatal CUDA state
-host-RAM pressure that requires eviction
+incompatible model-family switch
+fatal CUDA/model state
+host-RAM pressure requiring eviction
 pod draining/deletion
 ```
 
-Host-RAM pressure eviction priority:
+Host-RAM eviction order:
 
 ```text
-old hot LoRA tensors
+old hot dynamic LoRA tensors
 inactive VAE
 Qwen warm state
 Krea warm state last
@@ -623,72 +654,66 @@ Krea warm state last
 
 ---
 
-## 13. Enhancer engine pattern to copy
+## 15. Enhancer engine pattern to copy
 
-Enhancer already implements the conceptual pattern:
+Enhancer already demonstrates the lifecycle concept:
 
 ```text
-persistent _ENGINE_CACHE
-  deserialized reusable engine survives between jobs
+persistent process cache
+  reusable expensive engine/model state survives jobs
 
-job/use _EXECUTION_CACHE
-  execution context/CUDA stream/workspace is releasable
+job execution cache
+  contexts/streams/workspaces are releasable after each job
 ```
-
-At job end Enhancer releases execution resources and CUDA/CuPy allocator blocks but keeps the process-level engine cache.
 
 Generic image-pod analogue:
 
 ```text
 warm/process state:
-  model-family adapters
-  Krea/Qwen/VAE CPU model objects
-  current LoRA parsed states
-  reusable workflow/model metadata
+  model-family adapter
+  Krea/Qwen/VAE CPU objects
+  current dynamic LoRA parsed states
+  workflow/model metadata
 
 job-specific state:
   activations
   latents
   sampler tensors
-  temporary model patches
-  uploaded reference tensors
+  temporary patches
+  reference tensors
   CUDA workspace/cache
 ```
 
-Release job state, preserve useful warm state.
+Release the second category after every image; preserve the first as host RAM allows.
 
 ---
 
-## 14. Generic image pod — not Krea-specific
+## 16. Generic image pod — not Krea-specific
 
-The worker/pod infrastructure must be named and modeled generically because future image families will be added.
-
-Use a generic service identity such as:
+Service identity:
 
 ```text
 scene-builder-image-pod
 ```
 
-Krea is an adapter/task family:
+Krea adapter/task family:
 
 ```text
 krea2_image
 ```
 
-Future examples can be added without a new worker table/protocol:
+Future examples:
 
 ```text
 z_image_turbo
-future_krea_base
+krea2_base
 future_flux_family
 other image families
 ```
 
-A runtime image may advertise one or more supported model/task families in `capabilities_json`. The control plane only reuses a warm worker when the requested job is compatible with that worker image/capabilities.
+A runtime image advertises supported families in `capabilities_json`. The control plane reuses a worker only when its image/capabilities support the requested family.
 
-### Model-family adapter registry
-
-Runtime code should route through a registry rather than hard-coded Krea branches everywhere:
+Runtime registry:
 
 ```text
 TASK_FAMILY_REGISTRY = {
@@ -701,31 +726,29 @@ Each adapter owns:
 
 ```text
 workflow + manifest selection
-model files required
-request validation
-settings patching
+required files
+request/settings validation
 style/reference handling
 model-switch cleanup rules
 result parsing
+minimum GPU/runtime requirements
 ```
 
-The HTTP server, auth, queue, idle timeout, draining, callbacks, diagnostics and error lifecycle stay generic.
+The HTTP server, auth, one-job queue, idle timeout, draining, callbacks, diagnostics, provider lifecycle, and D1 worker table remain generic.
 
 ---
 
-## 15. Generic D1 `image_pod_workers` table
+## 17. D1 `image_pod_workers` — global reusable worker inventory
 
-Create a **new image-worker table**, independent from Krea naming.
-
-Do not reuse `h3_pod_workers` or `enhancer_pod_workers`, and do not create `krea2_pod_workers`.
-
-Recommended primary schema:
+Create a separate generic image-worker table. Do not reuse `h3_pod_workers` / `enhancer_pod_workers`, and do not create `krea2_pod_workers`.
 
 ```sql
 CREATE TABLE IF NOT EXISTS image_pod_workers (
     id TEXT PRIMARY KEY,
 
     service_kind TEXT NOT NULL DEFAULT 'image_generation',
+
+    -- current assignment metadata only; NOT permanent ownership
     project_id TEXT,
     user_email TEXT,
 
@@ -741,7 +764,6 @@ CREATE TABLE IF NOT EXISTS image_pod_workers (
     host_ram_mb INTEGER,
 
     status TEXT NOT NULL DEFAULT 'provisioning',
-    current_workload_id TEXT,
     current_job_id TEXT,
 
     runtime_image TEXT NOT NULL,
@@ -810,92 +832,222 @@ CREATE INDEX IF NOT EXISTS idx_image_pod_workers_delete_retry
   ON image_pod_workers(status, delete_next_retry_at, delete_attempts);
 ```
 
-### Worker states
+### Critical ownership rule
 
-Use explicit generic states, for example:
+`project_id` is **current assignment/observability metadata only**.
 
-```text
-provisioning
-starting
-idle
-busy
-draining
-deleting
-deleted
-unhealthy
-failed
-```
-
-`draining` means:
-
-- do not accept new workloads;
-- active work may finish or be cancelled;
-- once no work remains, control plane deletes/reconciles the provider instance.
-
-### `loaded_*` fields
-
-These are observability/reuse hints, not the source of truth for the model files. Example:
+When a pod becomes healthy idle:
 
 ```text
-loaded_family = krea2_image
-loaded_model = krea-2-turbo
-loaded_quantization = int8_convrot
-loaded_text_encoder = qwen3vl_4b_bf16
-loaded_vae = qwen_image
+current_job_id = NULL
+project_id = NULL
+user_email = NULL
+status = idle
+provider_detail/warm_state may remain
 ```
 
-Future image models reuse the same columns.
+The pod is now global capacity and may immediately accept a compatible queued image from **any project**.
+
+Never reserve an idle Krea/image pod for the project that created it.
 
 ---
 
-## 16. Generic image pod workload grouping
+## 18. Per-project capacity policy: max 5, 1 pod per 3 ready images
 
-Keep the existing `image_generation_jobs` table as the durable per-image job source of truth.
+Configuration:
 
-Optionally add a lightweight generic dispatch grouping table so Storyboard batches can send several image jobs sequentially to one warm worker without changing per-image ownership/status:
+```text
+IMAGE_POD_MAX_ACTIVE_PER_PROJECT = 5
+IMAGE_POD_QUEUED_IMAGES_PER_NEW_POD = 3
+IMAGE_POD_CONCURRENCY_PER_WORKER = 1
+```
+
+For ready queued images belonging to one project:
+
+```text
+1-3 images   -> target 1 pod
+4-6 images   -> target 2 pods
+7-9 images   -> target 3 pods
+10-12 images -> target 4 pods
+13+ images   -> target 5 pods max
+```
+
+Formula:
+
+```text
+desired_project_capacity = min(5, ceil(ready_queued_jobs / 3))
+```
+
+The cap counts workers currently **reserved/provisioning/starting/busy for that project**. Global idle workers with `project_id=NULL` do not belong to any project and do not count until atomically claimed for a job.
+
+### Capacity order
+
+Always do this in order:
+
+```text
+1. use a compatible ready idle global pod first
+2. use already-starting compatible capacity when appropriate
+3. only provision new RunPod/Novita instances for the remaining deficit
+```
+
+Never create a fresh pod while compatible healthy idle global capacity is sitting available.
+
+For a frontend window of 10 ready images, normal target capacity is:
+
+```text
+ceil(10 / 3) = 4 pods
+```
+
+Each of those four pods still processes only one image at a time and then immediately grabs another compatible queued image.
+
+---
+
+## 19. Global pool scheduling
+
+Copy the useful H3 global-pool behavior into the generic image dispatcher.
+
+### Immediate post-job handoff
+
+When a pod finishes an image:
+
+```text
+1. upload/finalize result
+2. clear job-specific GPU state
+3. mark worker idle/global
+4. immediately attempt an atomic claim of the next compatible queued image
+5. if a job exists, mark busy and dispatch without waiting for the next cron
+6. if no job exists, start normal idle timeout
+```
+
+This makes warm capacity useful across projects immediately.
+
+### Job selection
+
+Primary scheduling order:
+
+```text
+compatible task family/runtime
+project below 5-active-pod cap
+oldest ready queued job first
+```
+
+Secondary affinity may prefer, without starving older work:
+
+```text
+same loaded_family/model
+same VAE
+same hot user-LoRA set
+```
+
+Affinity is a latency optimization only; it must not turn workers into project-owned or LoRA-owned pods.
+
+### Cold-start reservation recovery
+
+If a ready global worker appears while another fresh instance is still pulling for the same queued job, the ready worker may take the job. The still-pulling instance must **not** be blindly deleted if it can safely become another global idle worker when ready. This mirrors the existing H3 global-pool approach.
+
+---
+
+## 20. Frontend/D1 batching — window of 10, durable jobs are the scheduler source
+
+Current CharacterScreen and Storyboard generation code uses a **maximum concurrency window of 10**. It does not reliably submit one atomic 10-item D1 batch: the browser starts individual image-generation calls, and Storyboard may defer scenes whose previous-image dependency is not ready.
+
+For the image-pod architecture, D1 must remain the durable source of scheduling truth. Do not make pod capacity depend on React promises staying alive.
+
+### Target API behavior
+
+Add/extend a generic batch submission path:
+
+```text
+POST /api/image-generation/batch
+max items per request = 10
+surface = characters | storyboard
+```
+
+The Worker should insert the accepted batch and all its image job rows before returning success.
+
+For >10 targets, the frontend sends additional chunks of up to 10. It still does **not** need to send the entire project at once.
+
+### `image_generation_batches`
+
+Add a lightweight generic UI/request grouping table:
 
 ```sql
-CREATE TABLE IF NOT EXISTS image_pod_workloads (
+CREATE TABLE IF NOT EXISTS image_generation_batches (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,
     user_email TEXT,
-
-    requested_provider TEXT,
-    actual_provider TEXT,
+    surface TEXT NOT NULL,
+    model_key TEXT,
+    requested_count INTEGER NOT NULL,
     status TEXT NOT NULL DEFAULT 'queued',
-
-    job_ids_json TEXT NOT NULL DEFAULT '[]',
-    task_families_json TEXT NOT NULL DEFAULT '[]',
-
-    pod_worker_id TEXT,
-    provider_task_id TEXT,
-    gpu_class TEXT,
-    region TEXT,
-
-    runtime_image TEXT,
-    runtime_image_digest TEXT,
-
-    continue_on_item_failure INTEGER NOT NULL DEFAULT 1,
-    idle_timeout_seconds INTEGER NOT NULL DEFAULT 60,
-
-    attempt_log_json TEXT NOT NULL DEFAULT '[]',
-    error_code TEXT,
-    error TEXT NOT NULL DEFAULT '',
-
+    completed_count INTEGER NOT NULL DEFAULT 0,
+    failed_count INTEGER NOT NULL DEFAULT 0,
+    cancelled_count INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
-    started_at INTEGER,
     completed_at INTEGER,
     updated_at INTEGER NOT NULL
 );
 ```
 
-This table is a dispatch/lifecycle grouping only. `image_generation_jobs` remains the durable leaf-job record used by CharacterScreen/Storyboard status, billing, cancellation and output finalization.
+Extend existing `image_generation_jobs` generically with fields such as:
+
+```text
+request_batch_id
+batch_index
+batch_total
+pod_worker_id
+requested_provider
+actual_provider
+settings_json
+execution_json / provider_detail_json
+attempt_log_json
+heartbeat_at
+last_progress_at
+started_at
+```
+
+The existing durable per-image row remains the leaf source of truth for status, billing, cancellation, output and thumbnails.
+
+### Storyboard dependencies
+
+Do not hold a dependent scene only in browser memory.
+
+If a storyboard image needs the previous scene image:
+
+```text
+insert its D1 image job now
+persist dependency_target_id / dependency job relationship
+mark it blocked/not-ready for dispatch
+unlock it automatically when the required predecessor completes
+```
+
+The pod scheduler counts only **ready queued** jobs when calculating the 1-pod-per-3-images target.
+
+Character jobs are normally independent and can all become ready immediately.
 
 ---
 
-## 17. Generic lifecycle auxiliary tables
+## 21. No multi-image pod workload
 
-For parity with the mature Enhancer control plane, add image-specific lifecycle helpers rather than putting provider deletion/replay coordination in memory only.
+Because the product rule is **1 pod = 1 active image**, do not create H3-style multi-item image workloads as the main scheduling abstraction.
+
+Use:
+
+```text
+image_generation_jobs = durable leaf jobs
+image_generation_batches = frontend/request grouping only
+image_pod_workers = reusable GPU capacity
+```
+
+The pod HTTP endpoint may retain the familiar `/workloads` route for lifecycle parity, but an image workload contains exactly **one image item** in v1.
+
+That keeps cancellation, retry, billing, progress and reassignment simple.
+
+---
+
+## 22. Generic lifecycle auxiliary tables
+
+Use mature Enhancer-style durable coordination.
 
 ### Provider deletion lock
 
@@ -916,13 +1068,12 @@ CREATE TABLE IF NOT EXISTS image_pod_delete_locks (
 );
 ```
 
-### Event nonce / callback replay protection
+### Event nonce / replay protection
 
 ```sql
 CREATE TABLE IF NOT EXISTS image_pod_event_nonces (
     nonce TEXT PRIMARY KEY,
     worker_id TEXT NOT NULL,
-    workload_id TEXT,
     job_id TEXT,
     event_type TEXT,
     event_timestamp INTEGER NOT NULL,
@@ -931,19 +1082,74 @@ CREATE TABLE IF NOT EXISTS image_pod_event_nonces (
 );
 ```
 
-### Dispatch lease/lock
+### Dispatch lease
 
-Use a short D1 lease when assigning a queued image job/workload to a reusable worker so two concurrent dispatcher invocations cannot claim the same `idle` worker.
+Use a short atomic D1 lease/state transition when claiming:
 
-This can be a dedicated `image_pod_dispatch_locks` table or an atomic conditional state update, but the behavior must be tested explicitly.
+```text
+queued job -> worker
+idle worker -> job
+```
+
+so two concurrent request handlers/cron invocations cannot claim the same job or worker.
+
+A dedicated `image_pod_dispatch_locks` table is acceptable, but an atomic conditional update is preferred if it is simpler and equally safe.
 
 ---
 
-## 18. Generic image pod HTTP/state-machine parity with H3 + Enhancer
+## 23. Cron/reconciliation cadence
 
-The image pod should combine the strongest mature behavior from H3 and Enhancer.
+Reuse SceneBuilder's existing scheduled-trigger structure.
 
-### HTTP API
+### Every 1 minute — dispatcher + fast reconciler
+
+Use the existing:
+
+```text
+* * * * *
+```
+
+handler to:
+
+```text
+claim queued ready image jobs for idle global pods
+calculate per-project desired capacity with ceil(ready/3), max 5
+provision only real capacity deficits
+recover stale reservations
+refresh heartbeat/progress-derived state
+release project association from idle workers
+requeue jobs whose worker reservation safely failed
+check draining workers that are now empty
+```
+
+Immediate job-completion handoff remains event-driven; the one-minute cron is a recovery/fill-the-gaps mechanism, not the normal latency path.
+
+### Every 15 minutes — deletion/reaper reconciliation
+
+Reuse the existing 15-minute cadence pattern:
+
+```text
+7,22,37,52 * * * *
+```
+
+for image-pod provider cleanup/reconciliation:
+
+```text
+delete expired/draining idle pods
+retry failed RunPod/Novita deletions
+verify provider instance actually disappeared
+clean stale failed provisioning workers
+reconcile D1 rows against provider truth
+clean expired event nonces/locks where appropriate
+```
+
+Do not rely on the pod process exiting to stop provider billing. SceneBuilder must confirm deletion through the provider APIs.
+
+---
+
+## 24. Generic image pod HTTP/state-machine parity with H3 + Enhancer
+
+HTTP API:
 
 ```text
 GET  /health
@@ -951,114 +1157,100 @@ GET  /ready
 GET  /diagnostics
 GET  /diagnostics/gpu
 
-POST /workloads
+POST /workloads                  # exactly one image item in v1
 GET  /workloads/:id
 POST /workloads/:id/cancel
 POST /workloads/:id/items/:jobId/cancel
 ```
 
-Protected endpoints use:
+Protected endpoints:
 
 ```text
 Authorization: Bearer <SCENEBUILDER_POD_TOKEN>
 ```
 
-### Auth
-
-Reuse:
+Auth reuse:
 
 ```text
 H3_POD_AUTH_MASTER_SECRET
-```
-
-Derive per-worker:
-
-```text
 SCENEBUILDER_POD_TOKEN = HMAC(H3_POD_AUTH_MASTER_SECRET, workerId)
 ```
 
-Do not create a Krea-only pod auth secret.
+No Krea-only pod auth secret.
 
 ### Queue/busy behavior
 
-- queue capacity 1 for v1;
-- one active GPU job at a time;
-- duplicate workload ID is idempotently acknowledged;
-- if worker is already busy/queued, reject another workload with conflict instead of silently overcommitting VRAM;
-- if worker is draining, reject all new workloads.
+- queue capacity 1;
+- exactly one active image at a time;
+- duplicate workload/job request is idempotently acknowledged;
+- busy/queued worker rejects another workload instead of overcommitting VRAM;
+- draining worker rejects all new work.
 
-### Worker transitions
+### Worker states
 
 ```text
+provisioning
+pulling
 starting
-  -> idle/ready
-  -> busy
-  -> idle
-  -> draining
-  -> deleting/deleted
-```
-
-Failure paths can enter:
-
-```text
+idle
+busy
+draining
+deleting
+deleted
 unhealthy
 failed
 ```
 
-Control plane owns provider deletion; the pod should never assume that a self-exit guarantees the RunPod/Novita instance was actually deleted/billing stopped.
-
 ### Idle timeout
 
-After workload completion:
+After a completed job, first attempt immediate global handoff. Only if no compatible queued job exists:
 
 ```text
-worker_status = idle
+status = idle
 idle_since = now
 terminate_after = now + idle_timeout_seconds
+project_id = NULL
+user_email = NULL
 ```
 
 When deadline expires:
 
 ```text
-worker_status = draining
+status = draining
 emit idle_expired
 refuse new work
 ```
 
-The SceneBuilder control plane performs provider deletion. A D1/provider reaper must recover if the callback is lost.
+Control plane owns provider deletion.
 
 ### Draining
 
-Set draining when:
+Enter draining for:
 
 ```text
-idle timeout expires
-control plane explicitly requests retirement
-a runtime/image version is being rolled out
-a worker becomes unsafe for reuse after a fatal error
+idle expiration
+explicit retirement
+runtime/image rollout
+fatal CUDA/model state
+provider mismatch/unsafe worker
 ```
 
-Draining semantics:
-
-- reject new jobs;
-- allow current job to finish unless cancellation is requested;
-- emit state change;
-- delete only after no active work remains.
+Draining rejects new jobs, lets safe active work finish unless cancelled, and is deleted only when no image remains active.
 
 ### Provision/readiness timeout
 
 Persist `provision_deadline_at`. If `/ready` does not succeed before deadline:
 
 ```text
-mark worker failed/unhealthy
-record provider/runtime diagnostics
+mark failed/unhealthy
+record diagnostics
 request provider deletion
-retry job on another candidate according to job retry policy
+requeue image job if retryable
 ```
 
-### Heartbeat/stale-worker handling
+### Heartbeat/stale reconciliation
 
-Persist/update:
+Track:
 
 ```text
 heartbeat_at
@@ -1066,23 +1258,22 @@ last_progress_at
 telemetry_json
 ```
 
-Reaper detects:
+Recover contradictions such as:
 
 ```text
-provider instance disappeared
-pod stops heartbeating
-job has no progress beyond timeout
-D1 says busy but pod says idle
-D1 says worker exists but provider says deleted
+provider instance gone but D1 worker exists
+D1 busy but pod idle
+D1 idle but pod busy
+heartbeat stopped
+job progress stalled beyond timeout
+provider deleted but row not finalized
 ```
-
-Reconcile rather than leaving zombie rows/jobs.
 
 ---
 
-## 19. Generic events and error handling
+## 25. Generic events and error handling
 
-Pod callbacks should cover:
+Events:
 
 ```text
 worker_ready
@@ -1102,7 +1293,7 @@ idle_expired
 model_switch
 ```
 
-Recommended Krea progress phases:
+Krea phases:
 
 ```text
 queued
@@ -1120,9 +1311,7 @@ failed
 cancelled
 ```
 
-### Error classes
-
-Normalize errors so control-plane retry/routing can distinguish them, for example:
+Normalized error examples:
 
 ```text
 CUDA_UNAVAILABLE
@@ -1152,60 +1341,50 @@ CANCELLED
 UNKNOWN
 ```
 
-Fatal CUDA/model-corruption errors should mark a worker unsafe for reuse and move it to draining/deletion. A normal user/settings error should fail only the job and leave a healthy worker reusable.
+Fatal CUDA/model-corruption errors drain the worker. User/settings errors fail only the image and leave a healthy worker reusable.
 
-Store:
-
-```text
-last_error_code
-last_error
-debug_log_json
-attempt_log_json on job/workload
-```
-
-Do not expose raw secrets in debug logs.
+Never expose secrets in diagnostics/debug logs.
 
 ---
 
-## 20. Cancellation and model switching
+## 26. Cancellation and model switching
 
-Cancellation of an active Comfy generation uses `/interrupt`.
+Active Comfy cancellation uses `/interrupt`.
 
-Job/workload cancellation must be idempotent.
+Cancellation must be idempotent.
 
-For a same-family Krea job after Krea:
+Same-family Krea -> Krea:
 
-- preserve warm CPU/offloaded state;
-- clear job allocations only.
+```text
+preserve warm Krea/Qwen/VAE host state
+preserve compatible hot user-LoRA tensors where useful
+release only job GPU state
+```
 
-For a future image model family switch:
+Future incompatible image-family switch:
 
 ```text
 emit model_switch
-finish/cancel current work
-fully release incompatible loaded models
+finish/cancel current image
+fully release incompatible loaded family
 clear GPU allocator
 load next adapter family
-update loaded_family/model fields
+update loaded_* fields
 ```
-
-This mirrors H3's family-switch concept but the image pod registry is generic.
 
 ---
 
-## 21. Generic provider routing and GPU policy
+## 27. Provider routing and GPU policy
 
-Reuse Enhancer's GPU inventory/normalization rather than maintaining a completely separate provider GPU-name universe.
+Reuse Enhancer GPU inventory/name normalization.
 
-Krea initial rule:
+Krea initial minimum:
 
 ```text
-minimum VRAM = 20 GB
+20 GB VRAM
 ```
 
-Initial eligible classes include the existing >=20 GB RunPod catalog and Novita 4090/5090/RTX 6000 Ada/L40S entries.
-
-Every GPU class still needs a real Krea qualification/canary because INT8 ConvRot behavior varies by architecture.
+Eligible RunPod classes are existing catalog entries at or above 20 GB; current Novita candidates include 4090, 5090, RTX 6000 Ada and L40S.
 
 OOM escalation:
 
@@ -1215,13 +1394,15 @@ OOM escalation:
 
 Do not retry the same failed tier indefinitely.
 
-Future image models can define their own minimum VRAM/capability requirements through the adapter/model registry while sharing the same `image_pod_workers` table and provisioning code.
+A functional qualification is still required per GPU class to prove the pinned CUDA/PyTorch/Comfy/INT8 stack runs. This is not a visual quality benchmark.
+
+Future image models define their own minimum GPU/capability rules while sharing the same worker/provisioning infrastructure.
 
 ---
 
-## 22. Native Krea workflows/manifests
+## 28. Native Krea workflows/manifests
 
-Keep explicit Krea workflows under the Krea adapter:
+Files:
 
 ```text
 krea2/workflows/krea2_turbo.json
@@ -1236,9 +1417,9 @@ Normal workflow:
 ```text
 UNETLoader -> Krea 2 Turbo INT8
 CLIPLoader -> Qwen3-VL-4B BF16, type=krea2
-0-3 resolved MODEL LoRA patches
+0-3 resolved user MODEL LoRA patches
 positive encode
-optional guided negative encode OR native ConditioningZeroOut
+optional guided negative encode OR native zero-negative path
 EmptyLatentImage
 KSampler
 selected VAE
@@ -1250,7 +1431,7 @@ Style-reference workflow:
 
 ```text
 1-3 style images
-internal Krea style-reference adapter
+baked krea2_style_reference.safetensors
 Krea INT8
 Qwen3-VL-4B BF16
 selected VAE
@@ -1259,13 +1440,13 @@ native reference conditioning
 sampling/decode/output
 ```
 
-Do not rewrite native reference behavior until the official graph is reproduced successfully.
+Reproduce the native Comfy reference behavior rather than inventing a separate reference algorithm.
 
 ---
 
-## 23. Provider-neutral Krea payloads
+## 29. Provider-neutral Krea payload
 
-Normal LoRA example:
+Example normal LoRA-mode image:
 
 ```json
 {
@@ -1275,11 +1456,11 @@ Normal LoRA example:
   "model": "krea-2-turbo",
   "prompt": "...",
   "negativePrompt": "",
-  "width": 1280,
-  "height": 720,
+  "width": 2048,
+  "height": 1152,
   "settings": {
     "styleMode": "lora",
-    "resolutionTier": "1k",
+    "resolutionTier": "quality",
     "seed": 12345,
     "steps": 8,
     "cfg": 1.0,
@@ -1299,63 +1480,38 @@ Normal LoRA example:
 }
 ```
 
-Style-reference example:
+Style-reference example uses:
 
-```json
-{
-  "jobId": "job_124",
-  "projectId": "proj_123",
-  "taskFamily": "krea2_image",
-  "model": "krea-2-turbo",
-  "prompt": "...",
-  "width": 1280,
-  "height": 720,
-  "settings": {
-    "styleMode": "reference_images",
-    "seed": 12345,
-    "steps": 8,
-    "cfg": 1.0,
-    "sampler": "euler",
-    "scheduler": "simple",
-    "denoise": 1.0,
-    "vae": "qwen_image",
-    "loras": []
-  },
-  "inputs": {
-    "styleImages": [
-      { "objectKey": "projects/proj_123/style/a.png" },
-      { "objectKey": "projects/proj_123/style/b.jpg" }
-    ],
-    "outputPrefix": "projects/proj_123/images/generated"
-  }
-}
+```text
+styleMode = reference_images
+loras = []
+inputs.styleImages = 1-3 trusted project object keys
 ```
 
-Worker validates style-mode exclusivity and resolves all trusted private assets before pod dispatch.
+Worker validates exclusivity and resolves private assets before dispatch.
 
 ---
 
-## 24. SceneBuilder2 integration
+## 30. SceneBuilder2 integration
 
-Reuse the existing browser image-generation flow:
+Use the existing durable image-generation job model and browser status/cancel/finalization flow.
+
+Target flow:
 
 ```text
 CharacterScreen / Storyboard
-  -> apiGenerateImage()
-  -> /api/generate-image
-  -> image_generation_jobs
-  -> generic image-pod dispatcher
-  -> image_pod_workers / optional image_pod_workloads
-  -> RunPod/Novita pod
-  -> existing status polling
-  -> existing cancellation
-  -> R2 finalization
-  -> existing thumbnail flow
+  -> image batch submit, <=10 items
+  -> D1 image_generation_batches + image_generation_jobs
+  -> generic image dispatcher/global pool
+  -> image_pod_workers
+  -> RunPod/Novita pod, one image at a time
+  -> existing image job status/cancel/finalization
+  -> project R2 + existing thumbnail flow
 ```
 
-Do not create a Krea-only browser polling protocol.
+Do not create a Krea-only polling protocol.
 
-The immutable image-job settings snapshot should include:
+Persist immutable job settings:
 
 ```text
 model key + quantization
@@ -1369,43 +1525,44 @@ steps/cfg/sampler/scheduler/denoise
 VAE
 text encoder profile
 styleMode
-ordered loraId + strength list OR style-image object keys
+ordered loraId + strength list OR style image object keys
 requested provider/backend
-actual provider/worker/gpu execution metadata
+actual provider/worker/GPU metadata
 ```
 
-Shared LoRA UI:
+Shared user-LoRA component:
 
 ```text
 <LoraSelector modelKey="krea-2-turbo" maxSelected={3} />
 ```
 
-When at least one user LoRA is selected, style-image controls are disabled in v1. With zero user LoRAs, user can choose 1-3 style images.
+With one or more user LoRAs selected, style-image controls are disabled. With zero user LoRAs, user may send 1-3 style references.
 
 ---
 
-## 25. Readiness/diagnostics contract
+## 31. Readiness/diagnostics contract
 
-`/ready` should verify at minimum:
+`/ready` verifies:
 
 ```text
 GPU visible
-minimum VRAM/capability for advertised image families
-runtime image build metadata available
+minimum VRAM/capability for advertised families
+runtime build metadata
 Comfy starts/responds
-required Krea baked model files discoverable through Comfy paths
+required baked files discoverable
 Krea2 model class present
 KREA2 CLIP type present
-comfy-kitchen backend present
-R2 config available when required
+comfy-kitchen present
+baked style-reference adapter present
+R2 config available for dynamic inputs/outputs/user LoRAs
 worker not draining
 ```
 
-`/diagnostics` should expose safe operational metadata:
+`/diagnostics` safely exposes:
 
 ```text
 worker ID/status
-current workload/job
+current job/project assignment
 loaded family/model
 idle_since/terminate_after
 uptime
@@ -1413,17 +1570,19 @@ GPU name/UUID/driver/VRAM/utilization
 CUDA/PyTorch/Comfy versions
 required-file checks
 disk total/used/free
-LoRA cache bytes/count
+user-LoRA cache bytes/count
 host RAM usage
 warm-state summary
 last error code
 ```
 
-Never include provider/R2 secrets or bearer tokens.
+Never include provider/R2 credentials or bearer tokens.
 
 ---
 
-## 26. Tests / canaries
+## 32. Functional tests / canaries
+
+These tests verify runtime correctness; they are **not a request to benchmark competing resolutions/settings**.
 
 ### Build/runtime
 
@@ -1432,210 +1591,211 @@ Never include provider/R2 secrets or bearer tokens.
 no network volume configured
 CUDA 13 visible
 PyTorch 2.13 + cu130
-single pinned Comfy layer discovers external /opt/scenebuilder-models/krea2 paths
+single pinned Comfy installation discovers external model root
 comfy-kitchen 0.2.28 present
 native Krea2 recognized
 Qwen3-VL-4B KREA2 CLIP recognized
-ConvRot works
+baked krea2_style_reference discovered
+INT8 ConvRot generates
 no Sage/FlashAttention dependency
 ```
 
-### Resolution
+### Resolution smoke
 
 ```text
-1280x720
-720x1280
-1368x768 comparison only
 2048x1152
 1152x2048
-1792x1008 performance comparison
+1280x720
+720x1280
 ```
 
-Record quality, peak VRAM, host RAM, time and internal padding.
+No `1368x768` decision benchmark is required.
 
-### VAE
-
-Matched prompt/seed/settings:
+### VAE smoke
 
 ```text
-Qwen Image VAE
-Wan 2.1 VAE
+Qwen Image VAE decodes
+Wan 2.1 VAE decodes
 ```
 
-Compare correctness, color/detail/artifacts, decode time and memory.
-
-### Style references
+### Style-reference smoke
 
 ```text
-1 / 2 / 3 images
+1 / 2 / 3 references
 square + landscape + portrait
 mixed dimensions
 odd unaligned dimensions
 zero user LoRAs enforced
-hidden style adapter auto-selected
+baked system style adapter auto-used
 ```
 
-### LoRA cache
+### User-LoRA cache
 
 ```text
 0 LoRA
 MinimalisticVectorArt only
 Darkchurch only
 both
-3-LoRA canary when third asset exists
-same display name / different D1 IDs selects correct file
+3 user LoRAs when a third compatible asset exists
+same display name / different IDs selects correct file
 invalid ID rejected
 4 user LoRAs rejected
-R2 miss -> disk cache
-next same-LoRA job -> hot RAM reuse
+R2 miss -> local disk cache
+same next LoRA -> hot RAM reuse
 same LoRA different strength -> same tensors, new patch strength
 new LoRA -> old tensors evictable, disk cache retained
 LRU/watermark eviction
 ```
 
-### Warm memory
-
-Verify after each job:
-
-```text
-job-specific GPU allocations are released
-Krea/Qwen do not unnecessarily reload from disk
-warm CPU states survive healthy idle
-same LoRA hot tensors can be reused
-host-memory pressure can evict warm states safely
-```
-
-### Generic image-pod lifecycle
-
-Test all of:
+### Global image-pod lifecycle
 
 ```text
 provisioning -> ready -> idle
 idle -> busy -> idle
-busy worker rejects second workload
-same workload ID is idempotent
-draining worker rejects new work
-idle timeout -> draining -> provider delete
-lost idle_expired callback recovered by reaper
-provider deletion retry + lock
-provider already deleted reconciliation
-heartbeat timeout
-provision timeout
-stale busy worker reconciliation
+one pod never executes two images concurrently
+busy rejects second workload
+same job/workload request is idempotent
+idle worker clears project ownership
+idle global worker takes a queued image from another project
+project never exceeds 5 reserved/provisioning/starting/busy pods
+1-3 ready images targets 1 pod
+4-6 targets 2
+7-9 targets 3
+10 targets 4
+13+ caps at 5
+compatible idle global capacity is used before new provisioning
+job completion immediately attempts next global claim
+draining rejects new work
+idle expiration -> draining -> provider delete
+lost callback recovered by cron/reaper
+provider deletion retry/lock
+heartbeat/provision/job timeout recovery
 queued cancel
 active /interrupt cancel
-callback retry/replay protection
 pod crash during generation
 fatal CUDA error drains worker
-normal user validation error leaves worker reusable
-runtime version rollout drains old workers
-warm worker reuse across multiple image_generation_jobs
-future incompatible model family triggers full model switch
+normal validation error leaves worker reusable
+runtime rollout drains old workers
+future incompatible family performs full model switch
 ```
 
-### Provider matrix
-
-At minimum:
+### Batch durability
 
 ```text
-RunPod >=20 GB qualified class
-RunPod 4090
-RunPod 5090
-Novita 4090
-Novita 5090
-48 GB fallback class
+Character batch of <=10 persists all accepted image rows
+Storyboard batch of <=10 persists all accepted rows
+blocked previous-scene dependency is in D1, not browser-only
+blocked job unlocks after predecessor succeeds
+browser refresh/close does not lose already accepted jobs
+multiple <=10 chunks work for >10 requested targets
+scheduler counts only ready queued jobs for capacity
 ```
 
 ---
 
-## 27. Rollout order
+## 33. Rollout order
 
 ### Phase 1 — base Krea runtime
 
 1. Build CUDA 13/PyTorch 2.13 base.
-2. Bake Krea INT8 -> VAEs -> Qwen under `/opt/scenebuilder-models/krea2`.
+2. Bake Krea INT8 -> VAEs -> Qwen -> `krea2_style_reference.safetensors` under `/opt/scenebuilder-models/krea2`.
 3. Install one pinned Comfy layer afterward and configure external model paths.
-4. Add nodes -> workflow -> final generic image runtime.
+4. Add nodes -> workflows -> final generic image runtime.
 5. Verify 35 GB disk headroom.
 6. Reproduce native Turbo defaults.
-7. Canary 1K/2K aligned resolutions.
-8. Pass 20 GB CPU-offload canary.
+7. Smoke-test locked quality + fast resolutions.
+8. Pass 20 GB functional CPU-offload canary.
 
 ### Phase 2 — generic image-pod lifecycle
 
 1. Implement generic image pod server/adapter registry.
-2. Add busy/draining/idle timeout/readiness/diagnostics/cancellation parity with H3/Enhancer.
-3. Add normalized errors, heartbeats and callbacks.
-4. Add RunPod + Novita provisioning with 35 GB root disk/no network volume.
-5. Implement control-plane reaper and safe deletion retries.
+2. Enforce one active image per pod.
+3. Add H3/Enhancer busy/draining/idle/readiness/diagnostics/cancellation behavior.
+4. Add normalized errors, heartbeat and callbacks.
+5. Add RunPod + Novita provisioning with 35 GB root disk/no network volume.
 
-### Phase 3 — D1 image worker tables
+### Phase 3 — D1 image worker/global pool
 
 1. Add `image_pod_workers`.
-2. Add `image_pod_delete_locks` and event nonce/replay protection.
-3. Add dispatch lease/locking.
-4. Add optional `image_pod_workloads` for warm multi-job batching.
-5. Keep `image_generation_jobs` as durable leaf jobs.
+2. Add delete locks/event nonce protection/dispatch lease.
+3. Implement global idle ownership clearing.
+4. Implement immediate cross-project warm handoff.
+5. Implement 5-pod project cap and `ceil(ready_jobs/3)` desired capacity.
+6. Add one-minute dispatcher/reconciler and fifteen-minute deletion/reaper handler.
 
-### Phase 4 — warm memory lifecycle
+### Phase 4 — durable frontend batches
+
+1. Add `image_generation_batches`.
+2. Add batch metadata to `image_generation_jobs`.
+3. Accept max 10 items per browser batch request.
+4. Persist Storyboard dependency-blocked jobs immediately.
+5. Make D1, not React concurrency, the scheduler source of truth.
+
+### Phase 5 — warm memory lifecycle
 
 1. Keep Krea/Qwen/VAE reusable CPU states warm.
 2. Clear job GPU allocations without automatic full model unload.
 3. Add host-memory pressure eviction.
-4. Track warm-state telemetry in `image_pod_workers`.
+4. Track warm-state telemetry.
 
-### Phase 5 — D1 LoRA catalog/cache
+### Phase 6 — user-LoRA catalog/cache
 
 1. Add generic `lora` + `lora_model_support`.
-2. Seed existing two Krea LoRAs with immutable IDs.
+2. Seed the existing two R2 user LoRAs with immutable IDs.
 3. Implement trusted R2 -> local disk cache.
 4. Implement hot parsed-LoRA RAM reuse.
 5. Add disk LRU/watermarks.
 
-### Phase 6 — style-reference mode
+### Phase 7 — style-reference mode
 
-1. Register hidden internal Krea style-reference adapter.
-2. Reproduce native reference workflow.
-3. Support 1-3 mixed-size references when no user LoRA is selected.
+1. Reproduce native workflow with baked `krea2_style_reference.safetensors`.
+2. Support 1-3 mixed-size references when no user LoRA is selected.
 
-### Phase 7 — SceneBuilder UI/control plane
+### Phase 8 — SceneBuilder UI
 
-1. Add `krea-2-turbo` to current image model selection.
-2. Route GPU-backed image jobs through generic image-pod dispatcher.
-3. Preserve existing image job polling/cancel/finalization.
-4. Add D1-ID LoRA picker.
+1. Add `krea-2-turbo` to image model selection.
+2. Use quality `2048x1152` / portrait equivalent as normal default.
+3. Offer fast `1280x720` / portrait equivalent if desired.
+4. Add D1-ID user-LoRA picker.
 5. Add LoRA-or-style-reference controls.
 6. Add advanced generation controls.
 
 ---
 
-## 28. Guardrails
+## 34. Guardrails
 
 - No network volume/network disk.
 - Provider root/container disk is 35 GB.
-- Krea/Qwen/VAE are baked; user/style LoRAs are not.
-- LoRA local disk cache is allowed and bounded.
-- D1 `lora_id` is LoRA API/cache identity; display names may collide.
+- Krea/Qwen/VAEs and `krea2_style_reference.safetensors` are baked.
+- User-selectable LoRAs are dynamic R2/D1 assets and are not baked.
+- Dynamic LoRA local disk cache is allowed and bounded.
+- D1 `lora_id` is user-LoRA API/cache identity; display names may collide.
 - Browser never controls arbitrary LoRA filesystem/R2 paths.
 - Maximum 3 user LoRAs.
-- Style-reference mode uses zero user LoRAs in v1.
+- Style-reference mode uses zero user LoRAs in v1 and automatically uses the baked system adapter.
 - Style images may use different dimensions/aspects.
+- Quality default is 2048x1152 / 1152x2048; do not use 1368x768 as the normal preset.
 - Keep Krea/Qwen warm in CPU RAM where safe.
-- Normal post-job cleanup frees GPU job state without blindly unloading all host model state.
-- Fatal/incompatible family switches may perform a full model unload.
-- Native Turbo defaults: 8 / CFG1 / Euler / simple / denoise1.
+- Normal post-job cleanup frees GPU job state without blindly unloading host model state.
+- Native Turbo default path remains 8 steps / Euler / simple / denoise1 with no-guidance behavior.
 - No SageAttention or FlashAttention dependency in v1.
 - Use one pinned Comfy installation; no H3-style two-Comfy retrofit.
 - Heavy model layers use a Comfy-independent model root so installing Comfy afterward is safe.
 - Generic D1 worker table is `image_pod_workers`, never `krea2_pod_workers`.
-- Generic pod server/provisioning/lifecycle must be reusable by future image families.
-- Image pod supports H3/Enhancer-class idle timeout, busy/draining state, cancellation, diagnostics, heartbeats, stale-worker recovery, provider deletion retries and callback/error handling.
+- Image pods are global reusable capacity, not project-owned capacity.
+- One pod executes one image at a time.
+- Maximum 5 active/reserved image pods per project.
+- Desired new capacity is one pod per three ready queued images, after accounting for compatible global idle capacity.
+- Idle workers clear project/user assignment and immediately look for work from any project.
+- Frontend/D1 batch size is max 10 items per request/chunk; D1 durable rows drive scheduling.
+- One-minute cron handles dispatch/reconciliation fallback.
+- Fifteen-minute cron handles provider deletion/reaper reconciliation.
 - Reuse H3 pod auth master secret; no Krea-only secret.
-- Preserve the existing browser image-generation polling protocol.
+- Preserve the existing per-image status/cancel/finalization semantics.
 
 ---
 
-## 29. First implementation milestone
+## 35. First implementation milestone
 
 ```text
 35 GB container disk only
@@ -1643,35 +1803,38 @@ no network storage
 CUDA 13 / PyTorch 2.13 cu130
 Krea 2 Turbo INT8 ConvRot
 Qwen3-VL-4B BF16
-Qwen Image + selected Wan 2.1 VAE baked
-weights stored under /opt/scenebuilder-models/krea2
+Qwen Image + Wan 2.1 VAE baked
+krea2_style_reference.safetensors baked
+weights under /opt/scenebuilder-models/krea2
 one pinned Comfy installation after heavy weight layers
 extra Comfy model paths configured
-nodes -> workflow -> generic image runtime last
+nodes -> workflow -> generic runtime last
 no Sage/FlashAttention
-1280x720 / 720x1280
-2048x1152 / 1152x2048
-8 steps / CFG1 / Euler / simple / denoise1 defaults
-one RunPod >=20 GB canary
-warm Krea/Qwen CPU offload lifecycle proven
+quality default 2048x1152 / 1152x2048
+optional fast 1280x720 / 720x1280
+8 steps / Euler / simple / denoise1 native Turbo defaults
+one RunPod >=20 GB functional canary
+warm Krea/Qwen CPU offload proven
+one image at a time per pod
 ```
 
 Acceptance criteria:
 
 ```text
-Comfy boots and discovers the pre-baked external model root
+Comfy boots and discovers pre-baked external model root
 native Krea2 + KREA2 Qwen CLIP load
+baked style-reference adapter is discoverable
 BF16 encoder works
 Krea/Qwen move between GPU and CPU/offload state on a 20 GB worker
 job GPU allocations clear after completion
-warm second job avoids unnecessary checkpoint reload
-both VAEs load; Qwen is default
-1K/2K aligned presets generate
+warm next job avoids unnecessary checkpoint reload
+both VAEs decode
+quality + fast aligned presets generate
 seed/steps/CFG/sampler/scheduler/denoise are runtime-patchable
 output uploads to R2
 pod remains reusable
-busy/draining/idle states behave correctly
-generic image worker identity is used, not a Krea-specific control-plane table
+busy/draining/idle behavior works
+generic image worker identity is used
 ```
 
-After this, add the D1 image-pod lifecycle tables, LoRA cache/catalog and style-reference mode before normal frontend rollout.
+Then implement D1 global-pool scheduling/batching, dynamic user-LoRA catalog/cache, and SceneBuilder UI rollout.
