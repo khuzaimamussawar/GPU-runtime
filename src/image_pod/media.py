@@ -303,25 +303,6 @@ def _resolve_comfy_output(image: dict[str, Any]) -> Path:
     return candidate
 
 
-def _upload_file(path: Path, object_key: str, content_type: str) -> dict[str, Any]:
-    client, bucket = _r2_client()
-    public_url = os.environ.get("R2_PUBLIC_URL", "").rstrip("/")
-    if client is None or not bucket:
-        raise ImageMediaError("R2 upload configuration is required for production image finalization")
-
-    client.upload_file(
-        str(path),
-        bucket,
-        object_key,
-        ExtraArgs={"ContentType": content_type},
-    )
-    return {
-        "objectKey": object_key,
-        "uploaded": True,
-        "url": f"{public_url}/{object_key}" if public_url else None,
-    }
-
-
 def finalize_image_outputs(
     *,
     job_id: str,
@@ -361,19 +342,6 @@ def finalize_image_outputs(
             image = image.resize((output_w, output_h), Image.Resampling.LANCZOS)
         image.save(final_path, "PNG", optimize=True)
 
-    canonical_image_prefix = str(settings.get("outputImagePrefix") or "").strip("/")
-    canonical_thumbnail_prefix = str(settings.get("outputThumbnailPrefix") or "").strip("/")
-    canonical_layout = bool(canonical_image_prefix and canonical_thumbnail_prefix)
-
-    if canonical_layout:
-        full_key = f"{canonical_image_prefix}/{safe_name(job_id)}.png"
-    else:
-        prefix = str(output_prefix or "").strip("/")
-        if not prefix:
-            prefix = f"projects/{safe_name(project_id or 'unknown')}/scene_images"
-        full_key = f"{prefix}/original/{safe_name(job_id)}.png"
-    full = _upload_file(final_path, full_key, "image/png")
-
     thumbnail_status = "completed"
     thumbnail: dict[str, Any] | None = None
     thumbnail_error: str | None = None
@@ -385,29 +353,54 @@ def finalize_image_outputs(
                 height = max(1, round(thumb.height * (700 / thumb.width)))
                 thumb = thumb.resize((700, height), Image.Resampling.LANCZOS)
             thumb.save(thumb_path, "JPEG", quality=80, optimize=True)
-        if canonical_layout:
-            thumb_key = f"{canonical_thumbnail_prefix}/{safe_name(job_id)}.jpg"
-        else:
-            thumb_key = f"{prefix}/thumbnail/{safe_name(job_id)}.jpg"
-        thumbnail = _upload_file(thumb_path, thumb_key, "image/jpeg")
+        thumbnail = {
+            "fileName": thumb_path.name,
+            "contentType": "image/jpeg",
+            "sizeBytes": thumb_path.stat().st_size,
+        }
     except Exception as exc:
         thumbnail_status = "failed"
         thumbnail_error = str(exc)
 
     try:
         source.unlink(missing_ok=True)
-        shutil.rmtree(final_dir, ignore_errors=True)
     except Exception:
         pass
 
     return {
-        "full": full,
+        # SceneBuilder, not the GPU pod, stores generated output in R2. The
+        # pod keeps this artifact only until the Worker fetches it securely.
+        "full": {
+            "fileName": final_path.name,
+            "contentType": "image/png",
+            "sizeBytes": final_path.stat().st_size,
+        },
         "thumbnail": thumbnail,
         "thumbnailStatus": thumbnail_status,
         "thumbnailError": thumbnail_error,
         "width": output_w,
         "height": output_h,
     }
+
+
+def finalized_output_path(job_id: str, file_name: str) -> Path | None:
+    if file_name not in {"image.png", "thumbnail.jpg"}:
+        return None
+    candidate = (IMAGE_ROOT / "tmp" / safe_name(job_id) / file_name).resolve()
+    root = (IMAGE_ROOT / "tmp").resolve()
+    if root not in candidate.parents or not candidate.is_file():
+        return None
+    return candidate
+
+
+def cleanup_finalized_outputs(job_id: str) -> None:
+    try:
+        path = (IMAGE_ROOT / "tmp" / safe_name(job_id)).resolve()
+        root = (IMAGE_ROOT / "tmp").resolve()
+        if root in path.parents:
+            shutil.rmtree(path, ignore_errors=True)
+    except Exception:
+        pass
 
 
 def cleanup_job_inputs(path: Path | None) -> None:

@@ -363,7 +363,7 @@ class Krea2Adapter:
                 settings=settings,
                 output_prefix=r2_output_prefix,
             )
-            progress("uploading", 97)
+            progress("finalizing", 97)
             progress("completed", 100)
             return {
                 "ok": True,

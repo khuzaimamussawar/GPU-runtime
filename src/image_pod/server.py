@@ -3,6 +3,7 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import shutil
 import threading
 import time
 import urllib.request
@@ -12,6 +13,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+from src.image_pod.media import cleanup_finalized_outputs, finalized_output_path
 from src.image_pod.registry import get_adapter, supported_task_families
 
 
@@ -139,6 +141,7 @@ class ImagePodState:
             ]
             for record in terminal:
                 if record.completed_at is not None and record.completed_at < cutoff:
+                    cleanup_finalized_outputs(record.job_id)
                     self.jobs.pop(record.job_id, None)
             terminal = sorted(
                 (
@@ -150,6 +153,7 @@ class ImagePodState:
                 reverse=True,
             )
             for record in terminal[JOB_HISTORY_MAX:]:
+                cleanup_finalized_outputs(record.job_id)
                 self.jobs.pop(record.job_id, None)
 
 
@@ -161,10 +165,6 @@ def _required_runtime_config_errors() -> list[str]:
         "SCENEBUILDER_POD_TOKEN": POD_TOKEN,
         "SCENEBUILDER_WORKER_ID": WORKER_ID,
         "SCENEBUILDER_CONTROL_URL": CONTROL_URL,
-        "R2_BUCKET_NAME": os.environ.get("R2_BUCKET_NAME", "").strip(),
-        "R2_ENDPOINT": os.environ.get("R2_ENDPOINT", "").strip(),
-        "R2_ACCESS_KEY": os.environ.get("R2_ACCESS_KEY", "").strip(),
-        "R2_SECRET_KEY": os.environ.get("R2_SECRET_KEY", "").strip(),
     }
     return [name for name, value in required.items() if not value]
 
@@ -429,6 +429,16 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_file(self, status: int, output: Any, content_type: str) -> None:
+        size = output.stat().st_size
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(size))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        with output.open("rb") as handle:
+            shutil.copyfileobj(handle, self.wfile)
+
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0") or "0")
         if length <= 0:
@@ -488,10 +498,23 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path.startswith("/jobs/"):
             STATE.prune_jobs()
-            job_id = path[len("/jobs/") :].strip("/")
+            parts = path[len("/jobs/") :].strip("/").split("/")
+            job_id = parts[0]
             with STATE.lock:
                 record = STATE.jobs.get(job_id)
                 payload = record.public() if record else None
+            if len(parts) == 3 and parts[1] == "output" and record and record.status == "completed":
+                file_name = "image.png" if parts[2] == "image" else "thumbnail.jpg" if parts[2] == "thumbnail" else ""
+                output = finalized_output_path(job_id, file_name)
+                if output is None:
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "output_not_found"})
+                else:
+                    self._send_file(
+                        HTTPStatus.OK,
+                        output,
+                        "image/png" if file_name == "image.png" else "image/jpeg",
+                    )
+                return
             if payload is None:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "job_not_found"})
             else:
