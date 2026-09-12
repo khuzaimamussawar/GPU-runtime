@@ -8,7 +8,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from krea2.runtime.workflow_builder import load_and_prepare
 from src.image_pod.media import (
@@ -20,6 +20,138 @@ from src.image_pod.media import (
 
 
 ProgressCallback = Callable[[str, int | None], None]
+
+
+def _raw_lora_items(values: Iterable[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    return [dict(value) for value in (values or [])]
+
+
+def _materialize_user_loras_with_logging(
+    job_id: str,
+    values: Iterable[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    raw = _raw_lora_items(values)
+    print(f"[Krea2 LoRA] job={job_id} received count={len(raw)}", flush=True)
+    for index, item in enumerate(raw, start=1):
+        lora_id = str(item.get("loraId") or item.get("lora_id") or "").strip()
+        object_key = str(item.get("objectKey") or item.get("r2ObjectKey") or "").strip()
+        sha256 = str(item.get("sha256") or "").strip().lower()
+        strength = item.get("strength")
+        expected_size = item.get("fileSizeBytes", item.get("file_size_bytes"))
+        print(
+            f"[Krea2 LoRA] job={job_id} materialize index={index} id={lora_id} "
+            f"strength={strength} objectKey={object_key} bytes={expected_size} sha256={sha256}",
+            flush=True,
+        )
+
+    try:
+        resolved = materialize_user_loras(raw)
+    except Exception as exc:
+        print(
+            f"[Krea2 LoRA] job={job_id} materialization FAILED count={len(raw)} "
+            f"error={type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        raise
+
+    for index, item in enumerate(resolved, start=1):
+        print(
+            f"[Krea2 LoRA] job={job_id} materialized index={index} "
+            f"id={item.get('loraId')} file={item.get('fileName')} strength={item.get('strength')}",
+            flush=True,
+        )
+    return resolved
+
+
+def _verify_lora_graph(
+    job_id: str,
+    workflow: dict[str, Any],
+    manifest: dict[str, Any],
+    user_loras: Iterable[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    loras = _raw_lora_items(user_loras)
+    if not loras:
+        return []
+
+    config = ((manifest.get("runtimeGraphPatching") or {}).get("userLoras") or {})
+    base_node = str(config.get("baseModelNode") or "")
+    consumer_node = str(config.get("consumerNode") or "")
+    consumer_input = str(config.get("consumerInput") or "model")
+    loader_class = str(config.get("loaderClass") or "LoraLoaderModelOnly")
+    name_input = str(config.get("nameInput") or "lora_name")
+    strength_input = str(config.get("strengthInput") or "strength_model")
+    if not base_node or not consumer_node:
+        raise RuntimeError("Krea2 LoRA graph audit manifest is missing base/consumer nodes")
+
+    loaded: list[dict[str, Any]] = []
+    previous_node = base_node
+    for index, expected in enumerate(loras, start=1):
+        node_id = f"sb_lora_{index:02d}"
+        node = workflow.get(node_id)
+        if not isinstance(node, dict):
+            raise RuntimeError(f"Krea2 LoRA graph missing expected node {node_id}")
+        if str(node.get("class_type") or "") != loader_class:
+            raise RuntimeError(
+                f"Krea2 LoRA graph node {node_id} class mismatch: {node.get('class_type')} != {loader_class}"
+            )
+
+        inputs = node.get("inputs") or {}
+        expected_file = str(expected.get("fileName") or "")
+        actual_file = str(inputs.get(name_input) or "")
+        if actual_file != expected_file:
+            raise RuntimeError(
+                f"Krea2 LoRA graph node {node_id} file mismatch: {actual_file} != {expected_file}"
+            )
+
+        try:
+            expected_strength = float(expected.get("strength"))
+            actual_strength = float(inputs.get(strength_input))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"Krea2 LoRA graph node {node_id} has invalid strength") from exc
+        if actual_strength != expected_strength:
+            raise RuntimeError(
+                f"Krea2 LoRA graph node {node_id} strength mismatch: {actual_strength} != {expected_strength}"
+            )
+
+        expected_source = [previous_node, 0]
+        if inputs.get("model") != expected_source:
+            raise RuntimeError(
+                f"Krea2 LoRA graph node {node_id} model source mismatch: "
+                f"{inputs.get('model')} != {expected_source}"
+            )
+
+        entry = {
+            "index": index,
+            "nodeId": node_id,
+            "loraId": str(expected.get("loraId") or ""),
+            "fileName": actual_file,
+            "strength": actual_strength,
+            "modelSource": previous_node,
+        }
+        loaded.append(entry)
+        print(
+            f"[Krea2 LoRA] job={job_id} graph index={index} node={node_id} "
+            f"id={entry['loraId']} file={actual_file} strength={actual_strength} "
+            f"modelSource={previous_node}",
+            flush=True,
+        )
+        previous_node = node_id
+
+    consumer = workflow.get(consumer_node)
+    consumer_inputs = consumer.get("inputs") if isinstance(consumer, dict) else None
+    expected_final = [previous_node, 0]
+    if not isinstance(consumer_inputs, dict) or consumer_inputs.get(consumer_input) != expected_final:
+        actual = consumer_inputs.get(consumer_input) if isinstance(consumer_inputs, dict) else None
+        raise RuntimeError(
+            f"Krea2 LoRA graph consumer mismatch: {actual} != {expected_final}"
+        )
+
+    print(
+        f"[Krea2 LoRA] job={job_id} graph verified count={len(loaded)} "
+        f"consumer={consumer_node}.{consumer_input} finalNode={previous_node}",
+        flush=True,
+    )
+    return loaded
 
 
 class Krea2Adapter:
@@ -172,18 +304,19 @@ class Krea2Adapter:
             or ""
         ).strip("/") or None
 
+        raw_user_loras = payload.get("userLoras") or payload.get("loras") or []
         staged_input_dir: Path | None = None
         if style_mode == "lora":
             workflow_path = self.workflows_root / "krea2_turbo.json"
             manifest_path = self.workflows_root / "manifests" / "krea2_turbo.json"
             progress("preparing_model", 3)
-            user_loras = materialize_user_loras(payload.get("userLoras") or payload.get("loras") or [])
+            user_loras = _materialize_user_loras_with_logging(job_id, raw_user_loras)
             reference_images: list[str] = []
         else:
             workflow_path = self.workflows_root / "krea2_style_reference.json"
             manifest_path = self.workflows_root / "manifests" / "krea2_style_reference.json"
             progress("preparing_model", 2)
-            user_loras = materialize_user_loras(payload.get("userLoras") or payload.get("loras") or [])
+            user_loras = _materialize_user_loras_with_logging(job_id, raw_user_loras)
             progress("encoding_prompt", 3)
             reference_images, staged_input_dir = stage_style_references(
                 job_id,
@@ -199,16 +332,28 @@ class Krea2Adapter:
                 user_loras=user_loras,
                 reference_images=reference_images,
             )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            loaded_loras = _verify_lora_graph(job_id, workflow, manifest, user_loras)
 
             if cancel_requested():
                 raise RuntimeError("job cancelled before Comfy submission")
 
             progress("generating", 10)
             prompt_id = self._submit_prompt(workflow)
+            print(
+                f"[Krea2 LoRA] job={job_id} submitted promptId={prompt_id} count={len(loaded_loras)}",
+                flush=True,
+            )
             history = self._wait_for_history(prompt_id, progress=progress, cancel_requested=cancel_requested)
             comfy_outputs = self._collect_images(history)
             if not comfy_outputs:
                 raise RuntimeError("ComfyUI completed without a SaveImage output")
+            if loaded_loras:
+                print(
+                    f"[Krea2 LoRA] job={job_id} execution completed count={len(loaded_loras)} "
+                    f"ids={','.join(item['loraId'] for item in loaded_loras)}",
+                    flush=True,
+                )
 
             progress("resizing", 92)
             finalized = finalize_image_outputs(
@@ -231,6 +376,7 @@ class Krea2Adapter:
                 "execution": {
                     "referenceCount": len(reference_images),
                     "userLoraCount": len(user_loras),
+                    "loadedLoras": loaded_loras,
                     "vae": settings.get("vae", "qwen_image"),
                     "renderWidth": settings.get("width"),
                     "renderHeight": settings.get("height"),
