@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: "Krea2 layer target"
+        description: "Krea2 layer target to build"
         required: true
         default: "all"
         type: choice
@@ -21,7 +21,7 @@ on:
           - workflow
           - runtime
       targets_csv:
-        description: "Optional comma-separated target batch"
+        description: "Optional comma-separated target batch; one Hetzner server builds all targets"
         required: false
         default: ""
         type: string
@@ -33,7 +33,7 @@ on:
       server_type:
         description: "Hetzner builder server type"
         required: true
-        default: "cpx32"
+        default: "cpx22"
         type: string
       location:
         description: "Hetzner location"
@@ -61,7 +61,7 @@ on:
         default: "15"
         type: string
       delete_server_after_success:
-        description: "Delete builder after successful build"
+        description: "Delete builder after successful build(s)"
         required: true
         default: true
         type: boolean
@@ -71,7 +71,7 @@ permissions:
 
 jobs:
   build:
-    name: Build Krea2 ${{ inputs.target }}
+    name: Build Krea2 ${{ inputs.targets_csv != '' && inputs.targets_csv || inputs.target }} on temporary Hetzner builder
     runs-on: ubuntu-latest
     timeout-minutes: 720
     env:
@@ -158,6 +158,7 @@ jobs:
           fi
           if [ "${BUILD_STATUS}" != "success" ] && [ "${KEEP_ON_FAILURE}" = "true" ]; then
             echo "Build failed; keeping builder ${SERVER_ID} for ${KEEP_MINUTES} minute(s)."
+            echo "SSH: ssh -i .tmp/krea2_builder_key root@${{ steps.create.outputs.server_ip }}"
             sleep "$((KEEP_MINUTES * 60))"
           fi
           bash scripts/hetzner_delete.sh "${SERVER_ID}" "${{ steps.create.outputs.ssh_key_id }}"
