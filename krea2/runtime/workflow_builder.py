@@ -17,6 +17,17 @@ VAE_ALIASES = {
     "wan": "wan_2.1_vae.safetensors",
 }
 
+APPROVED_RENDER_SIZES = {
+    (1280, 720),
+    (720, 1280),
+    (2048, 1152),
+    (1152, 2048),
+}
+ALLOWED_SAMPLERS = {"euler"}
+ALLOWED_SCHEDULERS = {"simple"}
+MAX_SAFE_SEED = 9_007_199_254_740_991
+MAX_CFG = 5.0
+
 
 def _load_json(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as handle:
@@ -141,17 +152,18 @@ def _patch_common(workflow: dict[str, Any], manifest: dict[str, Any], settings: 
 
     width = settings.get("width")
     height = settings.get("height")
-    if width is not None:
-        width = _as_int(width, field="width", minimum=16, maximum=8192)
-    if height is not None:
-        height = _as_int(height, field="height", minimum=16, maximum=8192)
-
-    if width is not None:
+    if (width is None) != (height is None):
+        raise WorkflowBuildError("width and height must be supplied together")
+    if width is not None and height is not None:
+        width = _as_int(width, field="width")
+        height = _as_int(height, field="height")
+        if (width, height) not in APPROVED_RENDER_SIZES:
+            allowed = ", ".join(f"{w}x{h}" for w, h in sorted(APPROVED_RENDER_SIZES))
+            raise WorkflowBuildError(f"unsupported Krea render size {width}x{height}; allowed: {allowed}")
         for key in ("width", "widthLatent", "widthSampling"):
             path = (manifest.get("requiredPaths") or {}).get(key)
             if path:
                 _set_path(workflow, str(path), width)
-    if height is not None:
         for key in ("height", "heightLatent", "heightSampling"):
             path = (manifest.get("requiredPaths") or {}).get(key)
             if path:
@@ -166,17 +178,39 @@ def _patch_common(workflow: dict[str, Any], manifest: dict[str, Any], settings: 
         _set_path(workflow, _required_path(manifest, "vaeName"), vae_file)
 
     if "seed" in settings:
-        _set_path(workflow, _required_path(manifest, "seed"), _as_int(settings.get("seed"), field="seed", minimum=0))
+        _set_path(
+            workflow,
+            _required_path(manifest, "seed"),
+            _as_int(settings.get("seed"), field="seed", minimum=0, maximum=MAX_SAFE_SEED),
+        )
     if "steps" in settings:
-        _set_path(workflow, _required_path(manifest, "steps"), _as_int(settings.get("steps"), field="steps", minimum=1, maximum=50))
+        _set_path(
+            workflow,
+            _required_path(manifest, "steps"),
+            _as_int(settings.get("steps"), field="steps", minimum=1, maximum=50),
+        )
     if "cfg" in settings:
-        _set_path(workflow, _required_path(manifest, "cfg"), _as_float(settings.get("cfg"), field="cfg", minimum=0.0, maximum=100.0))
+        _set_path(
+            workflow,
+            _required_path(manifest, "cfg"),
+            _as_float(settings.get("cfg"), field="cfg", minimum=0.0, maximum=MAX_CFG),
+        )
     if "sampler" in settings:
-        _set_path(workflow, _required_path(manifest, "sampler"), _clean_string(settings.get("sampler"), field="sampler"))
+        sampler = _clean_string(settings.get("sampler"), field="sampler")
+        if sampler not in ALLOWED_SAMPLERS:
+            raise WorkflowBuildError(f"unsupported sampler: {sampler}")
+        _set_path(workflow, _required_path(manifest, "sampler"), sampler)
     if "scheduler" in settings:
-        _set_path(workflow, _required_path(manifest, "scheduler"), _clean_string(settings.get("scheduler"), field="scheduler"))
+        scheduler = _clean_string(settings.get("scheduler"), field="scheduler")
+        if scheduler not in ALLOWED_SCHEDULERS:
+            raise WorkflowBuildError(f"unsupported scheduler: {scheduler}")
+        _set_path(workflow, _required_path(manifest, "scheduler"), scheduler)
     if "denoise" in settings:
-        _set_path(workflow, _required_path(manifest, "denoise"), _as_float(settings.get("denoise"), field="denoise", minimum=0.0, maximum=1.0))
+        _set_path(
+            workflow,
+            _required_path(manifest, "denoise"),
+            _as_float(settings.get("denoise"), field="denoise", minimum=0.0, maximum=1.0),
+        )
 
     output_prefix = settings.get("outputPrefix")
     output_path = _optional_path(manifest, "outputPrefix")
@@ -192,20 +226,16 @@ def _normalize_loras(user_loras: Iterable[dict[str, Any]] | None) -> list[dict[s
         strength = _as_float(item.get("strength"), field=f"LoRA strength ({file_name})")
         min_strength = item.get("minStrength", item.get("min_strength"))
         max_strength = item.get("maxStrength", item.get("max_strength"))
-        if min_strength is not None:
-            min_strength = _as_float(min_strength, field=f"LoRA minStrength ({file_name})")
-            if strength < min_strength:
-                raise WorkflowBuildError(
-                    f"LoRA strength {strength} is below minimum {min_strength} for {file_name}"
-                )
-        if max_strength is not None:
-            max_strength = _as_float(max_strength, field=f"LoRA maxStrength ({file_name})")
-            if strength > max_strength:
-                raise WorkflowBuildError(
-                    f"LoRA strength {strength} is above maximum {max_strength} for {file_name}"
-                )
-        if min_strength is not None and max_strength is not None and min_strength > max_strength:
+        if min_strength is None or max_strength is None:
+            raise WorkflowBuildError(f"LoRA catalog range is required for {file_name}")
+        min_strength = _as_float(min_strength, field=f"LoRA minStrength ({file_name})")
+        max_strength = _as_float(max_strength, field=f"LoRA maxStrength ({file_name})")
+        if min_strength > max_strength:
             raise WorkflowBuildError(f"LoRA minimum exceeds maximum for {file_name}")
+        if strength < min_strength or strength > max_strength:
+            raise WorkflowBuildError(
+                f"INVALID_LORA_STRENGTH: {strength} outside [{min_strength}, {max_strength}] for {file_name}"
+            )
         normalized.append(
             {
                 "loraId": str(item.get("loraId") or item.get("lora_id") or ""),
@@ -241,7 +271,6 @@ def _patch_user_loras(
     if not base_node or base_node not in workflow or not consumer_node or consumer_node not in workflow:
         raise WorkflowBuildError("LoRA graph patch manifest is invalid")
 
-    # Make graph patching idempotent.
     for index in range(1, max_count + 1):
         workflow.pop(f"sb_lora_{index:02d}", None)
     workflow[consumer_node].setdefault("inputs", {})[consumer_input] = [base_node, 0]
@@ -289,8 +318,6 @@ def _patch_style_references(
         raise WorkflowBuildError("style-reference graph patch manifest is invalid")
 
     encoder_inputs = workflow[encoder_node].setdefault("inputs", {})
-
-    # Remove all runtime-generated loaders and encoder bindings before rebuilding.
     for index in range(2, max_count + 1):
         workflow.pop(f"sb_ref_{index:02d}", None)
     for index in range(1, max_count + 1):
@@ -309,6 +336,43 @@ def _patch_style_references(
         encoder_inputs[f"{input_prefix}{index}"] = [node_id, 0]
 
 
+def _patch_negative_prompt(
+    workflow: dict[str, Any],
+    manifest: dict[str, Any],
+    settings: dict[str, Any],
+) -> None:
+    config = ((manifest.get("runtimeGraphPatching") or {}).get("negativePrompt") or {})
+    if not config:
+        return
+
+    consumer_node = str(config.get("consumerNode") or "")
+    consumer_input = str(config.get("consumerInput") or "negative")
+    zero_node = str(config.get("zeroNode") or "")
+    clip_node = str(config.get("clipNode") or "")
+    if not consumer_node or consumer_node not in workflow or not zero_node or zero_node not in workflow:
+        raise WorkflowBuildError("negative-prompt graph patch manifest is invalid")
+    if not clip_node or clip_node not in workflow:
+        raise WorkflowBuildError("negative-prompt clip node is invalid")
+
+    workflow.pop("sb_negative", None)
+    workflow[consumer_node].setdefault("inputs", {})[consumer_input] = [zero_node, 0]
+
+    negative = str(settings.get("negativePrompt", settings.get("negative_prompt", "")) or "").strip()
+    cfg = _as_float(settings.get("cfg", 1.0), field="cfg", minimum=0.0, maximum=MAX_CFG)
+    if not negative or cfg <= 1.0:
+        return
+
+    workflow["sb_negative"] = {
+        "inputs": {
+            "text": negative,
+            "clip": [clip_node, 0],
+        },
+        "class_type": "CLIPTextEncode",
+        "_meta": {"title": "SceneBuilder Guided Negative Prompt"},
+    }
+    workflow[consumer_node]["inputs"][consumer_input] = ["sb_negative", 0]
+
+
 def prepare_krea2_workflow(
     workflow: dict[str, Any],
     manifest: dict[str, Any],
@@ -317,16 +381,7 @@ def prepare_krea2_workflow(
     user_loras: Iterable[dict[str, Any]] | None = None,
     reference_images: Iterable[str] | None = None,
 ) -> dict[str, Any]:
-    """Return a patched Comfy API workflow for one Krea 2 image job.
-
-    `user_loras` must already be resolved from the trusted D1/R2 catalog into
-    concrete local filenames and catalog min/max strengths. `reference_images`
-    are local Comfy input filenames already staged by the image-pod runtime.
-
-    The style-reference workflow may combine 1-10 style references with 0-3
-    user LoRAs. User LoRAs are applied after the baked Krea style-reference
-    adapter and before ModelSamplingFlux.
-    """
+    """Return a validated, patched Comfy API workflow for one Krea 2 image job."""
 
     prepared = copy.deepcopy(workflow)
     settings = dict(settings or {})
@@ -344,6 +399,7 @@ def prepare_krea2_workflow(
         _patch_user_loras(prepared, manifest, user_loras)
         _patch_style_references(prepared, manifest, reference_images)
 
+    _patch_negative_prompt(prepared, manifest, settings)
     return prepared
 
 
