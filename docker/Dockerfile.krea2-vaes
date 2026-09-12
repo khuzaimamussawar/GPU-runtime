@@ -1,0 +1,28 @@
+# syntax=docker/dockerfile:1.7
+ARG REGISTRY_NAMESPACE
+ARG IMAGE_TAG=latest
+FROM ${REGISTRY_NAMESPACE}/scenebuilder-image-krea2-model-int8:${IMAGE_TAG}
+
+ARG KREA2_REPO=Comfy-Org/Krea-2
+ARG QWEN_VAE_FILE=vae/qwen_image_vae.safetensors
+ARG QWEN_VAE_SHA256=a70580f0213e67967ee9c95f05bb400e8fb08307e017a924bf3441223e023d1f
+ARG WAN_REPO=Comfy-Org/Wan_2.1_ComfyUI_repackaged
+ARG WAN_VAE_FILE=split_files/vae/wan_2.1_vae.safetensors
+ARG WAN_VAE_SHA256=2fc39d31359a4b0a64f55876d8ff7fa8d780956ae2cb13463b0223e15148976b
+
+LABEL org.opencontainers.image.title="scenebuilder-image-krea2-vaes"
+LABEL scene_builder.layer="image-krea2-vaes"
+
+RUN --mount=type=secret,id=hf_token set -eux; \
+    python3 /opt/scenebuilder-image/scripts/download_hf_file.py \
+      --token-file /run/secrets/hf_token \
+      --repo "${KREA2_REPO}" \
+      --file "${QWEN_VAE_FILE}" \
+      --out /opt/scenebuilder-models/krea2/vae/qwen_image_vae.safetensors; \
+    echo "${QWEN_VAE_SHA256}  /opt/scenebuilder-models/krea2/vae/qwen_image_vae.safetensors" | sha256sum -c -; \
+    python3 /opt/scenebuilder-image/scripts/download_hf_file.py \
+      --token-file /run/secrets/hf_token \
+      --repo "${WAN_REPO}" \
+      --file "${WAN_VAE_FILE}" \
+      --out /opt/scenebuilder-models/krea2/vae/wan_2.1_vae.safetensors; \
+    echo "${WAN_VAE_SHA256}  /opt/scenebuilder-models/krea2/vae/wan_2.1_vae.safetensors" | sha256sum -c -
