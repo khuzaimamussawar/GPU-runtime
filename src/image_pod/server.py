@@ -21,6 +21,7 @@ POD_TOKEN = os.environ.get("SCENEBUILDER_POD_TOKEN", "").strip()
 WORKER_ID = os.environ.get("SCENEBUILDER_WORKER_ID", "").strip()
 CONTROL_URL = os.environ.get("SCENEBUILDER_CONTROL_URL", "").strip()
 DEFAULT_IDLE_TIMEOUT = max(0, int(os.environ.get("IMAGE_POD_IDLE_TIMEOUT_SECONDS", "60")))
+IDLE_RENEW_GRACE_SECONDS = max(5, int(os.environ.get("IMAGE_POD_IDLE_RENEW_GRACE_SECONDS", "30")))
 REQUEST_MAX_BYTES = max(1024, int(os.environ.get("IMAGE_POD_MAX_REQUEST_BYTES", str(1024 * 1024))))
 HEARTBEAT_SECONDS = max(5, int(os.environ.get("IMAGE_POD_HEARTBEAT_SECONDS", "15")))
 JOB_HISTORY_MAX = max(1, int(os.environ.get("IMAGE_POD_JOB_HISTORY_MAX", "100")))
@@ -91,6 +92,33 @@ class ImagePodState:
             terminateAfter=now + self.idle_timeout_seconds,
             loadedFamily=self.loaded_family,
         )
+
+    def renew_idle(self) -> dict[str, Any] | None:
+        now = time.time()
+        with self.lock:
+            if self.current_job_id is not None or self.worker_status == "unhealthy":
+                return None
+            active_idle = self.worker_status == "idle" and not self.draining
+            recent_idle_expiry = (
+                self.worker_status == "draining"
+                and self.draining
+                and self.terminate_after is not None
+                and now <= self.terminate_after + IDLE_RENEW_GRACE_SECONDS
+            )
+            if not active_idle and not recent_idle_expiry:
+                return None
+            self.draining = False
+            self.worker_status = "idle"
+            self.idle_since = now
+            self.terminate_after = now + self.idle_timeout_seconds
+            return {
+                "ok": True,
+                "status": "idle",
+                "idleSince": self.idle_since,
+                "idleTimeoutSeconds": self.idle_timeout_seconds,
+                "terminateAfter": self.terminate_after,
+                "loadedFamily": self.loaded_family,
+            }
 
     def mark_unhealthy(self, reason: str) -> None:
         with self.lock:
@@ -475,6 +503,21 @@ class Handler(BaseHTTPRequestHandler):
         if not self._require_auth():
             return
         path = self.path.split("?", 1)[0]
+        if path == "/idle/renew":
+            payload = STATE.renew_idle()
+            if payload is None:
+                self._send_json(
+                    HTTPStatus.CONFLICT,
+                    {
+                        "error": "worker_not_idle",
+                        "status": STATE.worker_status,
+                        "currentJobId": STATE.current_job_id,
+                    },
+                )
+            else:
+                self._send_json(HTTPStatus.OK, payload)
+            return
+
         if path == "/jobs":
             try:
                 payload = self._read_json()

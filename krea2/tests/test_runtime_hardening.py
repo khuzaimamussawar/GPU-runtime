@@ -89,6 +89,48 @@ class ImagePodRuntimeHardeningTests(unittest.TestCase):
             with self.assertRaises(media.ImageMediaError):
                 media.materialize_user_loras([with_size])
 
+    def test_idle_renew_extends_idle_and_recent_idle_expiry_only(self):
+        state = server.ImagePodState()
+        state.worker_status = "idle"
+        state.current_job_id = None
+        state.draining = False
+        state.idle_timeout_seconds = 90
+
+        with mock.patch.object(server.time, "time", return_value=1000.0):
+            renewed = state.renew_idle()
+        self.assertIsNotNone(renewed)
+        self.assertEqual(renewed["status"], "idle")
+        self.assertEqual(renewed["idleSince"], 1000.0)
+        self.assertEqual(renewed["terminateAfter"], 1090.0)
+
+        state.worker_status = "busy"
+        state.current_job_id = "job-1"
+        self.assertIsNone(state.renew_idle())
+
+        state.worker_status = "draining"
+        state.current_job_id = None
+        state.draining = True
+        state.terminate_after = 995.0
+        with mock.patch.object(server.time, "time", return_value=1000.0):
+            renewed = state.renew_idle()
+        self.assertIsNotNone(renewed)
+        self.assertFalse(state.draining)
+        self.assertEqual(state.worker_status, "idle")
+
+        state.worker_status = "draining"
+        state.current_job_id = None
+        state.draining = True
+        state.terminate_after = 900.0
+        with mock.patch.object(server.time, "time", return_value=1000.0):
+            self.assertIsNone(state.renew_idle())
+
+        state.worker_status = "unhealthy"
+        state.current_job_id = None
+        state.draining = True
+        state.terminate_after = 995.0
+        with mock.patch.object(server.time, "time", return_value=1000.0):
+            self.assertIsNone(state.renew_idle())
+
 
 if __name__ == "__main__":
     unittest.main()
