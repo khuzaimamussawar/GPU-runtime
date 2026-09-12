@@ -12,7 +12,13 @@ from krea2.runtime.workflow_builder import (
 
 
 ROOT = Path(__file__).resolve().parents[2]
-WORKFLOW_ROOT = ROOT / "krea2" / "workflows"
+# In the source checkout workflows live under krea2/workflows. In the final
+# runtime image the workflow layer installs them at /opt/scenebuilder-image/workflows.
+# Keep the same test suite valid in both layouts so the runtime Docker build can
+# execute it without duplicating workflow assets into the final image.
+_SOURCE_WORKFLOW_ROOT = ROOT / "krea2" / "workflows"
+_INSTALLED_WORKFLOW_ROOT = ROOT / "workflows"
+WORKFLOW_ROOT = _SOURCE_WORKFLOW_ROOT if _SOURCE_WORKFLOW_ROOT.is_dir() else _INSTALLED_WORKFLOW_ROOT
 
 
 def load_json(path: Path):
