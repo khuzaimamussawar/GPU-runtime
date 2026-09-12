@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import subprocess
 import threading
 import time
@@ -10,7 +11,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable
 
-from krea2.runtime.workflow_builder import load_and_prepare
+from krea2.runtime.workflow_builder import MAX_SAFE_SEED, load_and_prepare
 from src.image_pod.media import (
     cleanup_job_inputs,
     finalize_image_outputs,
@@ -236,6 +237,8 @@ class Krea2Adapter:
                     "renderHeight": settings.get("height"),
                     "outputWidth": settings.get("outputWidth"),
                     "outputHeight": settings.get("outputHeight"),
+                    "seedMode": settings.get("seedMode"),
+                    "seed": settings.get("seed"),
                 },
             }
         finally:
@@ -257,6 +260,31 @@ class Krea2Adapter:
             settings["outputWidth"] = payload.get("outputWidth")
         if "outputHeight" not in settings and payload.get("outputHeight") is not None:
             settings["outputHeight"] = payload.get("outputHeight")
+        if "seed" not in settings and "seed" in payload:
+            settings["seed"] = payload.get("seed")
+
+        raw_seed_mode = settings.get("seedMode", payload.get("seedMode"))
+        if raw_seed_mode is not None:
+            seed_mode = str(raw_seed_mode).strip().lower()
+            if seed_mode not in {"random", "fixed"}:
+                raise ValueError("seedMode must be 'random' or 'fixed'")
+        else:
+            seed_mode = None
+
+        seed_value = settings.get("seed")
+        has_explicit_seed = seed_value is not None and not (
+            isinstance(seed_value, str) and not seed_value.strip()
+        )
+        if has_explicit_seed:
+            # An explicit seed always wins. This keeps manual user seeds deterministic
+            # even if an older/stale client accidentally leaves seedMode='random'.
+            settings["seedMode"] = "fixed"
+        elif seed_mode == "fixed":
+            raise ValueError("fixed seed requires seed")
+        else:
+            settings["seedMode"] = "random"
+            settings["seed"] = secrets.randbelow(MAX_SAFE_SEED + 1)
+
         if settings.get("width") is None:
             settings.pop("width", None)
         if settings.get("height") is None:
