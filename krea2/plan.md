@@ -24,7 +24,7 @@ This file is the source of truth for the Krea 2 runtime, generic image-pod lifec
 - Pods form a **global compatible pool**, not permanent project-owned machines.
 - Maximum **5 active/reserved image jobs per project** at a time.
 - Maximum **5 active/reserved image pods per project** at a time.
-- Capacity target: **1 pod per 3 outstanding ready/in-flight images**, capped at 5 pods per project.
+- Capacity target: **1 pod per 2 outstanding ready/in-flight images**, capped at 5 pods per project.
 - Reuse the same RunPod/Novita/R2 variables and `H3_POD_AUTH_MASTER_SECRET` used by the existing GPU control plane.
 
 ### Storage
@@ -823,23 +823,23 @@ This avoids the undesirable pattern where a cron blindly submits a sixth job, re
 
 ---
 
-## 19. Pod-capacity target: one pod per three outstanding images
+## 19. Pod-capacity target: one pod per two outstanding images
 
 For a project with ready/in-flight image-pod work:
 
 ```text
 outstanding = readyQueuedJobs + activeReservedJobs
-wantedPods  = min(5, ceil(outstanding / 3))
+wantedPods  = min(5, ceil(outstanding / 2))
 ```
 
 Examples:
 
 ```text
-1-3 images   -> target 1 pod
-4-6          -> target 2 pods
-7-9          -> target 3 pods
-10-12        -> target 4 pods
-13+          -> target 5 pods
+1-2 images   -> target 1 pod
+3-4          -> target 2 pods
+5-6          -> target 3 pods
+7-8          -> target 4 pods
+9+           -> target 5 pods
 ```
 
 This is a provisioning target, not permission to exceed the five-job admission guard.
@@ -947,7 +947,7 @@ For every project with image-pod work:
 4. otherwise compute remaining execution slots
 5. find eligible queued jobs only up to those slots
 6. reuse compatible global idle workers first
-7. compute 1-pod-per-3 provisioning deficit
+7. compute 1-pod-per-2 provisioning deficit
 8. provision only the real deficit and only when provider cooldown permits
 9. atomically claim worker + job before POST
 10. never POST a sixth active/reserved project job
@@ -1432,7 +1432,7 @@ frontend may have 10 requests in flight
 project scheduler never has >5 active/reserved GPU image jobs
 when active count is 5, 1-minute cron does not claim/post/provision a sixth job
 when one active job completes, one new slot can be filled immediately
-10 ready jobs target 4 pods, not 10 pods
+10 ready jobs target 5 pods, not 10 pods
 global idle pods are reused before provisioning
 idle pod can move project A -> project B immediately
 busy/draining pods reject extra work
@@ -1496,7 +1496,7 @@ runtime version rollout drains old workers
 
 1. Implement hard 5-active/reserved-jobs-per-project admission guard.
 2. Implement global compatible idle pool.
-3. Implement 1-pod-per-3 outstanding images, max 5.
+3. Implement 1-pod-per-2 outstanding images, max 5.
 4. Implement event-driven immediate reuse.
 5. Implement 1-minute recovery/fill cron that skips projects already at five.
 6. Implement provider-capacity requeue/backoff rules.
@@ -1597,6 +1597,6 @@ pod remains reusable
 busy/draining/idle states behave correctly
 generic image-worker identity is used
 scheduler never admits >5 active/reserved jobs for one project
-10 queued images target 4 pods
+10 queued images target 5 pods
 provider capacity failure can requeue behind an existing project pod
 ```
