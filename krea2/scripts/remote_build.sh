@@ -12,6 +12,8 @@ export REGISTRY_NAMESPACE="${REGISTRY_NAMESPACE:-${DOCKERHUB_USERNAME}}"
 repo_dir="/opt/scenebuilder-gpu-runtime"
 docker_build_attempts="${DOCKER_BUILD_ATTEMPTS:-2}"
 min_free_disk_gb="${MIN_FREE_DISK_GB:-45}"
+provider_disk_gb="${IMAGE_POD_DISK_GB:-35}"
+min_runtime_headroom_gb="${MIN_RUNTIME_HEADROOM_GB:-5}"
 
 ALL_TARGETS=(
   base
@@ -98,6 +100,38 @@ expand_targets() {
   printf '%s\n' "${requested}"
 }
 
+verify_runtime_image_size() {
+  local image="$1"
+  local disk_bytes headroom_bytes max_static_bytes image_bytes
+  if [ "${provider_disk_gb}" -le "${min_runtime_headroom_gb}" ]; then
+    echo "Invalid image disk/headroom configuration: ${provider_disk_gb} GiB disk, ${min_runtime_headroom_gb} GiB headroom" >&2
+    exit 1
+  fi
+
+  disk_bytes="$((provider_disk_gb * 1024 * 1024 * 1024))"
+  headroom_bytes="$((min_runtime_headroom_gb * 1024 * 1024 * 1024))"
+  max_static_bytes="$((disk_bytes - headroom_bytes))"
+
+  echo "===== VERIFY KREA2 RUNTIME SIZE ====="
+  echo "Provider disk: ${provider_disk_gb} GiB"
+  echo "Required writable headroom: ${min_runtime_headroom_gb} GiB"
+  echo "Maximum static runtime image size: $((max_static_bytes / 1024 / 1024 / 1024)) GiB"
+
+  docker pull "${image}" >/dev/null
+  image_bytes="$(docker image inspect --format '{{.Size}}' "${image}")"
+  if ! [[ "${image_bytes}" =~ ^[0-9]+$ ]]; then
+    echo "Could not determine runtime image size for ${image}" >&2
+    exit 1
+  fi
+
+  echo "Runtime image virtual size: ${image_bytes} bytes"
+  if [ "${image_bytes}" -gt "${max_static_bytes}" ]; then
+    echo "Krea2 runtime image is too large for the locked ${provider_disk_gb} GiB disk with ${min_runtime_headroom_gb} GiB headroom." >&2
+    exit 1
+  fi
+  echo "Krea2 runtime image size gate passed."
+}
+
 build_one_target() {
   local target="$1"
   local dockerfile image attempt status
@@ -142,6 +176,9 @@ build_one_target() {
   done
 
   echo "Pushed ${image}"
+  if [ "${target}" = "runtime" ]; then
+    verify_runtime_image_size "${image}"
+  fi
   log_disk "after ${target}"
   prune_build_cache_if_low "after ${target}"
 }
