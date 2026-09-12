@@ -114,7 +114,7 @@ verify_runtime_image_manifest() {
   echo "Required runtime writable headroom: ${min_runtime_headroom_gb} GiB"
   echo "The CPX22 builder will NOT docker-pull/extract the final runtime image for a virtual-size check."
   echo "Pulling the just-pushed multi-layer image duplicates/extracts the full CUDA/model stack and can exhaust builder disk even when the push itself succeeded."
-  echo "Exact writable-headroom validation is performed by the image pod at runtime after the provider has created the container disk."
+  echo "Exact writable-headroom validation must be performed during the real provider GPU canary after the container disk has been created."
 
   rm -f "${inspect_file}"
   docker buildx imagetools inspect "${image}" > "${inspect_file}"
