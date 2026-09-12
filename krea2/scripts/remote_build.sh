@@ -100,36 +100,26 @@ expand_targets() {
   printf '%s\n' "${requested}"
 }
 
-verify_runtime_image_size() {
+verify_runtime_image_manifest() {
   local image="$1"
-  local disk_bytes headroom_bytes max_static_bytes image_bytes
+  local inspect_file="/tmp/krea2-runtime-imagetools.txt"
+
   if [ "${provider_disk_gb}" -le "${min_runtime_headroom_gb}" ]; then
     echo "Invalid image disk/headroom configuration: ${provider_disk_gb} GiB disk, ${min_runtime_headroom_gb} GiB headroom" >&2
     exit 1
   fi
 
-  disk_bytes="$((provider_disk_gb * 1024 * 1024 * 1024))"
-  headroom_bytes="$((min_runtime_headroom_gb * 1024 * 1024 * 1024))"
-  max_static_bytes="$((disk_bytes - headroom_bytes))"
+  echo "===== VERIFY KREA2 RUNTIME REGISTRY MANIFEST ====="
+  echo "Target provider container disk: ${provider_disk_gb} GiB"
+  echo "Required runtime writable headroom: ${min_runtime_headroom_gb} GiB"
+  echo "The CPX22 builder will NOT docker-pull/extract the final runtime image for a virtual-size check."
+  echo "Pulling the just-pushed multi-layer image duplicates/extracts the full CUDA/model stack and can exhaust builder disk even when the push itself succeeded."
+  echo "Exact writable-headroom validation is performed by the image pod at runtime after the provider has created the container disk."
 
-  echo "===== VERIFY KREA2 RUNTIME SIZE ====="
-  echo "Provider disk: ${provider_disk_gb} GiB"
-  echo "Required writable headroom: ${min_runtime_headroom_gb} GiB"
-  echo "Maximum static runtime image size: $((max_static_bytes / 1024 / 1024 / 1024)) GiB"
-
-  docker pull "${image}" >/dev/null
-  image_bytes="$(docker image inspect --format '{{.Size}}' "${image}")"
-  if ! [[ "${image_bytes}" =~ ^[0-9]+$ ]]; then
-    echo "Could not determine runtime image size for ${image}" >&2
-    exit 1
-  fi
-
-  echo "Runtime image virtual size: ${image_bytes} bytes"
-  if [ "${image_bytes}" -gt "${max_static_bytes}" ]; then
-    echo "Krea2 runtime image is too large for the locked ${provider_disk_gb} GiB disk with ${min_runtime_headroom_gb} GiB headroom." >&2
-    exit 1
-  fi
-  echo "Krea2 runtime image size gate passed."
+  rm -f "${inspect_file}"
+  docker buildx imagetools inspect "${image}" > "${inspect_file}"
+  sed -n '1,80p' "${inspect_file}"
+  echo "Krea2 runtime registry manifest verified without local layer extraction."
 }
 
 build_one_target() {
@@ -177,7 +167,7 @@ build_one_target() {
 
   echo "Pushed ${image}"
   if [ "${target}" = "runtime" ]; then
-    verify_runtime_image_size "${image}"
+    verify_runtime_image_manifest "${image}"
   fi
   log_disk "after ${target}"
   prune_build_cache_if_low "after ${target}"
