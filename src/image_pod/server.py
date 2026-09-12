@@ -21,6 +21,7 @@ POD_TOKEN = os.environ.get("SCENEBUILDER_POD_TOKEN", "").strip()
 WORKER_ID = os.environ.get("SCENEBUILDER_WORKER_ID", "").strip()
 CONTROL_URL = os.environ.get("SCENEBUILDER_CONTROL_URL", "").strip()
 DEFAULT_IDLE_TIMEOUT = max(0, int(os.environ.get("IMAGE_POD_IDLE_TIMEOUT_SECONDS", "60")))
+IDLE_RENEW_GRACE_SECONDS = max(5, int(os.environ.get("IMAGE_POD_IDLE_RENEW_GRACE_SECONDS", "30")))
 REQUEST_MAX_BYTES = max(1024, int(os.environ.get("IMAGE_POD_MAX_REQUEST_BYTES", str(1024 * 1024))))
 HEARTBEAT_SECONDS = max(5, int(os.environ.get("IMAGE_POD_HEARTBEAT_SECONDS", "15")))
 JOB_HISTORY_MAX = max(1, int(os.environ.get("IMAGE_POD_JOB_HISTORY_MAX", "100")))
@@ -95,8 +96,19 @@ class ImagePodState:
     def renew_idle(self) -> dict[str, Any] | None:
         now = time.time()
         with self.lock:
-            if self.draining or self.worker_status != "idle" or self.current_job_id is not None:
+            if self.current_job_id is not None or self.worker_status == "unhealthy":
                 return None
+            active_idle = self.worker_status == "idle" and not self.draining
+            recent_idle_expiry = (
+                self.worker_status == "draining"
+                and self.draining
+                and self.terminate_after is not None
+                and now <= self.terminate_after + IDLE_RENEW_GRACE_SECONDS
+            )
+            if not active_idle and not recent_idle_expiry:
+                return None
+            self.draining = False
+            self.worker_status = "idle"
             self.idle_since = now
             self.terminate_after = now + self.idle_timeout_seconds
             return {
