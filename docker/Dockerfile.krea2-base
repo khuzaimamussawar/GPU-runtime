@@ -1,0 +1,62 @@
+# syntax=docker/dockerfile:1.7
+ARG CUDA_IMAGE=nvidia/cuda:13.0.0-cudnn-runtime-ubuntu24.04
+FROM ${CUDA_IMAGE}
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG PYTHON_VERSION=3.13
+ARG PYTHON_BIN=python3.13
+ARG PYTORCH_VERSION=2.13.0
+ARG PYTORCH_CUDA_INDEX=https://download.pytorch.org/whl/cu130
+
+LABEL org.opencontainers.image.title="scenebuilder-image-krea2-base"
+LABEL scene_builder.layer="image-krea2-base"
+LABEL scene_builder.cuda="13.0/cu130"
+LABEL scene_builder.python="3.13"
+LABEL scene_builder.pytorch="2.13.0"
+LABEL scene_builder.providers="runpod,novita"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    curl \
+    git \
+    git-lfs \
+    libgl1 \
+    libglib2.0-0 \
+    software-properties-common \
+    tini \
+  && add-apt-repository -y ppa:deadsnakes/ppa \
+  && apt-get update && apt-get install -y --no-install-recommends \
+    python${PYTHON_VERSION} \
+    python${PYTHON_VERSION}-dev \
+    python${PYTHON_VERSION}-venv \
+  && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL https://bootstrap.pypa.io/get-pip.py | ${PYTHON_BIN} \
+ && ln -sf /usr/bin/${PYTHON_BIN} /usr/local/bin/python3 \
+ && ${PYTHON_BIN} -m pip install --no-cache-dir --upgrade pip setuptools wheel \
+ && ${PYTHON_BIN} -m pip install --no-cache-dir \
+      torch==${PYTORCH_VERSION} torchvision torchaudio \
+      --index-url ${PYTORCH_CUDA_INDEX}
+
+RUN set -eux; \
+    python3 - <<'PY'
+import torch
+assert torch.__version__.startswith("2.13.0"), torch.__version__
+assert torch.version.cuda == "13.0", torch.version.cuda
+print("torch", torch.__version__, "cuda", torch.version.cuda)
+PY
+
+RUN mkdir -p \
+    /opt/scenebuilder-image/scripts \
+    /opt/scenebuilder-image/cache/loras \
+    /opt/scenebuilder-models/krea2/diffusion_models \
+    /opt/scenebuilder-models/krea2/text_encoders \
+    /opt/scenebuilder-models/krea2/vae \
+    /opt/scenebuilder-models/krea2/loras
+
+COPY scripts/download_hf_file.py /opt/scenebuilder-image/scripts/download_hf_file.py
+
+ENV PYTHONUNBUFFERED=1
+WORKDIR /opt/scenebuilder-image
+ENTRYPOINT ["/usr/bin/tini", "--"]
