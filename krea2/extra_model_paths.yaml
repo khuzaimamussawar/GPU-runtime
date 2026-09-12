@@ -1,0 +1,6 @@
+scenebuilder_krea2:
+  base_path: /opt/scenebuilder-models/krea2
+  diffusion_models: diffusion_models
+  text_encoders: text_encoders
+  vae: vae
+  loras: loras
