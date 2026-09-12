@@ -1,0 +1,399 @@
+from __future__ import annotations
+
+import hashlib
+import math
+import os
+import shutil
+import time
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Any, Iterable
+
+
+IMAGE_ROOT = Path(os.environ.get("SCENEBUILDER_IMAGE_ROOT", "/opt/scenebuilder-image"))
+COMFY_ROOT = Path(os.environ.get("COMFY_ROOT", "/opt/ComfyUI"))
+COMFY_INPUT = COMFY_ROOT / "input"
+COMFY_OUTPUT = COMFY_ROOT / "output"
+LORA_CACHE = Path(os.environ.get("IMAGE_LORA_CACHE_DIR", str(IMAGE_ROOT / "cache" / "loras")))
+
+
+class ImageMediaError(RuntimeError):
+    pass
+
+
+def safe_name(value: Any) -> str:
+    text = str(value or "").strip()
+    cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in text)
+    return cleaned.strip("._") or "asset"
+
+
+def _r2_client():
+    bucket = os.environ.get("R2_BUCKET_NAME")
+    endpoint = os.environ.get("R2_ENDPOINT")
+    access_key = os.environ.get("R2_ACCESS_KEY")
+    secret_key = os.environ.get("R2_SECRET_KEY")
+    if not all([bucket, endpoint, access_key, secret_key]):
+        return None, None
+
+    import boto3
+
+    client = boto3.client(
+        "s3",
+        endpoint_url=endpoint,
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+        region_name=os.environ.get("R2_REGION", "auto"),
+    )
+    return client, bucket
+
+
+def _media_ref(value: Any) -> dict[str, Any]:
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("http://") or text.startswith("https://"):
+            return {"url": text}
+        return {"objectKey": text.lstrip("/")}
+    if isinstance(value, dict):
+        return dict(value)
+    raise ImageMediaError(f"unsupported media reference: {type(value).__name__}")
+
+
+def _object_key_from_url(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    direct = text.lstrip("/")
+    allowed_prefixes = (
+        "projects/",
+        "temp/",
+        "style/",
+        "styles/",
+        "images/",
+        "models/lora/",
+    )
+    if direct.startswith(allowed_prefixes):
+        return direct
+    try:
+        parsed = urllib.parse.urlparse(text)
+    except Exception:
+        return None
+    key = urllib.parse.unquote(parsed.path or "").lstrip("/")
+    return key if key.startswith(allowed_prefixes) else None
+
+
+def _download_ref_to_path(value: Any, target: Path) -> Path:
+    ref = _media_ref(value)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    url = str(ref.get("url") or "").strip() or None
+    object_key = (
+        str(ref.get("objectKey") or ref.get("key") or "").strip().lstrip("/")
+        or _object_key_from_url(url)
+        or None
+    )
+    if not object_key and not url:
+        raise ImageMediaError("media reference requires objectKey/key or url")
+
+    tmp = target.with_suffix(target.suffix + ".part")
+    tmp.unlink(missing_ok=True)
+    r2_error: Exception | None = None
+
+    if object_key:
+        client, bucket = _r2_client()
+        if client is not None and bucket:
+            try:
+                client.download_file(bucket, object_key, str(tmp))
+                os.replace(tmp, target)
+                return target
+            except Exception as exc:
+                r2_error = exc
+                tmp.unlink(missing_ok=True)
+        elif not url:
+            raise ImageMediaError(
+                "private objectKey download requires R2_BUCKET_NAME, R2_ENDPOINT, R2_ACCESS_KEY and R2_SECRET_KEY"
+            )
+
+    if url:
+        try:
+            request = urllib.request.Request(url, headers={"User-Agent": "SceneBuilder-Image-Pod/1.0"})
+            with urllib.request.urlopen(request, timeout=120) as response, tmp.open("wb") as handle:
+                shutil.copyfileobj(response, handle, length=8 * 1024 * 1024)
+            os.replace(tmp, target)
+            return target
+        except Exception as exc:
+            tmp.unlink(missing_ok=True)
+            if r2_error is not None:
+                raise ImageMediaError(
+                    f"failed R2 object download and fallback URL: R2={r2_error}; URL={exc}"
+                ) from exc
+            raise ImageMediaError(f"failed media download: {exc}") from exc
+
+    raise ImageMediaError(f"failed R2 object download: {r2_error}")
+
+
+def _hash_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(8 * 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _cache_limits() -> tuple[int, int]:
+    # Keep room inside the locked 35 GiB provider disk for Comfy temp/output.
+    max_bytes = int(float(os.environ.get("IMAGE_LORA_CACHE_MAX_GB", "4")) * 1024**3)
+    min_free_bytes = int(float(os.environ.get("IMAGE_LORA_CACHE_MIN_FREE_GB", "3")) * 1024**3)
+    return max(0, max_bytes), max(0, min_free_bytes)
+
+
+def _evict_lora_cache(*, protect: set[Path] | None = None) -> None:
+    protect = {path.resolve() for path in (protect or set())}
+    LORA_CACHE.mkdir(parents=True, exist_ok=True)
+    max_bytes, min_free_bytes = _cache_limits()
+
+    files = [
+        path
+        for path in LORA_CACHE.glob("*.safetensors")
+        if path.is_file() and path.resolve() not in protect
+    ]
+    files.sort(key=lambda path: path.stat().st_atime)
+
+    def cache_bytes() -> int:
+        return sum(path.stat().st_size for path in LORA_CACHE.glob("*.safetensors") if path.is_file())
+
+    while files:
+        current = cache_bytes()
+        free = shutil.disk_usage(LORA_CACHE).free
+        if (not max_bytes or current <= max_bytes) and free >= min_free_bytes:
+            break
+        victim = files.pop(0)
+        victim.unlink(missing_ok=True)
+
+
+def materialize_user_loras(values: Iterable[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    resolved: list[dict[str, Any]] = []
+    raw_values = [dict(value) for value in (values or [])]
+    if len(raw_values) > 3:
+        raise ImageMediaError("at most 3 user LoRAs are supported")
+
+    LORA_CACHE.mkdir(parents=True, exist_ok=True)
+    protected: set[Path] = set()
+
+    for item in raw_values:
+        lora_id = safe_name(item.get("loraId") or item.get("lora_id"))
+        if not lora_id:
+            raise ImageMediaError("LoRA loraId is required")
+        object_key = str(item.get("objectKey") or item.get("r2ObjectKey") or "").strip().lstrip("/")
+        if not object_key.startswith("models/lora/"):
+            raise ImageMediaError(f"LoRA {lora_id} has invalid trusted R2 object key")
+
+        target = LORA_CACHE / f"{lora_id}.safetensors"
+        expected_size_raw = item.get("fileSizeBytes", item.get("file_size_bytes"))
+        expected_size = int(expected_size_raw) if expected_size_raw not in {None, ""} else None
+        expected_sha = str(item.get("sha256") or "").strip().lower() or None
+
+        valid = target.exists()
+        if valid and expected_size is not None and target.stat().st_size != expected_size:
+            valid = False
+        if valid and expected_sha is not None and _hash_file(target) != expected_sha:
+            valid = False
+        if not valid:
+            target.unlink(missing_ok=True)
+            _download_ref_to_path({"objectKey": object_key}, target)
+            if expected_size is not None and target.stat().st_size != expected_size:
+                target.unlink(missing_ok=True)
+                raise ImageMediaError(f"LoRA size mismatch for {lora_id}")
+            if expected_sha is not None and _hash_file(target) != expected_sha:
+                target.unlink(missing_ok=True)
+                raise ImageMediaError(f"LoRA SHA256 mismatch for {lora_id}")
+
+        now = time.time()
+        os.utime(target, (now, target.stat().st_mtime))
+        protected.add(target)
+        resolved.append(
+            {
+                "loraId": str(item.get("loraId") or item.get("lora_id") or lora_id),
+                "fileName": target.name,
+                "strength": item.get("strength"),
+                "minStrength": item.get("minStrength", item.get("min_strength")),
+                "maxStrength": item.get("maxStrength", item.get("max_strength")),
+            }
+        )
+
+    _evict_lora_cache(protect=protected)
+    return resolved
+
+
+def _image_suffix(value: Any) -> str:
+    ref = _media_ref(value)
+    source = str(ref.get("objectKey") or ref.get("key") or ref.get("url") or "")
+    suffix = Path(urllib.parse.urlparse(source).path).suffix.lower()
+    return suffix if suffix in {".png", ".jpg", ".jpeg", ".webp", ".bmp"} else ".img"
+
+
+def stage_style_references(job_id: str, values: Iterable[Any] | None) -> tuple[list[str], Path]:
+    refs = list(values or [])
+    if not 1 <= len(refs) <= 10:
+        raise ImageMediaError("style-reference mode requires 1-10 images")
+
+    try:
+        from PIL import Image, ImageOps
+    except Exception as exc:
+        raise ImageMediaError("style reference preprocessing requires Pillow") from exc
+
+    job_dir = COMFY_INPUT / "scenebuilder" / safe_name(job_id) / "style_refs"
+    job_dir.mkdir(parents=True, exist_ok=True)
+    max_dim = max(256, int(os.environ.get("KREA2_REFERENCE_MAX_DIM", "4096")))
+    filenames: list[str] = []
+
+    for index, ref in enumerate(refs, start=1):
+        source = job_dir / f"source_{index:02d}{_image_suffix(ref)}"
+        _download_ref_to_path(ref, source)
+        output = job_dir / f"reference_{index:02d}.png"
+        try:
+            with Image.open(source) as opened:
+                image = ImageOps.exif_transpose(opened).convert("RGB")
+                width, height = image.size
+                longest = max(width, height)
+                if longest > max_dim:
+                    scale = max_dim / longest
+                    target = (max(1, round(width * scale)), max(1, round(height * scale)))
+                    image = image.resize(target, Image.Resampling.LANCZOS)
+                image.save(output, "PNG", optimize=True)
+        except Exception as exc:
+            raise ImageMediaError(f"unable to preprocess style reference {index}: {exc}") from exc
+        finally:
+            source.unlink(missing_ok=True)
+
+        filenames.append(str(output.relative_to(COMFY_INPUT)).replace("\\", "/"))
+
+    return filenames, job_dir
+
+
+def _resolve_comfy_output(image: dict[str, Any]) -> Path:
+    filename = safe_name(image.get("filename"))
+    subfolder = str(image.get("subfolder") or "").strip().replace("\\", "/").strip("/")
+    candidate = (COMFY_OUTPUT / subfolder / filename).resolve()
+    root = COMFY_OUTPUT.resolve()
+    if candidate != root and root not in candidate.parents:
+        raise ImageMediaError("Comfy output escaped output directory")
+    if not candidate.is_file():
+        raise ImageMediaError(f"Comfy output file not found: {candidate}")
+    return candidate
+
+
+def _upload_file(path: Path, object_key: str, content_type: str) -> dict[str, Any]:
+    client, bucket = _r2_client()
+    public_url = os.environ.get("R2_PUBLIC_URL", "").rstrip("/")
+    if client is None or not bucket:
+        return {
+            "objectKey": object_key,
+            "localPath": str(path),
+            "uploaded": False,
+            "url": f"{public_url}/{object_key}" if public_url else None,
+        }
+
+    client.upload_file(
+        str(path),
+        bucket,
+        object_key,
+        ExtraArgs={"ContentType": content_type},
+    )
+    return {
+        "objectKey": object_key,
+        "uploaded": True,
+        "url": f"{public_url}/{object_key}" if public_url else None,
+    }
+
+
+def finalize_image_outputs(
+    *,
+    job_id: str,
+    project_id: str | None,
+    outputs: Iterable[dict[str, Any]],
+    settings: dict[str, Any],
+    output_prefix: str | None = None,
+) -> dict[str, Any]:
+    images = list(outputs)
+    if not images:
+        raise ImageMediaError("no Comfy image output to finalize")
+
+    try:
+        from PIL import Image
+    except Exception as exc:
+        raise ImageMediaError("image finalization requires Pillow") from exc
+
+    source = _resolve_comfy_output(images[0])
+    final_dir = IMAGE_ROOT / "tmp" / safe_name(job_id)
+    final_dir.mkdir(parents=True, exist_ok=True)
+    final_path = final_dir / "image.png"
+
+    output_w_raw = settings.get("outputWidth")
+    output_h_raw = settings.get("outputHeight")
+    output_w = int(output_w_raw) if output_w_raw not in {None, ""} else None
+    output_h = int(output_h_raw) if output_h_raw not in {None, ""} else None
+
+    with Image.open(source) as opened:
+        image = opened.convert("RGB")
+        if output_w and output_h and image.size != (output_w, output_h):
+            source_ratio = image.width / image.height
+            target_ratio = output_w / output_h
+            if not math.isclose(source_ratio, target_ratio, rel_tol=0, abs_tol=1e-5):
+                raise ImageMediaError(
+                    f"refusing non-proportional final resize {image.size} -> {(output_w, output_h)}"
+                )
+            image = image.resize((output_w, output_h), Image.Resampling.LANCZOS)
+        image.save(final_path, "PNG", optimize=True)
+
+    prefix = str(output_prefix or "").strip("/")
+    if not prefix:
+        prefix = f"projects/{safe_name(project_id or 'unknown')}/scene_images"
+    full_key = f"{prefix}/original/{safe_name(job_id)}.png"
+    full = _upload_file(final_path, full_key, "image/png")
+
+    thumbnail_status = "completed"
+    thumbnail: dict[str, Any] | None = None
+    thumbnail_error: str | None = None
+    thumb_path = final_dir / "thumbnail.jpg"
+    try:
+        with Image.open(final_path) as opened:
+            thumb = opened.convert("RGB")
+            if thumb.width > 700:
+                height = max(1, round(thumb.height * (700 / thumb.width)))
+                thumb = thumb.resize((700, height), Image.Resampling.LANCZOS)
+            thumb.save(thumb_path, "JPEG", quality=80, optimize=True)
+        thumb_key = f"{prefix}/thumbnail/{safe_name(job_id)}.jpg"
+        thumbnail = _upload_file(thumb_path, thumb_key, "image/jpeg")
+    except Exception as exc:
+        thumbnail_status = "failed"
+        thumbnail_error = str(exc)
+
+    try:
+        source.unlink(missing_ok=True)
+        shutil.rmtree(final_dir, ignore_errors=True)
+    except Exception:
+        pass
+
+    return {
+        "full": full,
+        "thumbnail": thumbnail,
+        "thumbnailStatus": thumbnail_status,
+        "thumbnailError": thumbnail_error,
+        "width": output_w,
+        "height": output_h,
+    }
+
+
+def cleanup_job_inputs(path: Path | None) -> None:
+    if path is None:
+        return
+    try:
+        resolved = path.resolve()
+        root = COMFY_INPUT.resolve()
+        if resolved != root and root in resolved.parents:
+            shutil.rmtree(resolved, ignore_errors=True)
+    except Exception:
+        pass
