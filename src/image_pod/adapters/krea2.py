@@ -27,6 +27,7 @@ class Krea2Adapter:
 
     def __init__(self) -> None:
         self.root = Path(os.environ.get("SCENEBUILDER_IMAGE_ROOT", "/opt/scenebuilder-image"))
+        self.model_root = Path(os.environ.get("SCENEBUILDER_KREA2_MODEL_ROOT", "/opt/scenebuilder-models/krea2"))
         self.comfy_root = Path(os.environ.get("COMFY_ROOT", "/opt/ComfyUI"))
         self.comfy_host = os.environ.get("COMFY_HOST", "127.0.0.1")
         self.comfy_port = int(os.environ.get("COMFY_PORT", "8188"))
@@ -46,15 +47,42 @@ class Krea2Adapter:
     def workflows_root(self) -> Path:
         return self.root / "workflows"
 
-    def diagnostics(self) -> dict[str, Any]:
+    def _required_assets(self) -> list[Path]:
+        return [
+            self.model_root / "diffusion_models" / "krea2_turbo_int8_convrot.safetensors",
+            self.model_root / "text_encoders" / "qwen3vl_4b_bf16.safetensors",
+            self.model_root / "vae" / "qwen_image_vae.safetensors",
+            self.model_root / "vae" / "wan_2.1_vae.safetensors",
+            self.model_root / "loras" / "krea2_style_reference.safetensors",
+            self.workflows_root / "krea2_turbo.json",
+            self.workflows_root / "krea2_style_reference.json",
+            self.workflows_root / "manifests" / "krea2_turbo.json",
+            self.workflows_root / "manifests" / "krea2_style_reference.json",
+            self.extra_model_paths,
+        ]
+
+    def readiness(self) -> dict[str, Any]:
+        missing = [str(path) for path in self._required_assets() if not path.is_file() or path.stat().st_size <= 0]
+        comfy_ready = self.is_ready()
         return {
+            "ready": comfy_ready and not missing,
             "taskFamily": self.task_family,
-            "comfyRoot": str(self.comfy_root),
-            "comfyUrl": self.comfy_url,
-            "extraModelPaths": str(self.extra_model_paths),
+            "comfyReady": comfy_ready,
+            "missingAssets": missing,
+            "modelRoot": str(self.model_root),
             "workflowsRoot": str(self.workflows_root),
-            "ready": self.is_ready(),
         }
+
+    def diagnostics(self) -> dict[str, Any]:
+        details = self.readiness()
+        details.update(
+            {
+                "comfyRoot": str(self.comfy_root),
+                "comfyUrl": self.comfy_url,
+                "extraModelPaths": str(self.extra_model_paths),
+            }
+        )
+        return details
 
     def is_ready(self) -> bool:
         try:
@@ -136,8 +164,6 @@ class Krea2Adapter:
             raise ValueError("styleMode must be 'lora' or 'reference_images'")
         settings["styleMode"] = style_mode
 
-        # SaveImage writes to local Comfy output. R2 naming is handled only after
-        # generation succeeds so provider/runtime paths never become public keys.
         settings["outputPrefix"] = f"scenebuilder/{job_id}/image"
         r2_output_prefix = str(
             payload.get("outputPrefix")
@@ -193,8 +219,6 @@ class Krea2Adapter:
                 output_prefix=r2_output_prefix,
             )
             progress("uploading", 97)
-            # Uploading happens inside finalization. This explicit phase gives the
-            # control plane a stable product-facing lifecycle even for fast R2 puts.
             progress("completed", 100)
             return {
                 "ok": True,
@@ -221,6 +245,10 @@ class Krea2Adapter:
         settings = dict(payload.get("settings") or {})
         if "prompt" not in settings and "prompt" in payload:
             settings["prompt"] = payload.get("prompt")
+        if "negativePrompt" not in settings:
+            negative = payload.get("negativePrompt", payload.get("negative_prompt"))
+            if negative is not None:
+                settings["negativePrompt"] = negative
         if "width" not in settings:
             settings["width"] = settings.get("renderWidth", payload.get("renderWidth", payload.get("width")))
         if "height" not in settings:
@@ -229,8 +257,6 @@ class Krea2Adapter:
             settings["outputWidth"] = payload.get("outputWidth")
         if "outputHeight" not in settings and payload.get("outputHeight") is not None:
             settings["outputHeight"] = payload.get("outputHeight")
-        # Drop unset render values so the base workflow defaults remain valid in
-        # source-only tests; production requests always provide a product tier.
         if settings.get("width") is None:
             settings.pop("width", None)
         if settings.get("height") is None:
@@ -285,7 +311,6 @@ class Krea2Adapter:
                 if entry.get("outputs"):
                     return entry
 
-            # Without a websocket progress channel, expose bounded heartbeat progress.
             last_percent = min(90, last_percent + 1)
             progress("generating", last_percent)
             time.sleep(self.poll_interval)
