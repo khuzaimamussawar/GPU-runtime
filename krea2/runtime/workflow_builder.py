@@ -228,7 +228,7 @@ def _patch_user_loras(
         raise WorkflowBuildError(f"this workflow supports at most {max_count} user LoRAs")
 
     if max_count == 0 and loras:
-        raise WorkflowBuildError("user LoRAs are not allowed in style-reference mode")
+        raise WorkflowBuildError("user LoRAs are not enabled for this workflow")
     if max_count == 0:
         return
 
@@ -322,6 +322,10 @@ def prepare_krea2_workflow(
     `user_loras` must already be resolved from the trusted D1/R2 catalog into
     concrete local filenames and catalog min/max strengths. `reference_images`
     are local Comfy input filenames already staged by the image-pod runtime.
+
+    The style-reference workflow may combine 1-10 style references with 0-3
+    user LoRAs. User LoRAs are applied after the baked Krea style-reference
+    adapter and before ModelSamplingFlux.
     """
 
     prepared = copy.deepcopy(workflow)
@@ -334,12 +338,10 @@ def prepare_krea2_workflow(
 
     if mode == "lora":
         if list(reference_images or []):
-            raise WorkflowBuildError("style references cannot be combined with user LoRAs in v1")
+            raise WorkflowBuildError("style references require the reference_images workflow")
         _patch_user_loras(prepared, manifest, user_loras)
     else:
-        if list(user_loras or []):
-            raise WorkflowBuildError("user LoRAs cannot be combined with style references in v1")
-        _patch_user_loras(prepared, manifest, None)
+        _patch_user_loras(prepared, manifest, user_loras)
         _patch_style_references(prepared, manifest, reference_images)
 
     return prepared
