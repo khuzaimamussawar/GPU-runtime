@@ -89,6 +89,42 @@ class ImagePodRuntimeHardeningTests(unittest.TestCase):
             with self.assertRaises(media.ImageMediaError):
                 media.materialize_user_loras([with_size])
 
+    def test_mark_idle_correlates_post_job_idle_event(self):
+        state = server.ImagePodState()
+        state.worker_status = "busy"
+        state.current_job_id = "job-1"
+        state.idle_timeout_seconds = 60
+        with mock.patch.object(server, "emit_event") as emit:
+            state.mark_idle("job-1")
+        self.assertEqual(state.worker_status, "idle")
+        self.assertIsNone(state.current_job_id)
+        self.assertIsNotNone(state.terminate_after)
+        fields = emit.call_args.kwargs
+        self.assertEqual(emit.call_args.args[0], "worker_idle")
+        self.assertEqual(fields["jobId"], "job-1")
+        self.assertEqual(fields["idleTimeoutSeconds"], 60)
+
+    def test_expired_idle_window_can_be_renewed_before_delete(self):
+        state = server.ImagePodState()
+        state.worker_status = "draining"
+        state.draining = True
+        state.current_job_id = None
+        state.idle_timeout_seconds = 90
+        renewed = state.renew_idle()
+        self.assertIsNotNone(renewed)
+        self.assertEqual(state.worker_status, "idle")
+        self.assertFalse(state.draining)
+        self.assertEqual(renewed["idleTimeoutSeconds"], 90)
+        self.assertGreater(renewed["terminateAfter"], renewed["idleSince"])
+
+    def test_idle_renewal_refuses_busy_worker(self):
+        state = server.ImagePodState()
+        state.worker_status = "busy"
+        state.current_job_id = "job-2"
+        self.assertIsNone(state.renew_idle())
+        self.assertEqual(state.worker_status, "busy")
+        self.assertEqual(state.current_job_id, "job-2")
+
 
 if __name__ == "__main__":
     unittest.main()
