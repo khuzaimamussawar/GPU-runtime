@@ -156,7 +156,8 @@ class Krea2Adapter:
         else:
             workflow_path = self.workflows_root / "krea2_style_reference.json"
             manifest_path = self.workflows_root / "manifests" / "krea2_style_reference.json"
-            user_loras = []
+            progress("preparing_model", 2)
+            user_loras = materialize_user_loras(payload.get("userLoras") or payload.get("loras") or [])
             progress("encoding_prompt", 3)
             reference_images, staged_input_dir = stage_style_references(
                 job_id,
