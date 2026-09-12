@@ -44,6 +44,7 @@ jobs:
         run: |
           python -m py_compile \
             krea2/runtime/workflow_builder.py \
+            krea2/scripts/hash_r2_lora.py \
             src/image_pod/media.py \
             src/image_pod/registry.py \
             src/image_pod/adapters/krea2.py \
