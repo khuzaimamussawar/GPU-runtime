@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import threading
 import time
 import urllib.request
+import uuid
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -19,6 +21,15 @@ POD_TOKEN = os.environ.get("SCENEBUILDER_POD_TOKEN", "").strip()
 WORKER_ID = os.environ.get("SCENEBUILDER_WORKER_ID", "").strip()
 CONTROL_URL = os.environ.get("SCENEBUILDER_CONTROL_URL", "").strip()
 DEFAULT_IDLE_TIMEOUT = max(0, int(os.environ.get("IMAGE_POD_IDLE_TIMEOUT_SECONDS", "60")))
+REQUEST_MAX_BYTES = max(1024, int(os.environ.get("IMAGE_POD_MAX_REQUEST_BYTES", str(1024 * 1024))))
+HEARTBEAT_SECONDS = max(5, int(os.environ.get("IMAGE_POD_HEARTBEAT_SECONDS", "15")))
+JOB_HISTORY_MAX = max(1, int(os.environ.get("IMAGE_POD_JOB_HISTORY_MAX", "100")))
+JOB_HISTORY_TTL_SECONDS = max(60, int(os.environ.get("IMAGE_POD_JOB_HISTORY_TTL_SECONDS", "3600")))
+TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled"}
+
+
+class RequestTooLargeError(ValueError):
+    pass
 
 
 @dataclass
@@ -67,7 +78,7 @@ class ImagePodState:
     def mark_idle(self) -> None:
         now = time.time()
         with self.lock:
-            if self.draining:
+            if self.draining or self.worker_status == "unhealthy":
                 return
             self.current_job_id = None
             self.worker_status = "idle"
@@ -81,8 +92,53 @@ class ImagePodState:
             loadedFamily=self.loaded_family,
         )
 
+    def mark_unhealthy(self, reason: str) -> None:
+        with self.lock:
+            self.current_job_id = None
+            self.worker_status = "unhealthy"
+            self.draining = True
+            self.idle_since = None
+            self.terminate_after = None
+        emit_event("worker_unhealthy", reason=reason, loadedFamily=self.loaded_family)
+
+    def prune_jobs(self) -> None:
+        cutoff = time.time() - JOB_HISTORY_TTL_SECONDS
+        with self.lock:
+            terminal = [
+                record
+                for record in self.jobs.values()
+                if record.status in TERMINAL_JOB_STATUSES and record.completed_at is not None
+            ]
+            for record in terminal:
+                if record.completed_at is not None and record.completed_at < cutoff:
+                    self.jobs.pop(record.job_id, None)
+            terminal = sorted(
+                (
+                    record
+                    for record in self.jobs.values()
+                    if record.status in TERMINAL_JOB_STATUSES and record.completed_at is not None
+                ),
+                key=lambda record: record.completed_at or 0,
+                reverse=True,
+            )
+            for record in terminal[JOB_HISTORY_MAX:]:
+                self.jobs.pop(record.job_id, None)
+
 
 STATE = ImagePodState()
+
+
+def _required_runtime_config_errors() -> list[str]:
+    required = {
+        "SCENEBUILDER_POD_TOKEN": POD_TOKEN,
+        "SCENEBUILDER_WORKER_ID": WORKER_ID,
+        "SCENEBUILDER_CONTROL_URL": CONTROL_URL,
+        "R2_BUCKET_NAME": os.environ.get("R2_BUCKET_NAME", "").strip(),
+        "R2_ENDPOINT": os.environ.get("R2_ENDPOINT", "").strip(),
+        "R2_ACCESS_KEY": os.environ.get("R2_ACCESS_KEY", "").strip(),
+        "R2_SECRET_KEY": os.environ.get("R2_SECRET_KEY", "").strip(),
+    }
+    return [name for name, value in required.items() if not value]
 
 
 def _json_request(url: str, payload: dict[str, Any], timeout: int = 10) -> None:
@@ -105,8 +161,11 @@ def emit_event(event_type: str, **fields: Any) -> None:
         return
     payload: dict[str, Any] = {
         "event": event_type,
+        "eventId": str(uuid.uuid4()),
+        "nonce": uuid.uuid4().hex,
         "workerId": WORKER_ID,
         "timestamp": time.time(),
+        "timestampMs": int(time.time() * 1000),
     }
     payload.update(fields)
     threading.Thread(target=_json_request, args=(CONTROL_URL, payload), daemon=True).start()
@@ -133,8 +192,32 @@ def _cancel_requested(record: JobRecord) -> bool:
         return bool(record.cancel_requested)
 
 
+def _is_fatal_runtime_error(exc: Exception) -> bool:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    fatal_markers = (
+        "cuda out of memory",
+        "outofmemoryerror",
+        "cuda unavailable",
+        "cuda error",
+        "cublas",
+        "cudnn",
+        "illegal memory access",
+        "device-side assert",
+        "comfyui exited during startup",
+        "comfyui did not become ready",
+        "failed to load diffusion",
+        "failed to load clip",
+        "failed to load vae",
+        "model load",
+        "text encoder load",
+        "vae load",
+    )
+    return any(marker in text for marker in fatal_markers)
+
+
 def process_job(payload: dict[str, Any], record: JobRecord) -> None:
     adapter = get_adapter(record.task_family)
+    fatal = False
     with STATE.lock:
         record.status = "processing"
         record.phase = "preparing_model"
@@ -167,11 +250,12 @@ def process_job(payload: dict[str, Any], record: JobRecord) -> None:
             emit_event("job_completed", jobId=record.job_id, taskFamily=record.task_family, result=result)
     except Exception as exc:
         cancelled = _cancel_requested(record)
+        fatal = not cancelled and _is_fatal_runtime_error(exc)
         with STATE.lock:
             record.status = "cancelled" if cancelled else "failed"
             record.phase = record.status
             record.error = None if cancelled else {
-                "code": "IMAGE_RUNTIME_ERROR",
+                "code": "IMAGE_RUNTIME_FATAL" if fatal else "IMAGE_RUNTIME_ERROR",
                 "message": str(exc),
                 "type": type(exc).__name__,
             }
@@ -183,12 +267,17 @@ def process_job(payload: dict[str, Any], record: JobRecord) -> None:
                 jobId=record.job_id,
                 taskFamily=record.task_family,
                 error=record.error,
+                workerFatal=fatal,
             )
             print(f"[Image Pod] job {record.job_id} failed: {type(exc).__name__}: {exc}", flush=True)
     finally:
         with STATE.lock:
             record.completed_at = time.time()
-        STATE.mark_idle()
+        STATE.prune_jobs()
+        if fatal:
+            STATE.mark_unhealthy(record.error["message"] if record.error else "fatal runtime error")
+        else:
+            STATE.mark_idle()
 
 
 def idle_watchdog() -> None:
@@ -211,21 +300,17 @@ def idle_watchdog() -> None:
             emit_event("idle_expired", terminateAfter=deadline, loadedFamily=STATE.loaded_family)
 
 
-def bootstrap() -> None:
-    try:
-        # Krea2 is the first image family. Starting it here makes /ready mean the
-        # actual Comfy/Krea runtime is available, not merely that the HTTP socket exists.
-        adapter = get_adapter("krea2_image")
-        adapter.ensure_ready()
+def heartbeat_loop() -> None:
+    while True:
+        time.sleep(HEARTBEAT_SECONDS)
         with STATE.lock:
-            STATE.worker_status = "idle"
-        STATE.mark_idle()
-        emit_event("worker_ready", taskFamilies=supported_task_families(), readyAt=time.time())
-    except Exception as exc:
-        with STATE.lock:
-            STATE.worker_status = "unhealthy"
-        emit_event("worker_unhealthy", error=str(exc), errorType=type(exc).__name__)
-        print(f"[Image Pod] bootstrap failed: {type(exc).__name__}: {exc}", flush=True)
+            fields = {
+                "status": STATE.worker_status,
+                "currentJobId": STATE.current_job_id,
+                "loadedFamily": STATE.loaded_family,
+                "draining": STATE.draining,
+            }
+        emit_event("worker_heartbeat", **fields)
 
 
 def gpu_diagnostics() -> dict[str, Any]:
@@ -251,6 +336,60 @@ def gpu_diagnostics() -> dict[str, Any]:
         return {"cudaAvailable": False, "error": str(exc), "errorType": type(exc).__name__}
 
 
+def runtime_readiness() -> dict[str, Any]:
+    config_errors = _required_runtime_config_errors()
+    gpu = gpu_diagnostics()
+    adapter_ready = False
+    adapter_details: dict[str, Any] = {}
+    try:
+        adapter = get_adapter("krea2_image")
+        readiness = getattr(adapter, "readiness", None)
+        if callable(readiness):
+            adapter_details = dict(readiness())
+            adapter_ready = bool(adapter_details.get("ready"))
+        else:
+            adapter_ready = bool(adapter.is_ready())
+    except Exception as exc:
+        adapter_details = {"ready": False, "error": str(exc), "errorType": type(exc).__name__}
+
+    with STATE.lock:
+        state_ready = STATE.worker_status in {"idle", "busy"} and not STATE.draining
+        status = STATE.worker_status
+    ready = not config_errors and bool(gpu.get("cudaAvailable")) and adapter_ready and state_ready
+    return {
+        "ready": ready,
+        "status": status,
+        "taskFamilies": supported_task_families(),
+        "configErrors": config_errors,
+        "gpu": gpu,
+        "adapter": adapter_details,
+    }
+
+
+def bootstrap() -> None:
+    try:
+        config_errors = _required_runtime_config_errors()
+        if config_errors:
+            raise RuntimeError(f"missing required runtime configuration: {', '.join(config_errors)}")
+        gpu = gpu_diagnostics()
+        if not gpu.get("cudaAvailable"):
+            raise RuntimeError(f"CUDA unavailable: {gpu}")
+        adapter = get_adapter("krea2_image")
+        adapter.ensure_ready()
+        readiness = getattr(adapter, "readiness", None)
+        if callable(readiness):
+            details = dict(readiness())
+            if not details.get("ready"):
+                raise RuntimeError(f"Krea2 runtime assets not ready: {details}")
+        with STATE.lock:
+            STATE.worker_status = "idle"
+        STATE.mark_idle()
+        emit_event("worker_ready", taskFamilies=supported_task_families(), readyAt=time.time())
+    except Exception as exc:
+        STATE.mark_unhealthy(str(exc))
+        print(f"[Image Pod] bootstrap failed: {type(exc).__name__}: {exc}", flush=True)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "SceneBuilderImagePod/1.0"
 
@@ -266,7 +405,11 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0") or "0")
         if length <= 0:
             return {}
+        if length > REQUEST_MAX_BYTES:
+            raise RequestTooLargeError(f"request body exceeds {REQUEST_MAX_BYTES} bytes")
         raw = self.rfile.read(length)
+        if len(raw) > REQUEST_MAX_BYTES:
+            raise RequestTooLargeError(f"request body exceeds {REQUEST_MAX_BYTES} bytes")
         payload = json.loads(raw.decode("utf-8"))
         if not isinstance(payload, dict):
             raise ValueError("JSON body must be an object")
@@ -274,8 +417,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _authorized(self) -> bool:
         if not POD_TOKEN:
-            return True
-        return self.headers.get("Authorization", "") == f"Bearer {POD_TOKEN}"
+            return False
+        expected = f"Bearer {POD_TOKEN}"
+        supplied = self.headers.get("Authorization", "")
+        return hmac.compare_digest(supplied, expected)
 
     def _require_auth(self) -> bool:
         if self._authorized():
@@ -289,14 +434,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.OK, {"ok": True, "service": "scene-builder-image-pod"})
             return
         if path == "/ready":
-            with STATE.lock:
-                ready = STATE.worker_status in {"idle", "busy"} and not STATE.draining
-                payload = {
-                    "ready": ready,
-                    "status": STATE.worker_status,
-                    "taskFamilies": supported_task_families(),
-                }
-            self._send_json(HTTPStatus.OK if ready else HTTPStatus.SERVICE_UNAVAILABLE, payload)
+            payload = runtime_readiness()
+            self._send_json(HTTPStatus.OK if payload["ready"] else HTTPStatus.SERVICE_UNAVAILABLE, payload)
             return
         if not self._require_auth():
             return
@@ -312,6 +451,7 @@ class Handler(BaseHTTPRequestHandler):
                     "terminateAfter": STATE.terminate_after,
                     "taskFamilies": supported_task_families(),
                     "uptimeSeconds": time.time() - STATE.started_at,
+                    "jobHistoryCount": len(STATE.jobs),
                 }
             self._send_json(HTTPStatus.OK, payload)
             return
@@ -319,6 +459,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.OK, gpu_diagnostics())
             return
         if path.startswith("/jobs/"):
+            STATE.prune_jobs()
             job_id = path[len("/jobs/") :].strip("/")
             with STATE.lock:
                 record = STATE.jobs.get(job_id)
@@ -344,15 +485,16 @@ class Handler(BaseHTTPRequestHandler):
                 if family not in supported_task_families():
                     raise ValueError(f"unsupported taskFamily: {family or '<missing>'}")
 
+                STATE.prune_jobs()
                 with STATE.lock:
-                    if STATE.draining:
-                        self._send_json(HTTPStatus.CONFLICT, {"error": "worker_draining"})
+                    if STATE.draining or STATE.worker_status in {"unhealthy", "draining"}:
+                        self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "worker_unavailable"})
                         return
                     existing = STATE.jobs.get(job_id)
                     if existing:
                         self._send_json(HTTPStatus.OK, existing.public())
                         return
-                    if STATE.current_job_id is not None or STATE.worker_status == "busy":
+                    if STATE.worker_status != "idle" or STATE.current_job_id is not None:
                         self._send_json(
                             HTTPStatus.CONFLICT,
                             {"error": "worker_busy", "currentJobId": STATE.current_job_id},
@@ -368,6 +510,8 @@ class Handler(BaseHTTPRequestHandler):
                 thread = threading.Thread(target=process_job, args=(payload, record), daemon=True)
                 thread.start()
                 self._send_json(HTTPStatus.ACCEPTED, record.public())
+            except RequestTooLargeError as exc:
+                self._send_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": "request_too_large", "message": str(exc)})
             except (ValueError, json.JSONDecodeError) as exc:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_request", "message": str(exc)})
             return
@@ -398,6 +542,7 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     threading.Thread(target=bootstrap, daemon=True).start()
     threading.Thread(target=idle_watchdog, daemon=True).start()
+    threading.Thread(target=heartbeat_loop, daemon=True).start()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"[Image Pod] listening on {HOST}:{PORT}", flush=True)
     server.serve_forever()
