@@ -264,17 +264,26 @@ class Krea2Adapter:
             settings["seed"] = payload.get("seed")
 
         raw_seed_mode = settings.get("seedMode", payload.get("seedMode"))
-        if raw_seed_mode is None:
-            seed_mode = "fixed" if settings.get("seed") is not None else "random"
-        else:
+        if raw_seed_mode is not None:
             seed_mode = str(raw_seed_mode).strip().lower()
-        if seed_mode not in {"random", "fixed"}:
-            raise ValueError("seedMode must be 'random' or 'fixed'")
-        settings["seedMode"] = seed_mode
-        if seed_mode == "random":
-            settings["seed"] = secrets.randbelow(MAX_SAFE_SEED + 1)
-        elif settings.get("seed") is None:
+            if seed_mode not in {"random", "fixed"}:
+                raise ValueError("seedMode must be 'random' or 'fixed'")
+        else:
+            seed_mode = None
+
+        seed_value = settings.get("seed")
+        has_explicit_seed = seed_value is not None and not (
+            isinstance(seed_value, str) and not seed_value.strip()
+        )
+        if has_explicit_seed:
+            # An explicit seed always wins. This keeps manual user seeds deterministic
+            # even if an older/stale client accidentally leaves seedMode='random'.
+            settings["seedMode"] = "fixed"
+        elif seed_mode == "fixed":
             raise ValueError("fixed seed requires seed")
+        else:
+            settings["seedMode"] = "random"
+            settings["seed"] = secrets.randbelow(MAX_SAFE_SEED + 1)
 
         if settings.get("width") is None:
             settings.pop("width", None)
