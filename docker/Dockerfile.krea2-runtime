@@ -21,6 +21,7 @@ RUN set -eux; \
     cd /opt/scenebuilder-image; \
     python3 -m py_compile \
       krea2/runtime/workflow_builder.py \
+      src/image_pod/media.py \
       src/image_pod/registry.py \
       src/image_pod/adapters/krea2.py \
       src/image_pod/server.py; \
