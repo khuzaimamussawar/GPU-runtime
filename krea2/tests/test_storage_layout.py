@@ -7,18 +7,18 @@ from src.image_pod import media
 
 
 class Krea2StorageLayoutTests(unittest.TestCase):
-    def test_runtime_uses_separate_canonical_image_and_thumbnail_prefixes(self):
+    def test_runtime_returns_local_artifacts_for_scenebuilder_to_store(self):
         source = inspect.getsource(media.finalize_image_outputs)
-        self.assertIn('settings.get("outputImagePrefix")', source)
-        self.assertIn('settings.get("outputThumbnailPrefix")', source)
-        self.assertIn('full_key = f"{canonical_image_prefix}/{safe_name(job_id)}.png"', source)
-        self.assertIn('thumb_key = f"{canonical_thumbnail_prefix}/{safe_name(job_id)}.jpg"', source)
+        self.assertIn('final_dir = IMAGE_ROOT / "tmp" / safe_name(job_id)', source)
+        self.assertIn('"fileName": final_path.name', source)
+        self.assertIn('"fileName": thumb_path.name', source)
+        self.assertIn('SceneBuilder, not the GPU pod, stores generated output in R2.', source)
 
-    def test_old_single_prefix_contract_remains_only_as_rolling_deploy_fallback(self):
+    def test_runtime_never_uses_r2_output_prefixes_for_generated_media(self):
         source = inspect.getsource(media.finalize_image_outputs)
-        self.assertIn('full_key = f"{prefix}/original/{safe_name(job_id)}.png"', source)
-        self.assertIn('thumb_key = f"{prefix}/thumbnail/{safe_name(job_id)}.jpg"', source)
-        self.assertIn('/scene_images', source)
+        self.assertNotIn('outputImagePrefix', source)
+        self.assertNotIn('outputThumbnailPrefix', source)
+        self.assertNotIn('_upload_file', source)
 
 
 if __name__ == "__main__":

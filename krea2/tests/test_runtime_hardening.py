@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import inspect
 import os
 import tempfile
 import unittest
@@ -56,13 +57,11 @@ class ImagePodRuntimeHardeningTests(unittest.TestCase):
              }, clear=False):
             self.assertEqual(server._required_runtime_config_errors(), [])
 
-    def test_full_output_upload_fails_closed_without_r2(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "image.png"
-            path.write_bytes(b"png")
-            with mock.patch.object(media, "_r2_client", return_value=(None, None)):
-                with self.assertRaises(media.ImageMediaError):
-                    media._upload_file(path, "projects/p/image.png", "image/png")
+    def test_generated_output_is_not_uploaded_by_the_pod(self):
+        source = inspect.getsource(media.finalize_image_outputs)
+        self.assertIn("SceneBuilder, not the GPU pod, stores generated output in R2.", source)
+        self.assertNotIn("_upload_file", source)
+        self.assertNotIn("outputImagePrefix", source)
 
     def test_arbitrary_external_reference_url_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
