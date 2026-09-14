@@ -9,7 +9,7 @@ on:
         required: true
         type: string
       r2_object_key_or_url:
-        description: "R2 key or URL; must resolve to models/lora/..."
+        description: "R2 key or URL; must resolve to models/lora/<family>/<lora-uuid>/<file>.safetensors"
         required: true
         type: string
       expected_sha256:

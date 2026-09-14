@@ -16,6 +16,7 @@ from pathlib import Path
 
 
 SAFE_FILE_RE = re.compile(r"^[A-Za-z0-9._-]+\.safetensors$")
+SAFE_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -27,7 +28,18 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def normalize_object_key(value: str) -> str:
+def storage_family(compatibility: list[str]) -> str:
+    keys = {item.strip().lower() for item in compatibility if item.strip()}
+    if keys == {"all"}:
+        return "shared"
+    if "krea2" in keys and not any(key.startswith("h3") for key in keys):
+        return "krea2"
+    if keys and all(key == "all" or key.startswith("h3") for key in keys):
+        return "h3"
+    raise SystemExit("compatibility must target either Krea 2 or H3, not both")
+
+
+def normalize_object_key(value: str, *, expected_key: str) -> str:
     raw = value.strip()
     if not raw:
         raise SystemExit("r2_object_key_or_url is required")
@@ -39,10 +51,8 @@ def normalize_object_key(value: str) -> str:
             path = path[len(bucket) + 1 :]
         raw = path
     raw = raw.lstrip("/")
-    if not raw.startswith("models/lora/"):
-        raise SystemExit("LoRA R2 object key must begin with models/lora/")
-    if ".." in raw.split("/"):
-        raise SystemExit("LoRA R2 object key must not contain .. segments")
+    if raw != expected_key:
+        raise SystemExit(f"LoRA R2 object key must be the canonical path: {expected_key}")
     return raw
 
 
@@ -145,16 +155,20 @@ def main() -> None:
     file_name = args.file_name.strip()
     expected_sha = args.expected_sha256.strip().lower()
     expected_size = args.expected_size_bytes
-    object_key = normalize_object_key(args.r2_object_key_or_url)
-
     if not lora_id:
         raise SystemExit("lora_id is required")
+    if not SAFE_ID_RE.fullmatch(lora_id):
+        raise SystemExit("lora_id must be a safe UUID/path segment")
     if not SAFE_FILE_RE.fullmatch(file_name):
         raise SystemExit("file_name must be a safe .safetensors basename")
     if not SHA_RE.fullmatch(expected_sha):
         raise SystemExit("expected_sha256 must be a lowercase 64-character SHA-256")
     if expected_size <= 0:
         raise SystemExit("expected_size_bytes must be positive")
+    compatibility = [item.strip() for item in args.compatibility.split(",") if item.strip()]
+    family = storage_family(compatibility)
+    expected_key = f"models/lora/{family}/{lora_id}/{file_name}"
+    object_key = normalize_object_key(args.r2_object_key_or_url, expected_key=expected_key)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     lora_path = args.out_dir / "lora.safetensors"
@@ -174,7 +188,7 @@ def main() -> None:
         "fileName": file_name,
         "sha256": expected_sha,
         "fileSizeBytes": expected_size,
-        "compatibility": [item.strip() for item in args.compatibility.split(",") if item.strip()],
+        "compatibility": compatibility,
     }
     manifest_path.write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({"manifest": str(manifest_path), "file": str(lora_path), "sha256": actual_sha}))

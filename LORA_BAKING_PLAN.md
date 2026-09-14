@@ -112,7 +112,7 @@ Inputs:
 
 ```text
 lora_id              immutable D1 UUID
-r2_object_key        must begin models/lora/
+r2_object_key        must be models/lora/<family>/<lora_id>/<file>.safetensors
 expected_sha256      lowercase 64-character SHA-256
 expected_size_bytes  positive integer
 file_name            safe .safetensors filename
@@ -129,7 +129,7 @@ The build context must contain a generated, temporary bake manifest such as:
 ```json
 {
   "loraId": "uuid",
-  "r2ObjectKey": "models/lora/example.safetensors",
+  "r2ObjectKey": "models/lora/h3/uuid/example.safetensors",
   "fileName": "example.safetensors",
   "sha256": "...",
   "fileSizeBytes": 123,

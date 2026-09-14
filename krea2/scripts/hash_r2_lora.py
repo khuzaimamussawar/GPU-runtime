@@ -5,9 +5,13 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 from typing import Iterable
+
+
+CANONICAL_LORA_KEY_RE = re.compile(r"^models/lora/(?:krea2|h3|shared)/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\.safetensors$")
 
 
 def required_env(name: str) -> str:
@@ -101,8 +105,8 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     for key in args.key:
         clean_key = str(key or "").strip().lstrip("/")
-        if not clean_key.startswith("models/lora/"):
-            raise SystemExit(f"refusing non-LoRA key: {clean_key}")
+        if not CANONICAL_LORA_KEY_RE.fullmatch(clean_key):
+            raise SystemExit(f"refusing non-canonical LoRA key: {clean_key}")
         result = hash_object(client, bucket, clean_key)
         print(json.dumps(result, separators=(",", ":")))
         if args.sql:

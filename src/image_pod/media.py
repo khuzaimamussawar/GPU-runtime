@@ -30,6 +30,17 @@ def safe_name(value: Any) -> str:
     return cleaned.strip("._") or "asset"
 
 
+def r2_path_part(value: Any) -> str:
+    """Match SceneBuilder's Worker-side R2 filename sanitization exactly."""
+    text = str(value or "unknown")
+    return "".join(ch if (ch.isascii() and ch.isalnum()) or ch in {"-", "_", "."} else "_" for ch in text)[:120]
+
+
+def canonical_krea2_lora_key(lora_id: Any, file_name: Any) -> str:
+    """Return the one accepted R2 location for a user-supplied Krea 2 LoRA."""
+    return f"models/lora/krea2/{r2_path_part(lora_id)}/{r2_path_part(file_name)}"
+
+
 def _r2_client():
     bucket = os.environ.get("R2_BUCKET_NAME")
     endpoint = os.environ.get("R2_ENDPOINT")
@@ -223,8 +234,12 @@ def materialize_user_loras(values: Iterable[dict[str, Any]] | None) -> list[dict
             LORA_CACHE.mkdir(parents=True, exist_ok=True)
             touched_lora_cache = True
             object_key = str(item.get("objectKey") or item.get("r2ObjectKey") or "").strip().lstrip("/")
-            if not object_key.startswith(LORA_PREFIXES):
-                raise ImageMediaError(f"LoRA {raw_lora_id} has invalid trusted R2 object key")
+            file_name = r2_path_part(str(item.get("fileName") or item.get("file_name") or object_key.split("/")[-1]))
+            expected_key = canonical_krea2_lora_key(raw_lora_id, file_name)
+            if not file_name.endswith(".safetensors") or object_key != expected_key:
+                raise ImageMediaError(
+                    f"LoRA {raw_lora_id} must use its canonical Krea 2 R2 object key"
+                )
 
             target = LORA_CACHE / f"{lora_id}.safetensors"
             valid = target.exists()

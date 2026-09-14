@@ -78,7 +78,7 @@ class ImagePodRuntimeHardeningTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(media, "LORA_CACHE", Path(tmp)):
             base = {
                 "loraId": "lora-1",
-                "objectKey": "models/lora/krea2/lora-1.safetensors",
+                "objectKey": "models/lora/krea2/lora-1/lora-1.safetensors",
                 "strength": 0.5,
                 "minStrength": 0.0,
                 "maxStrength": 1.0,
@@ -89,6 +89,10 @@ class ImagePodRuntimeHardeningTests(unittest.TestCase):
             with_size = {**base, "fileSizeBytes": 123}
             with self.assertRaises(media.ImageMediaError):
                 media.materialize_user_loras([with_size])
+
+            legacy_path = {**with_size, "objectKey": "models/lora/krea2/lora-1.safetensors"}
+            with self.assertRaises(media.ImageMediaError):
+                media.materialize_user_loras([legacy_path])
 
     def test_baked_lora_resolves_from_model_root_without_r2_download(self):
         with tempfile.TemporaryDirectory() as tmp:

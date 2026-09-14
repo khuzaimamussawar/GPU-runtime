@@ -439,11 +439,11 @@ CREATE TABLE IF NOT EXISTS lora_model_support (
 
 `min_steps/max_steps/recommended_steps` describe compatibility with the job's global sampling step count. They are not per-LoRA start/end schedules.
 
-Existing Krea LoRAs keep their current R2 keys:
+Krea LoRAs use one R2 folder per immutable D1 ID:
 
 ```text
-models/lora/krea2/MinimalisticVectorArtKrea2.safetensors
-models/lora/krea2/Darkchurch_style_krea2_v1.0.safetensors
+models/lora/krea2/<lora_id>/MinimalisticVectorArtKrea2.safetensors
+models/lora/krea2/<lora_id>/Darkchurch_style_krea2_v1.0.safetensors
 ```
 
 Seed them with immutable generated IDs.
