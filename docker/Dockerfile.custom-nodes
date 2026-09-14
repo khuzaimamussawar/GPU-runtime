@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1.7
 ARG REGISTRY_NAMESPACE
 ARG IMAGE_TAG=latest
-FROM ${REGISTRY_NAMESPACE}/minimax-h3-base:${IMAGE_TAG}
+ARG BASE_IMAGE_TAG=latest
+FROM ${REGISTRY_NAMESPACE}/minimax-h3-base:${BASE_IMAGE_TAG}
 
 # Exact custom-node revisions used by the validated master workflows.
 ARG KJNODES_COMMIT=073efb07419f56cc714e099a82e49fbc23ad9263

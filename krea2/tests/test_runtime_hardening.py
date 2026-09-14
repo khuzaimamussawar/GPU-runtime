@@ -90,6 +90,29 @@ class ImagePodRuntimeHardeningTests(unittest.TestCase):
             with self.assertRaises(media.ImageMediaError):
                 media.materialize_user_loras([with_size])
 
+    def test_baked_lora_resolves_from_model_root_without_r2_download(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "snorvdoc.safetensors"
+            target.write_bytes(b"baked lora bytes")
+            digest = media._hash_file(target)
+            with mock.patch.object(media, "KREA2_BAKED_LORA_DIR", root):
+                resolved = media.materialize_user_loras([
+                    {
+                        "loraId": "snorvdoc",
+                        "storageSource": "baked",
+                        "fileName": "snorvdoc.safetensors",
+                        "bakedPath": str(target),
+                        "fileSizeBytes": target.stat().st_size,
+                        "sha256": digest,
+                        "strength": 2.0,
+                        "minStrength": 0.0,
+                        "maxStrength": 3.0,
+                    }
+                ])
+
+        self.assertEqual(resolved[0]["fileName"], "snorvdoc.safetensors")
+
     def test_krea_lora_graph_audit_verifies_two_lora_chain_and_logs_identity(self):
         manifest = {
             "runtimeGraphPatching": {

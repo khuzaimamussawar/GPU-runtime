@@ -1,9 +1,11 @@
 # syntax=docker/dockerfile:1.7
 ARG REGISTRY_NAMESPACE
 ARG IMAGE_TAG=latest
+ARG CUSTOM_NODES_IMAGE_TAG=latest
+ARG POD_MODELS_IMAGE_TAG=latest
 
-FROM ${REGISTRY_NAMESPACE}/minimax-h3-custom-nodes:${IMAGE_TAG} AS custom_nodes_artifact
-FROM ${REGISTRY_NAMESPACE}/minimax-h3-pod-models:${IMAGE_TAG}
+FROM ${REGISTRY_NAMESPACE}/minimax-h3-custom-nodes:${CUSTOM_NODES_IMAGE_TAG} AS custom_nodes_artifact
+FROM ${REGISTRY_NAMESPACE}/minimax-h3-pod-models:${POD_MODELS_IMAGE_TAG}
 
 ARG KJNODES_COMMIT=073efb07419f56cc714e099a82e49fbc23ad9263
 ARG SPECTRUM_COMMIT=1427dfe96029985be9cbc0033abb44bf2e7adc4f

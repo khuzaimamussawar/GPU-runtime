@@ -12,6 +12,13 @@ export REGISTRY_NAMESPACE="${REGISTRY_NAMESPACE:-${DOCKERHUB_USERNAME}}"
 repo_dir="/opt/minimax-h3-serverless"
 docker_build_attempts="${DOCKER_BUILD_ATTEMPTS:-2}"
 min_free_disk_gb="${MIN_FREE_DISK_GB:-45}"
+base_image_tag="${BASE_IMAGE_TAG:-${IMAGE_TAG}}"
+comfyui_image_tag="${COMFYUI_IMAGE_TAG:-${IMAGE_TAG}}"
+sageattention_image_tag="${SAGEATTENTION_IMAGE_TAG:-${IMAGE_TAG}}"
+custom_nodes_image_tag="${CUSTOM_NODES_IMAGE_TAG:-${IMAGE_TAG}}"
+fl2va_base_image_tag="${FL2VA_BASE_IMAGE_TAG:-${IMAGE_TAG}}"
+ref2va_base_image_tag="${REF2VA_BASE_IMAGE_TAG:-${IMAGE_TAG}}"
+pod_models_image_tag="${POD_MODELS_IMAGE_TAG:-${IMAGE_TAG}}"
 
 log_disk() {
   if [ -x "${repo_dir}/scripts/log_disk.sh" ]; then
@@ -120,6 +127,13 @@ build_one_target() {
       --progress plain \
       --build-arg "REGISTRY_NAMESPACE=${REGISTRY_NAMESPACE}" \
       --build-arg "IMAGE_TAG=${IMAGE_TAG}" \
+      --build-arg "BASE_IMAGE_TAG=${base_image_tag}" \
+      --build-arg "COMFYUI_IMAGE_TAG=${comfyui_image_tag}" \
+      --build-arg "SAGEATTENTION_IMAGE_TAG=${sageattention_image_tag}" \
+      --build-arg "CUSTOM_NODES_IMAGE_TAG=${custom_nodes_image_tag}" \
+      --build-arg "FL2VA_BASE_IMAGE_TAG=${fl2va_base_image_tag}" \
+      --build-arg "REF2VA_BASE_IMAGE_TAG=${ref2va_base_image_tag}" \
+      --build-arg "POD_MODELS_IMAGE_TAG=${pod_models_image_tag}" \
       --build-arg "BUILD_TARGET=${target}" \
       --secret "id=hf_token,env=HF_TOKEN" \
       "$repo_dir"; then

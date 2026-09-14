@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1.7
 ARG REGISTRY_NAMESPACE
 ARG IMAGE_TAG=latest
-FROM ${REGISTRY_NAMESPACE}/scenebuilder-image-krea2-qwen-bf16:${IMAGE_TAG}
+ARG KREA2_QWEN_IMAGE_TAG=latest
+FROM ${REGISTRY_NAMESPACE}/scenebuilder-image-krea2-qwen-bf16:${KREA2_QWEN_IMAGE_TAG}
 
 ARG KREA2_REPO=Comfy-Org/Krea-2
 ARG STYLE_ADAPTER_FILE=loras/krea2_style_reference.safetensors

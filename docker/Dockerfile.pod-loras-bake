@@ -1,0 +1,21 @@
+# syntax=docker/dockerfile:1.7
+ARG REGISTRY_NAMESPACE
+ARG IMAGE_TAG=latest
+FROM ${REGISTRY_NAMESPACE}/minimax-h3-pod-nodes:${IMAGE_TAG}
+
+LABEL org.opencontainers.image.title="minimax-h3-pod-loras"
+LABEL scene_builder.layer="pod-combined-loras"
+LABEL scene_builder.task_families="h3_fl2va,h3_ref2va"
+LABEL scene_builder.lora_storage="baked"
+
+RUN mkdir -p /opt/ComfyUI/models/loras /opt/scenebuilder-h3/manifests
+COPY scripts/install_lora_bake.py /opt/scenebuilder-h3/scripts/install_lora_bake.py
+COPY .lora-bake/manifest.json /tmp/lora-bake/manifest.json
+COPY .lora-bake/lora.safetensors /tmp/lora-bake/lora.safetensors
+
+RUN python3 /opt/scenebuilder-h3/scripts/install_lora_bake.py \
+      --manifest /tmp/lora-bake/manifest.json \
+      --file /tmp/lora-bake/lora.safetensors \
+      --target-dir /opt/ComfyUI/models/loras \
+      --manifest-out /opt/scenebuilder-h3/manifests/baked_lora.json \
+ && rm -rf /tmp/lora-bake

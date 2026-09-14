@@ -1,15 +1,19 @@
 # syntax=docker/dockerfile:1.7
 ARG REGISTRY_NAMESPACE
 ARG IMAGE_TAG=latest
+ARG COMFYUI_IMAGE_TAG=latest
+ARG SAGEATTENTION_IMAGE_TAG=latest
+ARG CUSTOM_NODES_IMAGE_TAG=latest
+ARG REF2VA_BASE_IMAGE_TAG=latest
 
 # These three dependency artifacts are built exactly once and reused by both
 # FL2VA and Ref2VA workflow branches. Their build order is independent from the
 # order in which they are applied to the final task-family image.
-FROM ${REGISTRY_NAMESPACE}/minimax-h3-comfyui:${IMAGE_TAG} AS comfyui_artifact
-FROM ${REGISTRY_NAMESPACE}/minimax-h3-sageattention:${IMAGE_TAG} AS sageattention_artifact
-FROM ${REGISTRY_NAMESPACE}/minimax-h3-custom-nodes:${IMAGE_TAG} AS custom_nodes_artifact
+FROM ${REGISTRY_NAMESPACE}/minimax-h3-comfyui:${COMFYUI_IMAGE_TAG} AS comfyui_artifact
+FROM ${REGISTRY_NAMESPACE}/minimax-h3-sageattention:${SAGEATTENTION_IMAGE_TAG} AS sageattention_artifact
+FROM ${REGISTRY_NAMESPACE}/minimax-h3-custom-nodes:${CUSTOM_NODES_IMAGE_TAG} AS custom_nodes_artifact
 
-FROM ${REGISTRY_NAMESPACE}/minimax-h3-ref2va-base:${IMAGE_TAG}
+FROM ${REGISTRY_NAMESPACE}/minimax-h3-ref2va-base:${REF2VA_BASE_IMAGE_TAG}
 
 ARG COMFYUI_COMMIT=2a68ce33b4c9ea6ee4283e618a74560cefb32694
 ARG KJNODES_COMMIT=073efb07419f56cc714e099a82e49fbc23ad9263

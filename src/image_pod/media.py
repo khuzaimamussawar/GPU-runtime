@@ -15,6 +15,7 @@ COMFY_ROOT = Path(os.environ.get("COMFY_ROOT", "/opt/ComfyUI"))
 COMFY_INPUT = COMFY_ROOT / "input"
 COMFY_OUTPUT = COMFY_ROOT / "output"
 LORA_CACHE = Path(os.environ.get("IMAGE_LORA_CACHE_DIR", str(IMAGE_ROOT / "cache" / "loras")))
+KREA2_BAKED_LORA_DIR = Path(os.environ.get("KREA2_BAKED_LORA_DIR", "/opt/scenebuilder-models/krea2/loras"))
 STYLE_REFERENCE_PREFIXES = ("projects/", "temp/", "style/", "styles/", "images/")
 LORA_PREFIXES = ("models/lora/",)
 
@@ -170,17 +171,17 @@ def materialize_user_loras(values: Iterable[dict[str, Any]] | None) -> list[dict
     if len(raw_values) > 3:
         raise ImageMediaError("at most 3 user LoRAs are supported")
 
-    LORA_CACHE.mkdir(parents=True, exist_ok=True)
     protected: set[Path] = set()
+    touched_lora_cache = False
 
     for item in raw_values:
         raw_lora_id = str(item.get("loraId") or item.get("lora_id") or "").strip()
         if not raw_lora_id:
             raise ImageMediaError("LoRA loraId is required")
         lora_id = safe_name(raw_lora_id)
-        object_key = str(item.get("objectKey") or item.get("r2ObjectKey") or "").strip().lstrip("/")
-        if not object_key.startswith(LORA_PREFIXES):
-            raise ImageMediaError(f"LoRA {raw_lora_id} has invalid trusted R2 object key")
+        storage_source = str(item.get("storageSource") or item.get("storage_source") or "r2").strip().lower()
+        if storage_source not in {"r2", "baked"}:
+            raise ImageMediaError(f"LoRA {raw_lora_id} has invalid storageSource")
 
         expected_size_raw = item.get("fileSizeBytes", item.get("file_size_bytes"))
         if expected_size_raw in {None, ""}:
@@ -201,30 +202,54 @@ def materialize_user_loras(values: Iterable[dict[str, Any]] | None) -> list[dict
         if min_strength is None or max_strength is None:
             raise ImageMediaError(f"LoRA {raw_lora_id} requires trusted min/max strength")
 
-        target = LORA_CACHE / f"{lora_id}.safetensors"
-        valid = target.exists()
-        if valid and target.stat().st_size != expected_size:
-            valid = False
-        if valid and _hash_file(target) != expected_sha:
-            valid = False
-        if not valid:
-            target.unlink(missing_ok=True)
-            _download_ref_to_path(
-                {"objectKey": object_key},
-                target,
-                allowed_prefixes=LORA_PREFIXES,
-                max_bytes=expected_size,
-            )
+        if storage_source == "baked":
+            file_name = safe_name(str(item.get("fileName") or item.get("file_name") or ""))
+            if not file_name.endswith(".safetensors"):
+                raise ImageMediaError(f"LoRA {raw_lora_id} has invalid baked fileName")
+            baked_root = KREA2_BAKED_LORA_DIR.resolve()
+            target = (baked_root / file_name).resolve()
+            if baked_root not in target.parents:
+                raise ImageMediaError(f"LoRA {raw_lora_id} baked path escapes model root")
+            trusted_baked_path = str(item.get("bakedPath") or item.get("baked_path") or "").strip()
+            if trusted_baked_path and Path(trusted_baked_path).resolve() != target:
+                raise ImageMediaError(f"LoRA {raw_lora_id} baked path does not match fileName")
+            if not target.is_file():
+                raise ImageMediaError(f"LoRA {raw_lora_id} baked file is missing")
             if target.stat().st_size != expected_size:
-                target.unlink(missing_ok=True)
                 raise ImageMediaError(f"LoRA size mismatch for {raw_lora_id}")
             if _hash_file(target) != expected_sha:
-                target.unlink(missing_ok=True)
                 raise ImageMediaError(f"LoRA SHA256 mismatch for {raw_lora_id}")
+        else:
+            LORA_CACHE.mkdir(parents=True, exist_ok=True)
+            touched_lora_cache = True
+            object_key = str(item.get("objectKey") or item.get("r2ObjectKey") or "").strip().lstrip("/")
+            if not object_key.startswith(LORA_PREFIXES):
+                raise ImageMediaError(f"LoRA {raw_lora_id} has invalid trusted R2 object key")
 
-        now = time.time()
-        os.utime(target, (now, target.stat().st_mtime))
-        protected.add(target)
+            target = LORA_CACHE / f"{lora_id}.safetensors"
+            valid = target.exists()
+            if valid and target.stat().st_size != expected_size:
+                valid = False
+            if valid and _hash_file(target) != expected_sha:
+                valid = False
+            if not valid:
+                target.unlink(missing_ok=True)
+                _download_ref_to_path(
+                    {"objectKey": object_key},
+                    target,
+                    allowed_prefixes=LORA_PREFIXES,
+                    max_bytes=expected_size,
+                )
+                if target.stat().st_size != expected_size:
+                    target.unlink(missing_ok=True)
+                    raise ImageMediaError(f"LoRA size mismatch for {raw_lora_id}")
+                if _hash_file(target) != expected_sha:
+                    target.unlink(missing_ok=True)
+                    raise ImageMediaError(f"LoRA SHA256 mismatch for {raw_lora_id}")
+
+            now = time.time()
+            os.utime(target, (now, target.stat().st_mtime))
+            protected.add(target)
         resolved.append(
             {
                 "loraId": raw_lora_id,
@@ -235,7 +260,8 @@ def materialize_user_loras(values: Iterable[dict[str, Any]] | None) -> list[dict
             }
         )
 
-    _evict_lora_cache(protect=protected)
+    if touched_lora_cache:
+        _evict_lora_cache(protect=protected)
     return resolved
 
 

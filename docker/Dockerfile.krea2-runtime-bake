@@ -1,0 +1,44 @@
+# syntax=docker/dockerfile:1.7
+ARG REGISTRY_NAMESPACE
+ARG IMAGE_TAG=latest
+FROM ${REGISTRY_NAMESPACE}/scenebuilder-image-krea2-user-loras:${IMAGE_TAG}
+
+LABEL org.opencontainers.image.title="scenebuilder-image-krea2-runtime"
+LABEL scene_builder.layer="image-krea2-runtime"
+LABEL scene_builder.runtime="image-pod"
+LABEL scene_builder.providers="runpod,novita"
+LABEL scene_builder.task_families="krea2_image"
+LABEL scene_builder.lora_storage="baked"
+
+RUN python3 -m pip install --no-cache-dir boto3 pillow
+
+COPY krea2/__init__.py /opt/scenebuilder-image/krea2/__init__.py
+COPY krea2/runtime/ /opt/scenebuilder-image/krea2/runtime/
+COPY krea2/tests/ /opt/scenebuilder-image/krea2/tests/
+COPY src/__init__.py /opt/scenebuilder-image/src/__init__.py
+COPY src/image_pod/ /opt/scenebuilder-image/src/image_pod/
+
+RUN set -eux; \
+    cd /opt/scenebuilder-image; \
+    python3 -m py_compile \
+      krea2/runtime/workflow_builder.py \
+      src/image_pod/media.py \
+      src/image_pod/registry.py \
+      src/image_pod/adapters/krea2.py \
+      src/image_pod/server.py; \
+    python3 -m unittest discover -s krea2/tests -p 'test_*.py'
+
+ENV IMAGE_POD_HOST=0.0.0.0
+ENV IMAGE_POD_PORT=8000
+ENV IMAGE_POD_IDLE_TIMEOUT_SECONDS=60
+ENV SCENEBUILDER_IMAGE_ROOT=/opt/scenebuilder-image
+ENV COMFY_ROOT=/opt/ComfyUI
+ENV COMFY_HOST=127.0.0.1
+ENV COMFY_PORT=8188
+ENV COMFY_EXTRA_MODEL_PATHS=/opt/scenebuilder-image/extra_model_paths.yaml
+ENV PYTHONPATH=/opt/ComfyUI:/opt/scenebuilder-image
+
+EXPOSE 8000
+
+WORKDIR /opt/scenebuilder-image
+CMD ["python3", "-m", "src.image_pod.server"]

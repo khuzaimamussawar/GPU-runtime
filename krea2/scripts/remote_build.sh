@@ -14,6 +14,7 @@ docker_build_attempts="${DOCKER_BUILD_ATTEMPTS:-2}"
 min_free_disk_gb="${MIN_FREE_DISK_GB:-45}"
 provider_disk_gb="${IMAGE_POD_DISK_GB:-40}"
 min_runtime_headroom_gb="${MIN_RUNTIME_HEADROOM_GB:-5}"
+krea2_qwen_image_tag="${KREA2_QWEN_IMAGE_TAG:-${IMAGE_TAG}}"
 
 ALL_TARGETS=(
   base
@@ -146,6 +147,7 @@ build_one_target() {
       --progress plain \
       --build-arg "REGISTRY_NAMESPACE=${REGISTRY_NAMESPACE}" \
       --build-arg "IMAGE_TAG=${IMAGE_TAG}" \
+      --build-arg "KREA2_QWEN_IMAGE_TAG=${krea2_qwen_image_tag}" \
       --secret "id=hf_token,env=HF_TOKEN" \
       "${repo_dir}"; then
       status=0

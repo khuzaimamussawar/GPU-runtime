@@ -1,4 +1,6 @@
 .tmp/
+.tmp-test/
+.lora-bake/
 *.log
 __pycache__/
 .pytest_cache/

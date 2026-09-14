@@ -1,0 +1,21 @@
+# syntax=docker/dockerfile:1.7
+ARG REGISTRY_NAMESPACE
+ARG IMAGE_TAG=latest
+FROM ${REGISTRY_NAMESPACE}/scenebuilder-image-krea2-workflow:${IMAGE_TAG}
+
+LABEL org.opencontainers.image.title="scenebuilder-image-krea2-user-loras"
+LABEL scene_builder.layer="image-krea2-user-loras"
+LABEL scene_builder.task_families="krea2_image"
+LABEL scene_builder.lora_storage="baked"
+
+RUN mkdir -p /opt/scenebuilder-models/krea2/loras /opt/scenebuilder-image/manifests
+COPY scripts/install_lora_bake.py /opt/scenebuilder-image/scripts/install_lora_bake.py
+COPY .lora-bake/manifest.json /tmp/lora-bake/manifest.json
+COPY .lora-bake/lora.safetensors /tmp/lora-bake/lora.safetensors
+
+RUN python3 /opt/scenebuilder-image/scripts/install_lora_bake.py \
+      --manifest /tmp/lora-bake/manifest.json \
+      --file /tmp/lora-bake/lora.safetensors \
+      --target-dir /opt/scenebuilder-models/krea2/loras \
+      --manifest-out /opt/scenebuilder-image/manifests/baked_lora.json \
+ && rm -rf /tmp/lora-bake

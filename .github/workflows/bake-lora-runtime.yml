@@ -1,0 +1,270 @@
+name: Bake LoRA Runtime
+run-name: Bake LoRA ${{ inputs.lora_id }} into ${{ inputs.compatibility }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      lora_id:
+        description: "SceneBuilder LoRA UUID"
+        required: true
+        type: string
+      r2_object_key_or_url:
+        description: "R2 key or URL; must resolve to models/lora/..."
+        required: true
+        type: string
+      expected_sha256:
+        description: "Expected lowercase SHA-256"
+        required: true
+        type: string
+      expected_size_bytes:
+        description: "Expected byte size"
+        required: true
+        type: string
+      file_name:
+        description: "Safe .safetensors file name inside the runtime"
+        required: true
+        type: string
+      compatibility:
+        description: "CSV: krea2, h3-fl2va, h3-ref2va, h3-pod, h3-all, all"
+        required: true
+        default: "krea2"
+        type: string
+      h3_base_image_tag:
+        description: "Existing complete H3 parent tag"
+        required: true
+        default: "latest"
+        type: string
+      krea2_base_image_tag:
+        description: "Existing complete Krea2 parent tag"
+        required: true
+        default: "latest"
+        type: string
+      output_image_tag:
+        description: "New immutable baked output tag; blank auto-generates lora-<run>"
+        required: false
+        default: ""
+        type: string
+      server_type:
+        description: "Hetzner builder server type"
+        required: true
+        default: "cpx42"
+        type: string
+      location:
+        description: "Hetzner location"
+        required: true
+        default: "fsn1"
+        type: string
+      hetzner_image:
+        description: "Hetzner OS image"
+        required: true
+        default: "ubuntu-24.04"
+        type: string
+      docker_build_attempts:
+        description: "Retry count per Docker target"
+        required: true
+        default: "2"
+        type: string
+      debug_keep_server_on_failure:
+        description: "Keep failed builder briefly for SSH debugging"
+        required: true
+        default: false
+        type: boolean
+      debug_keep_minutes:
+        description: "Minutes to keep failed builder"
+        required: true
+        default: "15"
+        type: string
+      delete_server_after_success:
+        description: "Delete builder after successful build(s)"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  bake:
+    name: Bake LoRA runtime images
+    runs-on: ubuntu-latest
+    timeout-minutes: 720
+    env:
+      BUILDER_NAME: lora-bake-${{ github.run_id }}-${{ github.run_attempt }}
+      SERVER_TYPE: ${{ inputs.server_type }}
+      HETZNER_LOCATION: ${{ inputs.location }}
+      HETZNER_IMAGE: ${{ inputs.hetzner_image }}
+      LORA_BAKE_DIR: ${{ github.workspace }}/.tmp/lora-bake
+      LORA_BAKE_REMOTE_DIR: /root/lora-bake-${{ github.run_id }}-${{ github.run_attempt }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve output tag
+        id: tag
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.output_image_tag }}
+        run: |
+          set -Eeuo pipefail
+          tag="${INPUT_TAG}"
+          if [ -z "${tag// }" ]; then
+            tag="lora-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          fi
+          if ! [[ "${tag}" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+            echo "Invalid output_image_tag: ${tag}" >&2
+            exit 1
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Download and verify LoRA from R2
+        shell: bash
+        env:
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_SECRET_KEY: ${{ secrets.R2_SECRET_KEY }}
+          R2_REGION: ${{ secrets.R2_REGION }}
+        run: |
+          set -Eeuo pipefail
+          rm -rf "${LORA_BAKE_DIR}"
+          python3 scripts/prepare_lora_bake.py \
+            --lora-id "${{ inputs.lora_id }}" \
+            --r2-object-key-or-url "${{ inputs.r2_object_key_or_url }}" \
+            --expected-sha256 "${{ inputs.expected_sha256 }}" \
+            --expected-size-bytes "${{ inputs.expected_size_bytes }}" \
+            --file-name "${{ inputs.file_name }}" \
+            --compatibility "${{ inputs.compatibility }}" \
+            --out-dir "${LORA_BAKE_DIR}"
+
+      - name: Create temporary SSH key
+        id: sshkey
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p .tmp
+          ssh-keygen -t ed25519 -f .tmp/lora_bake_key -N "" -C "lora-bake-${GITHUB_RUN_ID}"
+          echo "key_path=${GITHUB_WORKSPACE}/.tmp/lora_bake_key" >> "$GITHUB_OUTPUT"
+          echo "public_key=$(cat .tmp/lora_bake_key.pub)" >> "$GITHUB_OUTPUT"
+
+      - name: Create Hetzner builder
+        id: create
+        shell: bash
+        env:
+          HETZNER_TOKEN: ${{ secrets.HETZNER_TOKEN }}
+          BUILDER_SSH_PUBLIC_KEY: ${{ steps.sshkey.outputs.public_key }}
+        run: |
+          set -Eeuo pipefail
+          bash scripts/hetzner_create.sh
+
+      - name: Wait for SSH
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash scripts/wait_for_ssh.sh "${{ steps.create.outputs.server_ip }}" "${{ steps.sshkey.outputs.key_path }}" 900
+
+      - name: Stage verified LoRA on builder
+        shell: bash
+        env:
+          REMOTE_IP: ${{ steps.create.outputs.server_ip }}
+          SSH_KEY_PATH: ${{ steps.sshkey.outputs.key_path }}
+        run: |
+          set -Eeuo pipefail
+          ssh -i "${SSH_KEY_PATH}" \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            "root@${REMOTE_IP}" \
+            "rm -rf '${LORA_BAKE_REMOTE_DIR}' && mkdir -p '${LORA_BAKE_REMOTE_DIR}'"
+          scp -i "${SSH_KEY_PATH}" \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            "${LORA_BAKE_DIR}/manifest.json" \
+            "${LORA_BAKE_DIR}/lora.safetensors" \
+            "root@${REMOTE_IP}:${LORA_BAKE_REMOTE_DIR}/"
+
+      - name: Run remote LoRA bake
+        shell: bash
+        env:
+          REMOTE_IP: ${{ steps.create.outputs.server_ip }}
+          SSH_KEY_PATH: ${{ steps.sshkey.outputs.key_path }}
+          BAKE_COMPATIBILITY: ${{ inputs.compatibility }}
+          H3_BASE_IMAGE_TAG: ${{ inputs.h3_base_image_tag }}
+          KREA2_BASE_IMAGE_TAG: ${{ inputs.krea2_base_image_tag }}
+          OUTPUT_IMAGE_TAG: ${{ steps.tag.outputs.tag }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          GH_FH_TOKEN_MM_H3_SERVERLESS: ${{ secrets.GH_FH_TOKEN_MM_H3_SERVERLESS }}
+          DOCKER_BUILD_ATTEMPTS: ${{ inputs.docker_build_attempts }}
+        run: |
+          set -Eeuo pipefail
+          ssh -i "${SSH_KEY_PATH}" \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=20 \
+            -o TCPKeepAlive=yes \
+            "root@${REMOTE_IP}" \
+            "BAKE_COMPATIBILITY='${BAKE_COMPATIBILITY}' \
+             H3_BASE_IMAGE_TAG='${H3_BASE_IMAGE_TAG}' \
+             KREA2_BASE_IMAGE_TAG='${KREA2_BASE_IMAGE_TAG}' \
+             OUTPUT_IMAGE_TAG='${OUTPUT_IMAGE_TAG}' \
+             LORA_BAKE_REMOTE_DIR='${LORA_BAKE_REMOTE_DIR}' \
+             DOCKERHUB_USERNAME='${DOCKERHUB_USERNAME}' \
+             DOCKERHUB_TOKEN='${DOCKERHUB_TOKEN}' \
+             HF_TOKEN='${HF_TOKEN}' \
+             GH_FH_TOKEN_MM_H3_SERVERLESS='${GH_FH_TOKEN_MM_H3_SERVERLESS}' \
+             DOCKER_BUILD_ATTEMPTS='${DOCKER_BUILD_ATTEMPTS}' \
+             GITHUB_REPOSITORY='${GITHUB_REPOSITORY}' \
+             GITHUB_REF_NAME='${GITHUB_REF_NAME}' \
+             bash -s" < scripts/remote_lora_bake.sh
+
+      - name: Fetch bake release manifest
+        if: always() && steps.create.outputs.server_ip != ''
+        shell: bash
+        env:
+          REMOTE_IP: ${{ steps.create.outputs.server_ip }}
+          SSH_KEY_PATH: ${{ steps.sshkey.outputs.key_path }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p .tmp/lora-bake-result
+          scp -i "${SSH_KEY_PATH}" \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            "root@${REMOTE_IP}:${LORA_BAKE_REMOTE_DIR}/release-manifest.json" \
+            ".tmp/lora-bake-result/release-manifest.json" || true
+
+      - name: Upload bake release manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lora-bake-release-manifest
+          path: .tmp/lora-bake-result/release-manifest.json
+          if-no-files-found: ignore
+
+      - name: Delete Hetzner builder
+        if: always() && steps.create.outputs.server_id != ''
+        shell: bash
+        env:
+          HETZNER_TOKEN: ${{ secrets.HETZNER_TOKEN }}
+          SERVER_ID: ${{ steps.create.outputs.server_id }}
+          KEEP_ON_FAILURE: ${{ inputs.debug_keep_server_on_failure }}
+          KEEP_MINUTES: ${{ inputs.debug_keep_minutes }}
+          DELETE_ON_SUCCESS: ${{ inputs.delete_server_after_success }}
+          BUILD_STATUS: ${{ job.status }}
+        run: |
+          set -Eeuo pipefail
+          if [ "${BUILD_STATUS}" = "success" ] && [ "${DELETE_ON_SUCCESS}" != "true" ]; then
+            echo "Build succeeded. Keeping Hetzner builder ${SERVER_ID} alive because delete_server_after_success=false."
+            echo "Server IP: ${{ steps.create.outputs.server_ip }}"
+            exit 0
+          fi
+          if [ "${BUILD_STATUS}" != "success" ] && [ "${KEEP_ON_FAILURE}" = "true" ]; then
+            echo "Build failed. Keeping builder ${SERVER_ID} for ${KEEP_MINUTES} minute(s)."
+            echo "SSH: ssh -i .tmp/lora_bake_key root@${{ steps.create.outputs.server_ip }}"
+            sleep "$((KEEP_MINUTES * 60))"
+          fi
+          bash scripts/hetzner_delete.sh "${SERVER_ID}" "${{ steps.create.outputs.ssh_key_id }}"
