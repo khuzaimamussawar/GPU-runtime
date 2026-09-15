@@ -16,7 +16,7 @@ COMFY_INPUT = COMFY_ROOT / "input"
 COMFY_OUTPUT = COMFY_ROOT / "output"
 LORA_CACHE = Path(os.environ.get("IMAGE_LORA_CACHE_DIR", str(IMAGE_ROOT / "cache" / "loras")))
 KREA2_BAKED_LORA_DIR = Path(os.environ.get("KREA2_BAKED_LORA_DIR", "/opt/scenebuilder-models/krea2/loras"))
-STYLE_REFERENCE_PREFIXES = ("projects/", "temp/", "style/", "styles/", "images/")
+STYLE_REFERENCE_PREFIXES = ("projects/", "temp/", "style/", "styles/", "Style/", "images/")
 LORA_PREFIXES = ("models/lora/",)
 
 

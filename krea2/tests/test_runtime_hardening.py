@@ -74,6 +74,9 @@ class ImagePodRuntimeHardeningTests(unittest.TestCase):
                     max_bytes=1024,
                 )
 
+    def test_saved_style_reference_prefix_is_supported(self):
+        self.assertIn("Style/", media.STYLE_REFERENCE_PREFIXES)
+
     def test_lora_requires_trusted_size_sha_and_strength_bounds(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(media, "LORA_CACHE", Path(tmp)):
             base = {
