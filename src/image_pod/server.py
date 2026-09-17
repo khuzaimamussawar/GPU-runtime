@@ -169,7 +169,20 @@ def _required_runtime_config_errors() -> list[str]:
     return [name for name, value in required.items() if not value]
 
 
+def _callback_label(payload: dict[str, Any]) -> str:
+    event = str(payload.get("event") or "unknown")
+    job_id = str(payload.get("jobId") or "")
+    return f"event={event}" + (f" job={job_id}" if job_id else "")
+
+
 def _json_request(url: str, payload: dict[str, Any], timeout: int = 10) -> None:
+    """Deliver a pod event only when the control plane acknowledges it as JSON.
+
+    Cloudflare Access can return a 200 HTML sign-in page to an unauthenticated
+    pod request. Treating that as a successful callback leaves the durable job
+    pending until reconciliation asks the pod for its result. A real Worker
+    acknowledgement is JSON with ``ok: true`` (or an intentional duplicate).
+    """
     if not url:
         return
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
@@ -177,11 +190,37 @@ def _json_request(url: str, payload: dict[str, Any], timeout: int = 10) -> None:
     if POD_TOKEN:
         headers["Authorization"] = f"Bearer {POD_TOKEN}"
     request = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            response.read(1024)
-    except Exception as exc:
-        print(f"[Image Pod] control callback failed: {type(exc).__name__}: {exc}", flush=True)
+    label = _callback_label(payload)
+    last_error: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                status = int(getattr(response, "status", response.getcode()))
+                raw = response.read(4096)
+                if status < 200 or status >= 300:
+                    raise RuntimeError(f"HTTP {status}")
+                try:
+                    acknowledgement = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    preview = raw.decode("utf-8", "replace")[:160].replace("\n", " ")
+                    raise RuntimeError(f"non-JSON HTTP {status} response: {preview!r}") from exc
+                if acknowledgement.get("ok") is not True:
+                    raise RuntimeError(f"unacknowledged HTTP {status} response: {acknowledgement!r}")
+                if str(payload.get("event") or "") in {"job_completed", "job_failed", "job_cancelled"}:
+                    print(
+                        f"[Image Pod] control callback acknowledged {label} attempt={attempt}",
+                        flush=True,
+                    )
+                return
+        except Exception as exc:
+            last_error = exc
+            if attempt < 3:
+                time.sleep(attempt)
+    print(
+        f"[Image Pod] control callback failed {label} after 3 attempts: "
+        f"{type(last_error).__name__}: {last_error}",
+        flush=True,
+    )
 
 
 def emit_event(event_type: str, **fields: Any) -> None:
