@@ -223,7 +223,7 @@ def _json_request(url: str, payload: dict[str, Any], timeout: int = 10) -> None:
     )
 
 
-def emit_event(event_type: str, **fields: Any) -> None:
+def emit_event(event_type: str, *, wait_for_ack: bool = False, **fields: Any) -> None:
     if not CONTROL_URL:
         return
     payload: dict[str, Any] = {
@@ -235,7 +235,10 @@ def emit_event(event_type: str, **fields: Any) -> None:
         "timestampMs": int(time.time() * 1000),
     }
     payload.update(fields)
-    threading.Thread(target=_json_request, args=(CONTROL_URL, payload), daemon=True).start()
+    if wait_for_ack:
+        _json_request(CONTROL_URL, payload)
+    else:
+        threading.Thread(target=_json_request, args=(CONTROL_URL, payload), daemon=True).start()
 
 
 def _progress_callback(record: JobRecord):
@@ -312,9 +315,23 @@ def process_job(payload: dict[str, Any], record: JobRecord) -> None:
                 record.result = result
                 STATE.loaded_family = record.task_family
         if record.status == "cancelled":
-            emit_event("job_cancelled", jobId=record.job_id, taskFamily=record.task_family)
+            emit_event(
+                "job_cancelled",
+                wait_for_ack=True,
+                jobId=record.job_id,
+                taskFamily=record.task_family,
+            )
         else:
-            emit_event("job_completed", jobId=record.job_id, taskFamily=record.task_family, result=result)
+            # Commit the durable terminal result before the pod announces that
+            # it is idle. Otherwise independent callback threads can arrive in
+            # reverse order and delay dispatch until the next heartbeat.
+            emit_event(
+                "job_completed",
+                wait_for_ack=True,
+                jobId=record.job_id,
+                taskFamily=record.task_family,
+                result=result,
+            )
     except Exception as exc:
         cancelled = _cancel_requested(record)
         fatal = not cancelled and _is_fatal_runtime_error(exc)
@@ -327,10 +344,16 @@ def process_job(payload: dict[str, Any], record: JobRecord) -> None:
                 "type": type(exc).__name__,
             }
         if cancelled:
-            emit_event("job_cancelled", jobId=record.job_id, taskFamily=record.task_family)
+            emit_event(
+                "job_cancelled",
+                wait_for_ack=True,
+                jobId=record.job_id,
+                taskFamily=record.task_family,
+            )
         else:
             emit_event(
                 "job_failed",
+                wait_for_ack=True,
                 jobId=record.job_id,
                 taskFamily=record.task_family,
                 error=record.error,
