@@ -78,7 +78,7 @@ class ImagePodState:
         self.terminate_after: float | None = None
         self.idle_timeout_seconds = DEFAULT_IDLE_TIMEOUT
 
-    def mark_idle(self) -> None:
+    def mark_idle(self, job_id: str | None = None) -> None:
         now = time.time()
         with self.lock:
             if self.draining or self.worker_status == "unhealthy":
@@ -89,6 +89,7 @@ class ImagePodState:
             self.terminate_after = now + self.idle_timeout_seconds
         emit_event(
             "worker_idle",
+            jobId=job_id,
             idleSince=now,
             idleTimeoutSeconds=self.idle_timeout_seconds,
             terminateAfter=now + self.idle_timeout_seconds,
@@ -223,7 +224,7 @@ def _json_request(url: str, payload: dict[str, Any], timeout: int = 10) -> None:
     )
 
 
-def emit_event(event_type: str, *, wait_for_ack: bool = False, **fields: Any) -> None:
+def emit_event(event_type: str, **fields: Any) -> None:
     if not CONTROL_URL:
         return
     payload: dict[str, Any] = {
@@ -235,10 +236,7 @@ def emit_event(event_type: str, *, wait_for_ack: bool = False, **fields: Any) ->
         "timestampMs": int(time.time() * 1000),
     }
     payload.update(fields)
-    if wait_for_ack:
-        _json_request(CONTROL_URL, payload)
-    else:
-        threading.Thread(target=_json_request, args=(CONTROL_URL, payload), daemon=True).start()
+    threading.Thread(target=_json_request, args=(CONTROL_URL, payload), daemon=True).start()
 
 
 def _progress_callback(record: JobRecord):
@@ -315,23 +313,9 @@ def process_job(payload: dict[str, Any], record: JobRecord) -> None:
                 record.result = result
                 STATE.loaded_family = record.task_family
         if record.status == "cancelled":
-            emit_event(
-                "job_cancelled",
-                wait_for_ack=True,
-                jobId=record.job_id,
-                taskFamily=record.task_family,
-            )
+            emit_event("job_cancelled", jobId=record.job_id, taskFamily=record.task_family)
         else:
-            # Commit the durable terminal result before the pod announces that
-            # it is idle. Otherwise independent callback threads can arrive in
-            # reverse order and delay dispatch until the next heartbeat.
-            emit_event(
-                "job_completed",
-                wait_for_ack=True,
-                jobId=record.job_id,
-                taskFamily=record.task_family,
-                result=result,
-            )
+            emit_event("job_completed", jobId=record.job_id, taskFamily=record.task_family, result=result)
     except Exception as exc:
         cancelled = _cancel_requested(record)
         fatal = not cancelled and _is_fatal_runtime_error(exc)
@@ -344,16 +328,10 @@ def process_job(payload: dict[str, Any], record: JobRecord) -> None:
                 "type": type(exc).__name__,
             }
         if cancelled:
-            emit_event(
-                "job_cancelled",
-                wait_for_ack=True,
-                jobId=record.job_id,
-                taskFamily=record.task_family,
-            )
+            emit_event("job_cancelled", jobId=record.job_id, taskFamily=record.task_family)
         else:
             emit_event(
                 "job_failed",
-                wait_for_ack=True,
                 jobId=record.job_id,
                 taskFamily=record.task_family,
                 error=record.error,
@@ -367,7 +345,7 @@ def process_job(payload: dict[str, Any], record: JobRecord) -> None:
         if fatal:
             STATE.mark_unhealthy(record.error["message"] if record.error else "fatal runtime error")
         else:
-            STATE.mark_idle()
+            STATE.mark_idle(record.job_id)
 
 
 def idle_watchdog() -> None:
@@ -471,9 +449,15 @@ def bootstrap() -> None:
             details = dict(readiness())
             if not details.get("ready"):
                 raise RuntimeError(f"Krea2 runtime assets not ready: {details}")
+        # Match the proven Enhancer lifecycle: worker_ready is the only boot
+        # event. A worker_idle event is emitted only after a real job, with its
+        # job ID, so startup cannot schedule duplicate dispatches or start idle
+        # deletion accounting before the pod has served work.
         with STATE.lock:
             STATE.worker_status = "idle"
-        STATE.mark_idle()
+            STATE.current_job_id = None
+            STATE.idle_since = None
+            STATE.terminate_after = None
         emit_event("worker_ready", taskFamilies=supported_task_families(), readyAt=time.time())
     except Exception as exc:
         STATE.mark_unhealthy(str(exc))
