@@ -14,6 +14,7 @@ from .r2_store import upload_file
 from .vfi_postprocess import interpolate_file
 from .video_encoder import normalize_video_encoder, video_encoder_args, video_encoder_failure_code
 from .video_geometry import ffmpeg_center_crop_filter, target_dimensions
+from .video_parts import prepare_exact_source
 
 FLASH_ROOT = Path(os.environ.get("FLASHVSR_ROOT", "/opt/FlashVSR"))
 SCRIPT = FLASH_ROOT / "examples/WanVSR/infer_flashvsr_v1.1_tiny_long_video.py"
@@ -93,9 +94,14 @@ def run_video_upscale(job: dict[str, Any], cancel_event, progress: Progress) -> 
     if not torch.cuda.is_bf16_supported(): raise RuntimeError("GPU_CAPABILITY_MISMATCH:BF16")
 
     with tempfile.TemporaryDirectory(prefix="sb-flashvsr-") as tmp:
-        root = Path(tmp); source = root / "input.mp4"; flash_raw = root / "flash.mp4"; temporal = root / "temporal.mp4"; final = root / "final.mp4"
+        root = Path(tmp); source = root / "input.mp4"; selected = root / "selected.mkv"; flash_raw = root / "flash.mp4"; temporal = root / "temporal.mp4"; final = root / "final.mp4"
         progress("downloading", 3, None); _download(source_url, source)
         source_probe = _probe(source)
+        speed = float(settings.get("directorSpeed") or 1.0); timing_baked = bool(settings.get("smoothSlowMotion") or settings.get("timingBaked"))
+        progress("trimming", 5, None)
+        prepared = prepare_exact_source(source, selected, (job.get("input") or {}).get("parts"), source_duration_ms=source_probe["duration"] * 1000,
+                                        has_audio=source_probe["hasAudio"], timing_baked=timing_baked, speed=speed)
+        work_source = prepared.path; source_probe = _probe(work_source)
         target_w, target_h = target_dimensions(
             str(settings.get("targetResolution") or "1080p"),
             settings.get("aspectRatio") or settings.get("aspect_ratio"),
@@ -106,7 +112,7 @@ def run_video_upscale(job: dict[str, Any], cancel_event, progress: Progress) -> 
         progress("preparing_model", 10, {"precision": "bf16", "scale": scale, "videoEncoder": video_encoder})
         pipe = _pipe(); mod = _module()
         if cancel_event.is_set(): raise RuntimeError("CANCELLED")
-        lq, th, tw, frame_count, fps = mod.prepare_input_tensor(str(source), scale=scale, dtype=torch.bfloat16, device="cuda")
+        lq, th, tw, frame_count, fps = mod.prepare_input_tensor(str(work_source), scale=scale, dtype=torch.bfloat16, device="cuda")
         if not lq.is_cuda:
             # Official helper currently assembles on CPU; move as one explicit GPU boundary.
             lq = lq.to("cuda", dtype=torch.bfloat16)
@@ -120,7 +126,6 @@ def run_video_upscale(job: dict[str, Any], cancel_event, progress: Progress) -> 
         frames = mod.tensor2video(video); mod.save_video(frames, str(flash_raw), fps=fps, quality=5)
         del video, lq, frames; torch.cuda.empty_cache()
 
-        speed = float(settings.get("directorSpeed") or 1.0); timing_baked = bool(settings.get("smoothSlowMotion") or settings.get("timingBaked"))
         target_fps = int(settings.get("targetFps") or 0)
         base_for_finish = flash_raw
         vfi_meta: dict[str, Any] = {"neuralVfi": False, "videoEncoder": video_encoder}
@@ -129,16 +134,17 @@ def run_video_upscale(job: dict[str, Any], cancel_event, progress: Progress) -> 
             vfi_meta = interpolate_file(flash_raw, temporal, target_fps=target_fps, playback_speed=speed,
                                         timing_baked=timing_baked, interpolation_model=interpolation,
                                         cq=int(settings.get("nvencCq") or 17), cancel_event=cancel_event, progress=progress,
-                                        settings=settings, output_width=target_w, output_height=target_h)
+                                        settings=settings, output_width=target_w, output_height=target_h,
+                                        hard_cut_after_ms=prepared.source_breaks_ms)
             base_for_finish = temporal
         progress("encoding", 91, {"videoEncoder": video_encoder})
-        _finish_video(base_for_finish, source, final, target_w, target_h, speed=speed,
+        _finish_video(base_for_finish, work_source, final, target_w, target_h, speed=speed,
                       timing_baked=timing_baked and not target_fps, has_audio=source_probe["hasAudio"], settings=settings)
         # interpolate_file changes video timing but intentionally emits video-only;
         # mux/stretches audio here when VFI ran.
         if target_fps and source_probe["hasAudio"]:
             remux = root / "remux.mp4"
-            args = ["ffmpeg", "-v", "error", "-i", str(final), "-i", str(source), "-map", "0:v:0", "-map", "1:a:0?", "-c:v", "copy"]
+            args = ["ffmpeg", "-v", "error", "-i", str(final), "-i", str(work_source), "-map", "0:v:0", "-map", "1:a:0?", "-c:v", "copy"]
             if timing_baked and not math.isclose(speed, 1.0): args += ["-filter:a", _atempo(speed), "-c:a", "aac", "-b:a", "192k"]
             else: args += ["-c:a", "copy"]
             args += ["-shortest", "-tag:v", "hvc1", "-y", str(remux)]
@@ -148,4 +154,4 @@ def run_video_upscale(job: dict[str, Any], cancel_event, progress: Progress) -> 
         return {**stored, "runtime": "scenebuilder-enhancer-quality", "modelFamily": "flashvsr-v1.1", "precision": "bf16",
                 "interpolationModel": "rife-4.9" if vfi_meta.get("neuralVfi") else "none", "videoEncoder": video_encoder,
                 "targetFps": target_fps or fps, "timingBaked": timing_baked, "sourceSpeed": speed,
-                "durationMs": round(final_probe["duration"] * 1000), "width": target_w, "height": target_h}
+                "durationMs": round(final_probe["duration"] * 1000), "width": target_w, "height": target_h, "parts": prepared.parts}

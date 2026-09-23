@@ -19,6 +19,7 @@ from .r2_store import upload_file
 from .engine_runtime import is_fatal_cuda_error, try_interpolate_rife_trt, try_upscale_bgr_trt
 from .video_encoder import normalize_video_encoder, video_encoder_args, video_encoder_failure_code
 from .video_geometry import center_crop_to_aspect, target_dimensions
+from .video_parts import prepare_exact_source
 
 Progress = Callable[[str, float, dict[str, Any] | None], None]
 
@@ -111,8 +112,12 @@ def run_fast_video(job: dict[str, Any], cancel_event, progress: Progress) -> dic
     video_encoder = normalize_video_encoder(settings)
 
     with tempfile.TemporaryDirectory(prefix="sb-enhancer-video-") as tmp:
-        root = Path(tmp); source = root / "input.mp4"; video_only = root / "video.mp4"; final = root / "final.mp4"
+        root = Path(tmp); source = root / "input.mp4"; selected = root / "selected.mkv"; video_only = root / "video.mp4"; final = root / "final.mp4"
         progress("downloading", 3, None); _download(source_url, source); probe = _probe(source)
+        progress("trimming", 5, None)
+        prepared = prepare_exact_source(source, selected, input_data.get("parts"), source_duration_ms=probe.duration * 1000,
+                                        has_audio=probe.has_audio, timing_baked=timing_baked, speed=speed)
+        work_source = prepared.path; probe = _probe(work_source)
         out_w, out_h = target_dimensions(
             str(settings.get("targetResolution") or "1080p"),
             settings.get("aspectRatio") or settings.get("aspect_ratio"),
@@ -120,11 +125,11 @@ def run_fast_video(job: dict[str, Any], cancel_event, progress: Progress) -> dic
             fallback_height=probe.height,
         )
         fps_out = float(target_fps or probe.fps or 24.0); encoder = _open_encoder(video_only, out_w, out_h, fps_out, settings); assert encoder.stdin is not None
-        container = av.open(str(source)); stream = container.streams.video[0]; time_base = float(stream.time_base); frames = iter(container.decode(stream))
+        container = av.open(str(work_source)); stream = container.streams.video[0]; time_base = float(stream.time_base); frames = iter(container.decode(stream))
         try: first = next(frames)
         except StopIteration: raise RuntimeError("FFMPEG_DECODE_FAILED:no frames")
         prev_raw = first.to_ndarray(format="bgr24"); prev_pts = float(first.pts or 0) * time_base; prev_sr = _spatial(prev_raw, model_name, out_w, out_h, settings)
-        next_output_t = 0.0; emitted = 0; decoded = 1; effective_speed = speed if timing_baked else 1.0
+        next_output_t = 0.0; emitted = 0; decoded = 1; effective_speed = speed if timing_baked else 1.0; break_index = 0
         nominal_source_fps = probe.fps or float(stream.average_rate or 24.0); neural_vfi = interpolation in {"rife-4.9", "rife"} and fps_out > nominal_source_fps * effective_speed + 1e-6
         def emit(frame: np.ndarray) -> None:
             nonlocal emitted
@@ -134,7 +139,10 @@ def run_fast_video(job: dict[str, Any], cancel_event, progress: Progress) -> dic
             if cancel_event.is_set(): raise RuntimeError("CANCELLED")
             cur_raw = current.to_ndarray(format="bgr24"); cur_pts = float(current.pts if current.pts is not None else decoded) * time_base
             if cur_pts <= prev_pts: cur_pts = prev_pts + 1.0 / nominal_source_fps
-            cur_sr = _spatial(cur_raw, model_name, out_w, out_h, settings); cut = _hard_cut(prev_raw, cur_raw)
+            cur_sr = _spatial(cur_raw, model_name, out_w, out_h, settings)
+            forced_cut = break_index < len(prepared.source_breaks_ms) and cur_pts * 1000 >= prepared.source_breaks_ms[break_index] - 0.5
+            if forced_cut: break_index += 1
+            cut = forced_cut or _hard_cut(prev_raw, cur_raw)
             while next_output_t * effective_speed <= cur_pts + 1e-9:
                 src_t = next_output_t * effective_speed
                 if src_t < prev_pts - 1e-9: next_output_t += 1.0 / fps_out; continue
@@ -157,6 +165,6 @@ def run_fast_video(job: dict[str, Any], cancel_event, progress: Progress) -> dic
         while next_output_t < output_duration - 1e-9: emit(prev_sr); next_output_t += 1.0 / fps_out
         container.close(); encoder.stdin.close()
         if encoder.wait(timeout=600) != 0: raise RuntimeError(video_encoder_failure_code(settings))
-        progress("encoding", 88, {"frames": emitted, "targetFps": fps_out, "videoEncoder": video_encoder}); _mux_audio(video_only, source, final, speed=speed, timing_baked=timing_baked, has_audio=probe.has_audio)
+        progress("encoding", 88, {"frames": emitted, "targetFps": fps_out, "videoEncoder": video_encoder}); _mux_audio(video_only, work_source, final, speed=speed, timing_baked=timing_baked, has_audio=probe.has_audio)
         progress("uploading", 94, None); stored = upload_file(final, output_key, "video/mp4"); final_probe = _probe(final); progress("completed", 100, None)
-        return {**stored, "runtime":"scenebuilder-enhancer-fast", "modelFamily":model_name, "interpolationModel":"rife-4.9" if neural_vfi else "none", "videoEncoder":video_encoder, "targetFps":fps_out, "timingBaked":timing_baked, "sourceSpeed":speed, "durationMs":round(final_probe.duration * 1000), "width":out_w, "height":out_h, "frames":emitted}
+        return {**stored, "runtime":"scenebuilder-enhancer-fast", "modelFamily":model_name, "interpolationModel":"rife-4.9" if neural_vfi else "none", "videoEncoder":video_encoder, "targetFps":fps_out, "timingBaked":timing_baked, "sourceSpeed":speed, "durationMs":round(final_probe.duration * 1000), "width":out_w, "height":out_h, "frames":emitted, "parts":prepared.parts}

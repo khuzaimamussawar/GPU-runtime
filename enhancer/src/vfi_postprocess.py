@@ -46,6 +46,7 @@ def interpolate_file(
     settings: dict[str, Any] | None = None,
     output_width: int | None = None,
     output_height: int | None = None,
+    hard_cut_after_ms: list[float] | None = None,
 ) -> dict[str, Any]:
     if target_fps not in {30, 48, 60}:
         raise ValueError("target_fps must be 30, 48, or 60")
@@ -72,7 +73,7 @@ def interpolate_file(
     neural = model != "none" and target_fps > nominal_fps * effective_speed + 1e-6
     prev = first_arr
     prev_t = float(first.pts * stream.time_base) if first.pts is not None else 0.0
-    next_out = 0.0; emitted = 0; decoded = 1
+    next_out = 0.0; emitted = 0; decoded = 1; hard_cuts = list(hard_cut_after_ms or []); hard_cut_index = 0
 
     def emit(frame: np.ndarray) -> None:
         nonlocal emitted
@@ -87,7 +88,9 @@ def interpolate_file(
         current_t = float(frame.pts * stream.time_base) if frame.pts is not None else prev_t + last_interval
         if current_t <= prev_t: current_t = prev_t + last_interval
         last_interval = current_t - prev_t
-        cut = _hard_cut(prev, current)
+        forced_cut = hard_cut_index < len(hard_cuts) and current_t * 1000 >= hard_cuts[hard_cut_index] - 0.5
+        if forced_cut: hard_cut_index += 1
+        cut = forced_cut or _hard_cut(prev, current)
         while next_out * effective_speed <= current_t + 1e-9:
             src_t = next_out * effective_speed
             if src_t < prev_t - 1e-9:
