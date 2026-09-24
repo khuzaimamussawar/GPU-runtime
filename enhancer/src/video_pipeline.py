@@ -129,7 +129,11 @@ def run_fast_video(job: dict[str, Any], cancel_event, progress: Progress) -> dic
         try: first = next(frames)
         except StopIteration: raise RuntimeError("FFMPEG_DECODE_FAILED:no frames")
         prev_raw = first.to_ndarray(format="bgr24"); prev_pts = float(first.pts or 0) * time_base; prev_sr = _spatial(prev_raw, model_name, out_w, out_h, settings)
-        next_output_t = 0.0; emitted = 0; decoded = 1; effective_speed = speed if timing_baked else 1.0; break_index = 0
+        next_output_t = 0.0; emitted = 0; decoded = 1
+        # prepare_exact_source has already stretched exact Director windows for
+        # normal 1x output and the existing slow-motion path. Do not apply the
+        # source speed a second time here.
+        effective_speed = 1.0 if prepared.timing_baked else (speed if timing_baked else 1.0); break_index = 0
         nominal_source_fps = probe.fps or float(stream.average_rate or 24.0); neural_vfi = interpolation in {"rife-4.9", "rife"} and fps_out > nominal_source_fps * effective_speed + 1e-6
         def emit(frame: np.ndarray) -> None:
             nonlocal emitted
@@ -165,6 +169,6 @@ def run_fast_video(job: dict[str, Any], cancel_event, progress: Progress) -> dic
         while next_output_t < output_duration - 1e-9: emit(prev_sr); next_output_t += 1.0 / fps_out
         container.close(); encoder.stdin.close()
         if encoder.wait(timeout=600) != 0: raise RuntimeError(video_encoder_failure_code(settings))
-        progress("encoding", 88, {"frames": emitted, "targetFps": fps_out, "videoEncoder": video_encoder}); _mux_audio(video_only, work_source, final, speed=speed, timing_baked=timing_baked, has_audio=probe.has_audio)
+        progress("encoding", 88, {"frames": emitted, "targetFps": fps_out, "videoEncoder": video_encoder}); _mux_audio(video_only, work_source, final, speed=1.0 if prepared.timing_baked else speed, timing_baked=timing_baked and not prepared.timing_baked, has_audio=probe.has_audio)
         progress("uploading", 94, None); stored = upload_file(final, output_key, "video/mp4"); final_probe = _probe(final); progress("completed", 100, None)
-        return {**stored, "runtime":"scenebuilder-enhancer-fast", "modelFamily":model_name, "interpolationModel":"rife-4.9" if neural_vfi else "none", "videoEncoder":video_encoder, "targetFps":fps_out, "timingBaked":timing_baked, "sourceSpeed":speed, "durationMs":round(final_probe.duration * 1000), "width":out_w, "height":out_h, "frames":emitted, "parts":prepared.parts}
+        return {**stored, "runtime":"scenebuilder-enhancer-fast", "modelFamily":model_name, "interpolationModel":"rife-4.9" if neural_vfi else "none", "videoEncoder":video_encoder, "targetFps":fps_out, "timingBaked":prepared.timing_baked or timing_baked, "sourceSpeed":speed, "durationMs":round(final_probe.duration * 1000), "width":out_w, "height":out_h, "frames":emitted, "parts":prepared.parts}

@@ -14,7 +14,7 @@ from .r2_store import upload_file
 from .vfi_postprocess import interpolate_file
 from .video_encoder import normalize_video_encoder, video_encoder_args, video_encoder_failure_code
 from .video_geometry import ffmpeg_center_crop_filter, target_dimensions
-from .video_parts import prepare_exact_source
+from .video_parts import prepare_exact_source, retime_video_to_director_parts
 
 FLASH_ROOT = Path(os.environ.get("FLASHVSR_ROOT", "/opt/FlashVSR"))
 SCRIPT = FLASH_ROOT / "examples/WanVSR/infer_flashvsr_v1.1_tiny_long_video.py"
@@ -129,23 +129,38 @@ def run_video_upscale(job: dict[str, Any], cancel_event, progress: Progress) -> 
         target_fps = int(settings.get("targetFps") or 0)
         base_for_finish = flash_raw
         vfi_meta: dict[str, Any] = {"neuralVfi": False, "videoEncoder": video_encoder}
+        # Keep the existing genuine RIFE slow-motion pass for a selected 0.x
+        # speed. The exact Director-window pass below only removes residual
+        # frame rounding after those generated frames exist.
+        vfi_bakes_slow_motion = bool(target_fps and timing_baked and prepared.timing_baked)
         if target_fps:
             progress("interpolating", 72, {"model": interpolation, "targetFps": target_fps, "videoEncoder": video_encoder})
-            vfi_meta = interpolate_file(flash_raw, temporal, target_fps=target_fps, playback_speed=speed,
-                                        timing_baked=timing_baked, interpolation_model=interpolation,
+            vfi_meta = interpolate_file(flash_raw, temporal, target_fps=target_fps,
+                                        playback_speed=speed if vfi_bakes_slow_motion else (1.0 if prepared.timing_baked else speed),
+                                        timing_baked=vfi_bakes_slow_motion or (timing_baked and not prepared.timing_baked), interpolation_model=interpolation,
                                         cq=int(settings.get("nvencCq") or 17), cancel_event=cancel_event, progress=progress,
                                         settings=settings, output_width=target_w, output_height=target_h,
-                                        hard_cut_after_ms=prepared.source_breaks_ms)
+                                        hard_cut_after_ms=prepared.raw_source_breaks_ms)
             base_for_finish = temporal
+        if prepared.timing_baked:
+            retimed = root / "retimed.mkv"
+            base_for_finish = retime_video_to_director_parts(
+                base_for_finish,
+                retimed,
+                prepared,
+                input_timing_scale=(1.0 / speed) if vfi_bakes_slow_motion else 1.0,
+            )
         progress("encoding", 91, {"videoEncoder": video_encoder})
-        _finish_video(base_for_finish, work_source, final, target_w, target_h, speed=speed,
-                      timing_baked=timing_baked and not target_fps, has_audio=source_probe["hasAudio"], settings=settings)
+        _finish_video(base_for_finish, work_source, final, target_w, target_h,
+                      speed=1.0 if prepared.timing_baked else speed,
+                      timing_baked=timing_baked and not target_fps and not prepared.timing_baked,
+                      has_audio=source_probe["hasAudio"], settings=settings)
         # interpolate_file changes video timing but intentionally emits video-only;
         # mux/stretches audio here when VFI ran.
         if target_fps and source_probe["hasAudio"]:
             remux = root / "remux.mp4"
             args = ["ffmpeg", "-v", "error", "-i", str(final), "-i", str(work_source), "-map", "0:v:0", "-map", "1:a:0?", "-c:v", "copy"]
-            if timing_baked and not math.isclose(speed, 1.0): args += ["-filter:a", _atempo(speed), "-c:a", "aac", "-b:a", "192k"]
+            if timing_baked and not prepared.timing_baked and not math.isclose(speed, 1.0): args += ["-filter:a", _atempo(speed), "-c:a", "aac", "-b:a", "192k"]
             else: args += ["-c:a", "copy"]
             args += ["-shortest", "-tag:v", "hvc1", "-y", str(remux)]
             subprocess.run(args, check=True, timeout=600); remux.replace(final)
@@ -153,5 +168,5 @@ def run_video_upscale(job: dict[str, Any], cancel_event, progress: Progress) -> 
         final_probe = _probe(final); progress("completed", 100, None)
         return {**stored, "runtime": "scenebuilder-enhancer-quality", "modelFamily": "flashvsr-v1.1", "precision": "bf16",
                 "interpolationModel": "rife-4.9" if vfi_meta.get("neuralVfi") else "none", "videoEncoder": video_encoder,
-                "targetFps": target_fps or fps, "timingBaked": timing_baked, "sourceSpeed": speed,
+                "targetFps": target_fps or fps, "timingBaked": prepared.timing_baked or timing_baked, "sourceSpeed": speed,
                 "durationMs": round(final_probe["duration"] * 1000), "width": target_w, "height": target_h, "parts": prepared.parts}
