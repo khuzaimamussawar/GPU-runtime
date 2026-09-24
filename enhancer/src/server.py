@@ -33,6 +33,9 @@ _CURRENT_JOB_ID: str | None = None
 _IDLE_SINCE: float | None = None
 _IDLE_TIMEOUT_SENT = False
 _DRAINING = False
+_CALLBACK_LOCK = threading.Lock()
+_PROGRESS_CALLBACK_IN_FLIGHT = False
+_PENDING_PROGRESS_CALLBACK: dict[str, Any] | None = None
 
 
 def config() -> RuntimeConfig:
@@ -133,7 +136,36 @@ def _event(event_type: str, **extra: Any) -> None:
         "timestamp": time.time(),
         **extra,
     }
+    if event_type == "job_progress":
+        _queue_progress_callback(payload)
+        return
     threading.Thread(target=_post_event_background, args=(event_type, payload), daemon=True, name=f"enhancer-callback-{event_type}").start()
+
+
+def _queue_progress_callback(payload: dict[str, Any]) -> None:
+    """Coalesce progress delivery without delaying terminal lifecycle events."""
+    global _PROGRESS_CALLBACK_IN_FLIGHT, _PENDING_PROGRESS_CALLBACK
+    with _CALLBACK_LOCK:
+        _PENDING_PROGRESS_CALLBACK = payload
+        if _PROGRESS_CALLBACK_IN_FLIGHT:
+            return
+        _PROGRESS_CALLBACK_IN_FLIGHT = True
+    threading.Thread(target=_drain_progress_callbacks, daemon=True, name="enhancer-callback-progress").start()
+
+
+def _drain_progress_callbacks() -> None:
+    global _PROGRESS_CALLBACK_IN_FLIGHT, _PENDING_PROGRESS_CALLBACK
+    while True:
+        with _CALLBACK_LOCK:
+            payload = _PENDING_PROGRESS_CALLBACK
+            _PENDING_PROGRESS_CALLBACK = None
+        if payload is not None:
+            _post_event_background("job_progress", payload)
+        with _CALLBACK_LOCK:
+            if _PENDING_PROGRESS_CALLBACK is not None:
+                continue
+            _PROGRESS_CALLBACK_IN_FLIGHT = False
+            return
 
 
 def _post_event_background(event_type: str, payload: dict[str, Any]) -> None:

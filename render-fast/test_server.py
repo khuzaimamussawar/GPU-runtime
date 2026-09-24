@@ -138,6 +138,55 @@ class RenderFastSchedulerTests(unittest.TestCase):
         self.assertEqual(buffer.take(0, lambda: None), b"frame!")
         self.assertIsNone(buffer.error(0))
 
+    def test_segment_validation_tolerates_fractional_frame_duration(self) -> None:
+        settings = {"width": 3840, "height": 2160, "fps": 48}
+        probe = {"codec": "h264", "width": 3840, "height": 2160, "averageFps": 48, "durationSeconds": 5.1875}
+        SERVER.validate_rendered_segment(0, probe, 5.193, settings)
+
+    def test_segment_validation_rejects_materially_short_video(self) -> None:
+        settings = {"width": 3840, "height": 2160, "fps": 48}
+        probe = {"codec": "h264", "width": 3840, "height": 2160, "averageFps": 48, "durationSeconds": 2.75}
+        with self.assertRaisesRegex(SERVER.RenderError, "duration"):
+            SERVER.validate_rendered_segment(0, probe, 5.193, settings)
+
+    def test_active_fast_path_encodes_serial_nvenc_segments_then_stream_copies(self) -> None:
+        job = {
+            "jobId": "segment-job",
+            "clips": [{"id": "clip-1", "type": "video", "url": "https://example.invalid/clip.mp4", "sceneDuration": 1.5, "speed": 1}],
+            "settings": {
+                "width": 1920, "height": 1080, "fps": 48, "codec": "h265", "cq": 19,
+                "preset": "p6", "_ffmpegThreads": 2, "_parallelClipWorkers": 5,
+                "_providerAllocatedVcpus": 16, "_detectedVcpus": 48, "_physicalVcpus": 16,
+            },
+        }
+        commands = []
+        events = []
+
+        def fake_run(_job_id, command, label, _on_poll=None):
+            commands.append((label, command))
+
+        with mock.patch.object(SERVER, "run_job_command", side_effect=fake_run), \
+                mock.patch.object(SERVER, "probe_visual_clip", return_value={"sourceAvailable": True, "averageFps": 48}), \
+                mock.patch.object(SERVER, "probe_rendered_segment", return_value={"codec": "hevc", "width": 1920, "height": 1080, "averageFps": 48, "durationSeconds": 1.5, "frameCount": 72}), \
+                mock.patch.object(SERVER, "emit", side_effect=lambda event, **fields: events.append((event, fields))), \
+                mock.patch.object(SERVER, "gpu_stats", return_value={}), \
+                mock.patch.object(Path, "write_text", return_value=1):
+            output, _peak = SERVER.render_video(job, None, Path("test-work"))
+
+        self.assertEqual(output.name, "video.mp4")
+        segment_command = commands[0][1]
+        self.assertIn("hevc_nvenc", segment_command)
+        self.assertIn("19", segment_command)
+        self.assertNotIn("rawvideo", segment_command)
+        self.assertNotIn("pipe:0", segment_command)
+        concat_command = commands[1][1]
+        self.assertIn("concat", concat_command)
+        self.assertEqual(concat_command[concat_command.index("-c") + 1], "copy")
+        scheduler = next(fields for event, fields in events if event == "job_metric" and fields["metric"]["phase"] == "video_scheduler")
+        self.assertEqual(scheduler["metric"]["details"]["visualPreparationMode"], "serial_nvenc_segments")
+        self.assertEqual(scheduler["metric"]["details"]["parallelClipWorkersConfigured"], 5)
+        self.assertEqual(scheduler["metric"]["details"]["parallelClipWorkersActive"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
