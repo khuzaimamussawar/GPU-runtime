@@ -14,7 +14,7 @@ from .r2_store import upload_file
 from .vfi_postprocess import interpolate_file
 from .video_encoder import normalize_video_encoder, video_encoder_args, video_encoder_failure_code
 from .video_geometry import ffmpeg_center_crop_filter, target_dimensions
-from .video_parts import prepare_exact_source, retime_video_to_director_parts
+from .video_parts import prepare_exact_source, probe_video_frame_count, retime_video_to_director_parts
 
 FLASH_ROOT = Path(os.environ.get("FLASHVSR_ROOT", "/opt/FlashVSR"))
 SCRIPT = FLASH_ROOT / "examples/WanVSR/infer_flashvsr_v1.1_tiny_long_video.py"
@@ -63,19 +63,33 @@ def _atempo(speed: float) -> str:
     return ",".join(f"atempo={value:.8f}" for value in stages)
 
 
-def _finish_video(video: Path, source: Path, output: Path, width: int, height: int, *, speed: float, timing_baked: bool, has_audio: bool, settings: dict[str, Any]) -> None:
+def _finish_video(video: Path, source: Path, output: Path, width: int, height: int, *, speed: float, timing_baked: bool, has_audio: bool, settings: dict[str, Any], minimum_frames: int, output_fps: float) -> int:
+    input_frames = probe_video_frame_count(video)
+    if input_frames <= 0: raise RuntimeError("ENHANCER_TIMING_PROBE_FAILED:quality input has no frames")
+    missing_frames = max(0, int(minimum_frames) - input_frames)
+    # This is already Quality's final delivery encode.  If the retained trim
+    # ended between CFR frames, append clones here instead of a second pass or
+    # a stream-copy concat.  One safety frame ensures ffmpeg timestamp rounding
+    # cannot turn a fractional endpoint into an under-run.
+    video_filter = ffmpeg_center_crop_filter(width, height)
+    if missing_frames:
+        pad_seconds = (missing_frames + 1) / max(0.001, float(output_fps))
+        video_filter = f"tpad=stop_mode=clone:stop_duration={pad_seconds:.9f},{video_filter}"
     args = ["ffmpeg", "-v", "error", "-i", str(video)]
     if has_audio: args += ["-i", str(source)]
     args += ["-map", "0:v:0"]
     if has_audio: args += ["-map", "1:a:0?"]
-    args += ["-vf", ffmpeg_center_crop_filter(width, height), *video_encoder_args(settings)]
+    args += ["-vf", video_filter, *video_encoder_args(settings)]
     if has_audio and timing_baked and not math.isclose(speed, 1.0): args += ["-filter:a", _atempo(speed), "-c:a", "aac", "-b:a", "192k"]
     elif has_audio: args += ["-c:a", "copy"]
-    args += ["-shortest", "-movflags", "+faststart", "-y", str(output)]
+    # Audio may end slightly before the CFR video endpoint; it must never
+    # truncate the visual Director window.
+    args += ["-movflags", "+faststart", "-y", str(output)]
     completed = subprocess.run(args, capture_output=True, text=True, timeout=1200, check=False)
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout or "no ffmpeg output")[-4000:]
         raise RuntimeError(f"{video_encoder_failure_code(settings)}:{detail}")
+    return input_frames
 
 
 def run_video_upscale(job: dict[str, Any], cancel_event, progress: Progress) -> dict[str, Any]:
@@ -150,11 +164,14 @@ def run_video_upscale(job: dict[str, Any], cancel_event, progress: Progress) -> 
                 prepared,
                 input_timing_scale=(1.0 / speed) if vfi_bakes_slow_motion else 1.0,
             )
-        progress("encoding", 91, {"videoEncoder": video_encoder})
-        _finish_video(base_for_finish, work_source, final, target_w, target_h,
+        final_fps = float(target_fps or fps or 24.0)
+        target_frames = prepared.minimum_output_frame_count(final_fps)
+        progress("encoding", 91, {"targetFrames": target_frames, "targetFps": final_fps, "videoEncoder": video_encoder})
+        input_frames = _finish_video(base_for_finish, work_source, final, target_w, target_h,
                       speed=1.0 if prepared.timing_baked else speed,
                       timing_baked=timing_baked and not target_fps and not prepared.timing_baked,
-                      has_audio=source_probe["hasAudio"], settings=settings)
+                      has_audio=source_probe["hasAudio"], settings=settings,
+                      minimum_frames=target_frames, output_fps=final_fps)
         # interpolate_file changes video timing but intentionally emits video-only;
         # mux/stretches audio here when VFI ran.
         if target_fps and source_probe["hasAudio"]:
@@ -162,11 +179,16 @@ def run_video_upscale(job: dict[str, Any], cancel_event, progress: Progress) -> 
             args = ["ffmpeg", "-v", "error", "-i", str(final), "-i", str(work_source), "-map", "0:v:0", "-map", "1:a:0?", "-c:v", "copy"]
             if timing_baked and not prepared.timing_baked and not math.isclose(speed, 1.0): args += ["-filter:a", _atempo(speed), "-c:a", "aac", "-b:a", "192k"]
             else: args += ["-c:a", "copy"]
-            args += ["-shortest", "-tag:v", "hvc1", "-y", str(remux)]
+            args += ["-tag:v", "hvc1", "-y", str(remux)]
             subprocess.run(args, check=True, timeout=600); remux.replace(final)
+        final_frames = probe_video_frame_count(final)
+        if final_frames < target_frames: raise RuntimeError(f"ENHANCER_TIMING_UNDERRUN:final={final_frames}:target={target_frames}")
+        tail_frames_added = max(0, final_frames - input_frames)
+        print(f"[enhancer] timing targetFrames={target_frames} encodedFrames={input_frames} tailFramesAdded={tail_frames_added} finalFrames={final_frames}", flush=True)
         progress("uploading", 96, None); stored = upload_file(final, output_key, "video/mp4")
         final_probe = _probe(final); progress("completed", 100, None)
         return {**stored, "runtime": "scenebuilder-enhancer-quality", "modelFamily": "flashvsr-v1.1", "precision": "bf16",
                 "interpolationModel": "rife-4.9" if vfi_meta.get("neuralVfi") else "none", "videoEncoder": video_encoder,
-                "targetFps": target_fps or fps, "timingBaked": prepared.timing_baked or timing_baked, "sourceSpeed": speed,
-                "durationMs": round(final_probe["duration"] * 1000), "width": target_w, "height": target_h, "parts": prepared.parts}
+                "targetFps": final_fps, "timingBaked": prepared.timing_baked or timing_baked, "sourceSpeed": speed,
+                "durationMs": round(final_probe["duration"] * 1000), "width": target_w, "height": target_h,
+                "timing":{"targetFrames":target_frames,"encodedFrames":input_frames,"tailFramesAdded":tail_frames_added,"finalFrames":final_frames}, "parts": prepared.parts}

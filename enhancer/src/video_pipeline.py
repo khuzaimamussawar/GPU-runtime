@@ -19,7 +19,7 @@ from .r2_store import upload_file
 from .engine_runtime import is_fatal_cuda_error, try_interpolate_rife_trt, try_upscale_bgr_trt
 from .video_encoder import normalize_video_encoder, video_encoder_args, video_encoder_failure_code
 from .video_geometry import center_crop_to_aspect, target_dimensions
-from .video_parts import prepare_exact_source
+from .video_parts import prepare_exact_source, probe_video_frame_count
 
 Progress = Callable[[str, float, dict[str, Any] | None], None]
 
@@ -93,7 +93,9 @@ def _mux_audio(video_only: Path, source: Path, output: Path, *, speed: float, ti
         while remaining > 2.0: stages.append(2.0); remaining /= 2.0
         stages.append(remaining); args += ["-filter:a", ",".join(f"atempo={value:.8f}" for value in stages), "-c:a", "aac", "-b:a", "192k"]
     else: args += ["-c:a", "copy"]
-    args += ["-c:v", "copy", "-shortest", "-tag:v", "hvc1", "-y", str(output)]
+    # The video stream is the authoritative Director duration.  -shortest can
+    # discard its final CFR frames when audio ends a fraction of a frame first.
+    args += ["-c:v", "copy", "-tag:v", "hvc1", "-y", str(output)]
     subprocess.run(args, check=True, timeout=600); video_only.unlink(missing_ok=True)
 
 
@@ -130,6 +132,7 @@ def run_fast_video(job: dict[str, Any], cancel_event, progress: Progress) -> dic
         except StopIteration: raise RuntimeError("FFMPEG_DECODE_FAILED:no frames")
         prev_raw = first.to_ndarray(format="bgr24"); prev_pts = float(first.pts or 0) * time_base; prev_sr = _spatial(prev_raw, model_name, out_w, out_h, settings)
         next_output_t = 0.0; emitted = 0; decoded = 1
+        target_frames = prepared.minimum_output_frame_count(fps_out)
         # prepare_exact_source has already stretched exact Director windows for
         # normal 1x output and the existing slow-motion path. Do not apply the
         # source speed a second time here.
@@ -167,8 +170,19 @@ def run_fast_video(job: dict[str, Any], cancel_event, progress: Progress) -> dic
             progress("interpolating" if neural_vfi else "upscaling", min(82.0, 8.0 + 74.0 * (cur_pts / max(probe.duration, cur_pts, 0.001))), {"decoded": decoded, "emitted": emitted, "videoEncoder": video_encoder})
         source_duration = probe.duration if probe.duration > 0 else prev_pts + 1.0 / nominal_source_fps; output_duration = source_duration / effective_speed
         while next_output_t < output_duration - 1e-9: emit(prev_sr); next_output_t += 1.0 / fps_out
+        # The trim filter can legally end between CFR frame boundaries.  Keep
+        # the existing frame stream, then clone only the already-upscaled last
+        # frame until the cumulative Director target is covered.
+        tail_frames_added = max(0, target_frames - emitted)
+        while emitted < target_frames: emit(prev_sr)
         container.close(); encoder.stdin.close()
         if encoder.wait(timeout=600) != 0: raise RuntimeError(video_encoder_failure_code(settings))
-        progress("encoding", 88, {"frames": emitted, "targetFps": fps_out, "videoEncoder": video_encoder}); _mux_audio(video_only, work_source, final, speed=1.0 if prepared.timing_baked else speed, timing_baked=timing_baked and not prepared.timing_baked, has_audio=probe.has_audio)
+        encoded_frames = probe_video_frame_count(video_only)
+        if encoded_frames < target_frames: raise RuntimeError(f"ENHANCER_TIMING_UNDERRUN:encoded={encoded_frames}:target={target_frames}")
+        progress("encoding", 88, {"frames": encoded_frames, "targetFrames": target_frames, "tailFramesAdded": tail_frames_added, "targetFps": fps_out, "videoEncoder": video_encoder})
+        _mux_audio(video_only, work_source, final, speed=1.0 if prepared.timing_baked else speed, timing_baked=timing_baked and not prepared.timing_baked, has_audio=probe.has_audio)
+        final_frames = probe_video_frame_count(final)
+        if final_frames < target_frames: raise RuntimeError(f"ENHANCER_TIMING_UNDERRUN:final={final_frames}:target={target_frames}")
+        print(f"[enhancer] timing targetFrames={target_frames} encodedFrames={encoded_frames} tailFramesAdded={tail_frames_added} finalFrames={final_frames}", flush=True)
         progress("uploading", 94, None); stored = upload_file(final, output_key, "video/mp4"); final_probe = _probe(final); progress("completed", 100, None)
-        return {**stored, "runtime":"scenebuilder-enhancer-fast", "modelFamily":model_name, "interpolationModel":"rife-4.9" if neural_vfi else "none", "videoEncoder":video_encoder, "targetFps":fps_out, "timingBaked":prepared.timing_baked or timing_baked, "sourceSpeed":speed, "durationMs":round(final_probe.duration * 1000), "width":out_w, "height":out_h, "frames":emitted, "parts":prepared.parts}
+        return {**stored, "runtime":"scenebuilder-enhancer-fast", "modelFamily":model_name, "interpolationModel":"rife-4.9" if neural_vfi else "none", "videoEncoder":video_encoder, "targetFps":fps_out, "timingBaked":prepared.timing_baked or timing_baked, "sourceSpeed":speed, "durationMs":round(final_probe.duration * 1000), "width":out_w, "height":out_h, "frames":final_frames, "timing":{"targetFrames":target_frames,"encodedFrames":encoded_frames,"tailFramesAdded":tail_frames_added,"finalFrames":final_frames}, "parts":prepared.parts}

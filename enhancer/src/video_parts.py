@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +15,33 @@ class PreparedVideo:
     raw_source_breaks_ms: list[float]
     timeline_parts: list[dict[str, float]]
     timing_baked: bool
+
+    def minimum_output_frame_count(self, fps: float) -> int:
+        """Return the non-short final frame count for this Director selection.
+
+        A Director endpoint is expressed in milliseconds and does not always
+        land exactly on a CFR frame boundary.  Always round the cumulative
+        endpoint up so every prepared part together covers the requested
+        timeline duration; never round a fractional final frame down.
+        """
+        safe_fps = max(0.001, float(fps))
+        output_end_ms = float(self.timeline_parts[-1]["outputEndMs"]) if self.timeline_parts else 0.0
+        return max(1, math.ceil((output_end_ms * safe_fps / 1000.0) - 1e-9))
+
+
+def probe_video_frame_count(path: Path) -> int:
+    """Decode-count a completed video stream for the final timing invariant."""
+    payload = subprocess.check_output([
+        "ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0",
+        "-show_entries", "stream=nb_read_frames", "-of", "json", str(path),
+    ], text=True)
+    import json
+    streams = json.loads(payload).get("streams") or []
+    value = (streams[0] if streams else {}).get("nb_read_frames")
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _number(value: Any, fallback: float) -> float:
