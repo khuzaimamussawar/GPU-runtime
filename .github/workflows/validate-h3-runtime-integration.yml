@@ -33,6 +33,8 @@ jobs:
         run: python3 -m compileall -q src
       - name: Check remote build script syntax
         run: bash -n scripts/remote_build.sh
+      - name: Regression test H3 FPS contract and routing parity
+        run: python3 scripts/test_h3_fps_contract.py
       - name: Validate pinned shared dependency targets
         run: |
           python3 - <<'PY'
