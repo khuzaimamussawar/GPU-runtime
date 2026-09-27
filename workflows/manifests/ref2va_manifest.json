@@ -18,6 +18,7 @@
     "width": "1.inputs.width",
     "height": "1.inputs.height",
     "lengthFrames": "1.inputs.length",
+    "fps": "15.inputs.fps",
     "referenceFit": "1.inputs.ref_image_size",
     "firstReferenceImage": "2.inputs.image",
     "clipName": "12.inputs.clip_name",

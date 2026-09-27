@@ -105,6 +105,8 @@ def prepare_workflow(workflow: dict[str, Any], manifest: dict[str, Any], job: H3
     set_path(prepared, required["width"], job.width)
     set_path(prepared, required["height"], job.height)
     set_path(prepared, required["lengthFrames"], normalize_frame_count(job))
+    if "fps" in required:
+        set_path(prepared, required["fps"], job.fps)
     set_path(prepared, required["diffusionModel"], model_files["diffusion"])
     set_path(prepared, required["clipName"], select_clip_name(model_files, settings))
     set_path(prepared, required["videoVae"], model_files["videoVae"])

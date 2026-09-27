@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+SUPPORTED_H3_FPS = (24, 30)
+
 
 @dataclass
 class H3Job:
@@ -42,7 +44,15 @@ def normalize_job(payload: dict[str, Any]) -> H3Job:
         width=int(payload["width"]),
         height=int(payload["height"]),
         duration_seconds=float(payload["durationSeconds"]),
-        fps=int(payload.get("fps", 24)),
+        fps=normalize_fps(payload.get("fps", 24)),
         settings=dict(payload.get("settings") or {}),
         inputs=dict(payload.get("inputs") or {}),
     )
+
+
+def normalize_fps(value: Any) -> int:
+    try:
+        fps = int(value)
+    except (TypeError, ValueError):
+        return 24
+    return fps if fps in SUPPORTED_H3_FPS else 24
