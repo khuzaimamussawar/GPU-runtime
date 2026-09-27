@@ -18,6 +18,7 @@
     "width": "3.inputs.width",
     "height": "3.inputs.height",
     "lengthFrames": "3.inputs.length",
+    "fps": "21.inputs.fps",
     "firstFrameImage": "4.inputs.image",
     "lastFrameImage": "5.inputs.image",
     "clipName": "9.inputs.clip_name",
