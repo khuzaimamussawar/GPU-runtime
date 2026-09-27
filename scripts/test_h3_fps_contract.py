@@ -1,5 +1,8 @@
 import json
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.common.job_contract import H3Job, normalize_fps
 from src.common.runtime_adapter import _round_h3_frames
